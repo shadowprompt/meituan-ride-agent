@@ -1,0 +1,26 @@
+{
+  "type": "Feature",
+  "properties": {
+    "coordinate_system": "WGS84",
+    "synthetic": true,
+    "verified": false,
+    "original_gps": false
+  },
+  "geometry": {
+    "type": "LineString",
+    "coordinates": [
+      [
+        0,
+        0.002
+      ],
+      [
+        0.001,
+        0.002
+      ],
+      [
+        0.001,
+        0.003
+      ]
+    ]
+  }
+}

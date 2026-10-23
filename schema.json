@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MeituanRideActivity",
+  "type": "object",
+  "required": ["source", "activity_type", "fields", "review"],
+  "properties": {
+    "source": {
+      "type": "object",
+      "required": ["platform", "input_type", "image_sha256"],
+      "properties": {
+        "platform": { "const": "meituan" },
+        "input_type": { "enum": ["screenshot", "screenshots"] },
+        "image_sha256": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "activity_type": { "const": "cycling" },
+    "fields": {
+      "type": "object",
+      "properties": {
+        "started_at": { "$ref": "#/$defs/evidenceField" },
+        "ended_at": { "$ref": "#/$defs/evidenceField" },
+        "duration_seconds": { "$ref": "#/$defs/evidenceField" },
+        "distance_meters": { "$ref": "#/$defs/evidenceField" },
+        "average_speed_mps": { "$ref": "#/$defs/evidenceField" },
+        "start_location": { "$ref": "#/$defs/evidenceField" },
+        "end_location": { "$ref": "#/$defs/evidenceField" },
+        "route_image_ref": { "$ref": "#/$defs/evidenceField" },
+        "extra_metrics": { "type": "object" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["status", "missing_fields", "confirmation_fields"],
+      "properties": {
+        "status": { "enum": ["accepted", "needs_confirmation", "rejected", "unsupported"] },
+        "missing_fields": { "type": "array", "items": { "type": "string" } },
+        "confirmation_fields": { "type": "array", "items": { "type": "string" } },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "$defs": {
+    "evidenceField": {
+      "type": "object",
+      "required": ["value", "confidence", "raw_text"],
+      "properties": {
+        "value": {},
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "raw_text": { "type": ["string", "null"] },
+        "source_region": {
+          "type": ["object", "null"],
+          "properties": {
+            "x": { "type": "number" },
+            "y": { "type": "number" },
+            "width": { "type": "number" },
+            "height": { "type": "number" }
+          }
+        }
+      }
+    }
+  }
+}
