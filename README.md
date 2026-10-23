@@ -130,3 +130,17 @@ python register_pixels.py --graph outputs/demo-centerline/pixel-graph.json --con
 详见 [REGISTRATION.md](REGISTRATION.md)。至少三个不共线控制点；独立检查门槛要求至少两个未参与拟合的检查点。
 输出是未验证的地理分段集合，不自动贴路、不确定骑行顺序，不能直接作为单一有序路线提交给评测器。
 当前全量测试共 28 项；合成演示不是独立真实精度评测。
+
+## Agent 入口（新增）
+
+现在可以用 `ride_agent.py` 创建任务、接收追问、回答后继续，并保存工具调用与产物。
+
+```sh
+python examples/make_synthetic_screenshot.py
+python ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/agent-demo --demo
+python ride_agent.py resume --task-dir outputs/agent-demo --answer-file examples/demo-answer.json
+```
+
+此 demo 是固定流程编排，不是视觉模型识别。真实模式支持 OpenAI 兼容视觉 API，必须配置模型并逐次明确同意上传截图/对话；真实供应商尚未联调。详见 [AGENT.md](AGENT.md)。
+当前 Agent 只集成提色与中心线工具，尚未集成配准、地图搜索或道路匹配，不是完整自动路线识别产品。
+全量测试 33 项（本地/离线）；不代表模型识别准确率。
