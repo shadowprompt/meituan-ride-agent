@@ -53,3 +53,8 @@ python road_match.py --segments outputs/road-demo/registration/registered-segmen
 ### Agent 下载地图
 
 已完成配准且独立误差门槛通过后，可用 `resume --task-dir … --fetch-map --consent-map` 替代 `--osm-file`。程序从配准分段计算范围，模型不能指定地址或坐标；固定 Overpass 服务将收到该地理范围。真实模型任务另需 `--consent-upload`。下载与匹配仍是候选，不是自动定位或骑行导航。限额及隐私说明见 `AGENT.md`。
+
+
+### 结构化分段诊断
+
+`road-match.json` 新增成功编号 `matched_segment_indices`、缺失编号 `missing_segment_indices`（从 0 起）及 `coverage_fraction`（成功分段数/输入分段数，非距离覆盖率）。缺失仅代表此启发式没有给出候选，不能推断道路不存在。Agent 的真实模型输入会看到当前道路叠图及覆盖率；这些仍未经真实模型联调验证。

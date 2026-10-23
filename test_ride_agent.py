@@ -183,6 +183,9 @@ class MapAgentTests(unittest.TestCase):
             self.assertEqual(state['status'],'needs_confirmation')
             report=json.loads((folder/'roads/road-match.json').read_text())
             self.assertEqual(report['matched_segment_count'],report['input_segment_count'])
+            self.assertEqual(report['missing_segment_indices'],[])
+            self.assertEqual(report['coverage_fraction'],1)
+            self.assertEqual(state['road_diagnostics']['coverage_fraction'],1)
             self.assertFalse(state['verified'])
             for artifact in state['artifacts']:
                 self.assertTrue((folder/artifact).exists())

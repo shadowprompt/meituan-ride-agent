@@ -2,6 +2,7 @@
 import argparse
 import base64
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -26,7 +27,7 @@ Return ONE JSON object only, one of:
 {"action":"fetch_map"}
 {"action":"match"}
 {"action":"deliver","summary":"Chinese factual summary of observed tool outputs and remaining limitations"}
-Use image dimensions and visible evidence. Crop coordinates refer to supplied EXIF-oriented image. If uncertain ask rather than guess. You may extract with full crop if suitable. Deliver only after successful extract and centerline. No shell, URLs, file paths, invented coordinates, GPS, or claims of automatic geolocation. If trusted user-supplied controls are available you may register after centerline. Tool register accepts no model-generated control points. If goal=roads, after registration ask user for local OSM using resume --osm-file, or explicit resume --fetch-map --consent-map to download a bounded map derived from registered segments, then call match. fetch_map accepts no parameters or coordinates and requires fresh map consent. Never request map download unless map_download_requested=true. Delivery requires match attempt, not necessarily success. If goal=registration, ask for a controls JSON file through resume --controls-file, and deliver only after registration. If controls are absent, ask; never invent them. Preserve user corrections. Color masks and centerline are not verified routes. Never infer actual traversal order at overlap. Tools execute at fixed local paths. Your goal is a pixel-analysis candidate with artifacts and honest uncertainty, not final GPS reconstruction.'''
+Use image dimensions and visible evidence. Crop coordinates refer to supplied EXIF-oriented image. If uncertain ask rather than guess. You may extract with full crop if suitable. Deliver only after successful extract and centerline. No shell, URLs, file paths, invented coordinates, GPS, or claims of automatic geolocation. If trusted user-supplied controls are available you may register after centerline. Tool register accepts no model-generated control points. If goal=roads, after registration ask user for local OSM using resume --osm-file, or explicit resume --fetch-map --consent-map to download a bounded map derived from registered segments, then call match. fetch_map accepts no parameters or coordinates and requires fresh map consent. Never request map download unless map_download_requested=true. Delivery requires match attempt, not necessarily success. If goal=registration, ask for a controls JSON file through resume --controls-file, and deliver only after registration. If controls are absent, ask; never invent them. Preserve user corrections. Inspect current tool preview images alongside numeric results; old reports in history may be invalidated by corrections. Preview images are resized and crop-local, not original screenshot coordinates. If no_match or partial coverage, explicitly explain missing_segment_indices and ask for the necessary correction rather than claim completion. Color masks and centerline are not verified routes. Never infer actual traversal order at overlap. Tools execute at fixed local paths. Your goal is a pixel-analysis candidate with artifacts and honest uncertainty, not final GPS reconstruction.'''
 
 
 def save(state, folder):
@@ -51,6 +52,48 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError('API redirects refused to protect screenshot and credentials')
 
 
+# Fixed allowlist, never taken from model output or persisted artifact paths.
+FEEDBACK_IMAGES = (
+    ('extracted', 'extraction/overlay.png', 'Extraction overlay; crop-local pixels'),
+    ('centerlined', 'centerline/graph-overlay.png', 'Centerline graph; crop-local pixels'),
+    ('match_attempted', 'roads/road-overlay.png', 'Road candidates: gray roads, blue reference, red candidates'),
+)
+
+
+def visual_feedback(state, folder):
+    """Bounded previews of current stages only; invalidated files stay local."""
+    content = []
+    root = Path(folder).resolve()
+    for flag, relative, label in FEEDBACK_IMAGES:
+        valid = state.get('extracted', False)
+        if flag in ('centerlined', 'match_attempted'):
+            valid = valid and state.get('centerlined', False)
+        if flag == 'match_attempted':
+            valid = valid and state.get('registered', False) and state.get('registration_gate_passed', False)
+        if not valid or not state.get(flag, False):
+            continue
+        path = root/relative
+        if not path.exists():
+            continue  # Older tasks may lack optional previews.
+        if not path.resolve().is_relative_to(root):
+            raise ValueError('Feedback image must stay inside task directory')
+        if path.stat().st_size > 5_000_000:
+            raise ValueError('Feedback image exceeds 5 MB')
+        with Image.open(path) as image:
+            if image.width*image.height > 4_000_000:
+                raise ValueError('Feedback image exceeds pixel limit')
+            preview = image.convert('RGB')
+            preview.thumbnail((1024,1024))
+            buffer = io.BytesIO()
+            preview.save(buffer,format='JPEG',quality=80)
+        payload = buffer.getvalue()
+        if len(payload) > 1_000_000:
+            raise ValueError('Feedback preview exceeds 1 MB')
+        content.extend([{'type':'text','text':label+'; resized preview, not coordinate evidence. Unverified.'},
+                        {'type':'image_url','image_url':{'url':'data:image/jpeg;base64,'+base64.b64encode(payload).decode('ascii')}}])
+    return content
+
+
 class APIPlanner:
     def __init__(self):
         self.base = os.environ.get('RIDE_API_BASE','https://api.openai.com/v1').rstrip('/')
@@ -65,13 +108,24 @@ class APIPlanner:
             raise ValueError('Set RIDE_API_KEY and RIDE_MODEL; use a vision-capable model')
 
     def decide(self, state, folder):
-        image = base64.b64encode((Path(folder)/'input.png').read_bytes()).decode('ascii')
+        source = Path(folder)/'input.png'
+        if source.stat().st_size > 20_000_000:
+            raise ValueError('Stored screenshot exceeds 20 MB')
+        image = base64.b64encode(source.read_bytes()).decode('ascii')
         messages = [{'role':'system','content':PROMPT}, {'role':'user','content':[
             {'type':'text','text':f'Analyze screenshot. Oriented size: {state["image_size"]}. All results must stay unverified.'},
             {'type':'image_url','image_url':{'url':'data:image/png;base64,'+image}}]}]
-        messages.append({'role':'user','content':json.dumps({'goal':state.get('goal','pixels'), 'controls_available':(Path(folder)/'controls.json').exists(), 'registered':state.get('registered',False), 'osm_available':(Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
+        messages.append({'role':'user','content':json.dumps({'goal':state.get('goal','pixels'), 'controls_available':(Path(folder)/'controls.json').exists() and not state.get('controls_invalidated',False), 'registered':state.get('registered',False), 'osm_available':(Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
         messages.extend(state['messages'])
+        # Append current evidence AFTER history: old reports are historical, not current state.
+        feedback = visual_feedback(state, folder)
+        current = {k:state.get(k,False) for k in ('extracted','centerlined','registered','registration_gate_passed','match_attempted')}
+        if current['match_attempted'] and current['registered'] and current['centerlined'] and current['extracted']:
+            current['road_diagnostics'] = state.get('road_diagnostics', {'status':state.get('road_match_status','unknown')})
+        messages.append({'role':'user','content':[{'type':'text','text':'CURRENT_STAGE_STATE '+json.dumps(current)+'. Earlier tool reports may be invalidated. Only current true stages are evidence. Preview pixels cannot be used as original screenshot crop coordinates.'}]+feedback})
         data = json.dumps({'model':self.model,'messages':messages,'max_tokens':1500}).encode()
+        if len(data) > 32_000_000:
+            raise ValueError('Combined API request exceeds 32 MB')
         req = urllib.request.Request(self.base+'/chat/completions',data=data,
                                      headers={'Authorization':'Bearer '+self.key,'Content-Type':'application/json'})
         try:
@@ -155,6 +209,8 @@ def run(state, folder, planner, budget=6, consent_map=False):
                 save(state,folder)
                 return state
             if name == 'extract':
+                state.update(extracted=False,centerlined=False,registered=False,match_attempted=False)
+                save(state,folder)
                 result = extract(Path(folder)/'input.png',Path(folder)/'extraction',action['color'],action['crop'])
                 state['extracted'] = result['status'] != 'no_detection'
                 state['centerlined'] = False
@@ -165,6 +221,8 @@ def run(state, folder, planner, budget=6, consent_map=False):
             elif name == 'centerline':
                 if not state.get('extracted'):
                     raise ValueError('Successful extract required first')
+                state.update(centerlined=False,registered=False,match_attempted=False)
+                save(state,folder)
                 result = process(Path(folder)/'extraction/mask.png',Path(folder)/'centerline')
                 state['centerlined'] = result['status'] != 'no_detection'
                 state['registered'] = False
@@ -177,6 +235,8 @@ def run(state, folder, planner, budget=6, consent_map=False):
                     raise ValueError('Centerline required before registration')
                 if not (Path(folder)/'controls.json').exists() or state.get('controls_invalidated', False):
                     raise ValueError('User-supplied controls file required; model cannot invent controls')
+                state.update(registered=False,match_attempted=False)
+                save(state,folder)
                 result = register(Path(folder)/'centerline/pixel-graph.json',Path(folder)/'controls.json',Path(folder)/'registration')
                 state['match_attempted'] = False
                 state['registered'] = True
@@ -198,10 +258,14 @@ def run(state, folder, planner, budget=6, consent_map=False):
                     state.update(status='waiting_for_user',question='独立配准误差门槛未通过，请先用 --controls-file 修正控制点及检查点。')
                     save(state,folder)
                     return state
+                state['match_attempted'] = False
+                save(state,folder)
                 result = match(Path(folder)/'registration/registered-segments.geojson',Path(folder)/'map.osm',Path(folder)/'roads')
                 state['match_attempted'] = True
                 state['road_match_status'] = result['status']
-                tool_result = {'tool':'match', **{k:result[k] for k in ('status','matched_segment_count','input_segment_count','warnings')}}
+                state['road_diagnostics'] = {k:result[k] for k in ('status','matched_segment_count','input_segment_count','matched_segment_indices','missing_segment_indices','coverage_fraction')}
+                state['road_diagnostics'].update(verified=False, original_gps=False)
+                tool_result = {'tool':'match', **{k:result[k] for k in ('status','matched_segment_count','input_segment_count','matched_segment_indices','missing_segment_indices','coverage_fraction','warnings')}}
             elif name == 'deliver':
                 if not state.get('extracted') or not state.get('centerlined'):
                     raise ValueError('Delivery requires successful extract and centerline')
@@ -291,7 +355,7 @@ def main():
         else:
             demo = args.demo if args.command=='start' else load(args.task_dir)['mode']=='demo'
             if not demo and not args.consent_upload:
-                raise ValueError('Real mode uploads screenshot + conversation. Explicit --consent-upload required each invocation.')
+                raise ValueError('Real mode uploads screenshot, derived overlays, diagnostics + conversation. Explicit --consent-upload required each invocation.')
             planner = DemoPlanner() if demo else APIPlanner()
             state = start(args.image,args.task_dir,demo,args.goal) if args.command=='start' else load(args.task_dir)
             if args.command=='resume':
