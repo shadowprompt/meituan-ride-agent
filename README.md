@@ -148,3 +148,8 @@ python ride_agent.py resume --task-dir outputs/agent-demo --answer-file examples
 ### Agent 人工配准闭环
 
 Agent 已接入 `register` 白名单工具，可用 `start --goal registration` 请求完整人工配准阶段，随后通过 `resume --controls-file ...` 提供地标文件；详见 AGENT.md。不会允许模型捏造控制坐标。全量测试现为 36 项，包含模拟 API 请求；真实模型仍待联调。
+
+### Agent 道路候选闭环
+
+新增本地 `road_match.py` 工具并接入 Agent `--goal roads`。从截图提线到人工配准、路网候选和道路叠图的合成流程已跑通；3/3 分段获得候选。详见 [ROAD_MATCHING.md](ROAD_MATCHING.md)。
+全量测试 52 项。仍缺自动定位和真实视觉模型/真实截图独立验收；当前不是全自动成品。

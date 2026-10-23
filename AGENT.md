@@ -58,7 +58,7 @@ python ride_agent.py resume --task-dir outputs/real-task --answer '{"crop":[0,0,
 
 ## 工具边界、任务状态与限制
 
-- 模型工具白名单为 `extract`、`centerline`、`register`；模型不能执行 shell、任意程序或指定任意文件路径。
+- 模型工具白名单为 `extract`、`centerline`、`register`、`match`；模型不能执行 shell、任意程序或指定任意文件路径。
 - 输出路径由程序固定在当前任务目录内；模型只提供经校验的处理参数，不能决定输入／输出文件位置。
 - 任务目录保存 `task.json` 和工具产物；`task.json` 包含用户回答与模型消息，可能含敏感数据。`outputs/` 为 gitignored 本地产物目录，不应提交；使用其他任务路径时需自行确认忽略规则。Git 忽略不等于加密或访问控制。
 - 中心线／像素图仍需人工核验；不因流程运行完成而自动认定路线正确、方向正确或已获用户确认。
@@ -100,3 +100,8 @@ python ride_agent.py resume --task-dir outputs/registration-agent --controls-fil
 `--controls-file` 也可把已有像素任务推进到配准目标。它会保留有效的提取、中心线，只使配准失效。改变裁剪框后，旧控制点局部像素坐标可能不再适用，务必提供新文件。
 
 本轮新增模拟 HTTP 请求测试（检查图像载荷和认证头），不发送真实网络请求，不代表供应商联调通过。全量 36 项测试。
+
+## 道路候选阶段
+
+新增 `start --goal roads` 与 `resume --osm-file`，可在人工配准后继续匹配本地道路，生成灰色路网/蓝色参考/红色候选示意图。完整演示见 [ROAD_MATCHING.md](ROAD_MATCHING.md)。
+不是自动定位，控制点和地图区域仍需用户指定；配准独立误差门槛不通过时停止匹配并请求修正。每段独立匹配，不冒充确定了整条骑行顺序。

@@ -104,6 +104,28 @@ class AgentTests(unittest.TestCase):
                     body=json.loads(request.data)
                     self.assertTrue(body['messages'][1]['content'][1]['image_url']['url'].startswith('data:image/png;base64,'))
 
+    def test_roads_goal_rejects_premature_delivery(self):
+        class Bad:
+            def decide(self,*args):return {'action':'deliver','summary':'finished'}
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'task'
+            state=start(self.fixture(tmp),folder,True,goal='roads')
+            state.update(extracted=True,centerlined=True,registered=True)
+            state=run(state,folder,Bad())
+            self.assertEqual(state['status'],'error')
+            self.assertIn('matching attempt',state['error'])
+
+    def test_bad_registration_blocks_roads(self):
+        class Attempt:
+            def decide(self,*args):return {'action':'match'}
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'task'
+            state=start(self.fixture(tmp),folder,True,goal='roads')
+            state.update(registered=True,registration_gate_passed=False)
+            state=run(state,folder,Attempt())
+            self.assertEqual(state['status'],'waiting_for_user')
+            self.assertFalse(state.get('match_attempted',False))
+
     def test_api_security(self):
         with patch.dict(os.environ,{'RIDE_API_BASE':'http://example.com/v1','RIDE_API_KEY':'fake','RIDE_MODEL':'fake'}):
             with self.assertRaises(ValueError):APIPlanner()
