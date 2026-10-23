@@ -67,6 +67,7 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(state['centerlined'])
             controls=json.loads(Path('examples/synthetic-controls.json').read_text())
             (folder/'controls.json').write_text(json.dumps(controls))
+            state['controls_crop'] = state['extraction_config']['crop']
             state=run(state,folder,DemoPlanner())
             self.assertEqual(state['status'],'needs_confirmation')
             self.assertTrue(state['registered'])
@@ -174,6 +175,7 @@ class MapAgentTests(unittest.TestCase):
             state['messages'].append({'role':'user','content':json.dumps({'crop':[0,0,640,480],'color':'#00BFA5'})})
             state = run(state,folder,DemoPlanner())
             (folder/'controls.json').write_text(Path('examples/synthetic-controls.json').read_text())
+            state['controls_crop'] = state['extraction_config']['crop']
             state = run(state,folder,DemoPlanner())
             self.assertTrue(state['registration_gate_passed'])
             state['map_download_requested'] = True

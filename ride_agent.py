@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from PIL import Image, ImageOps
 
-from extract_route import extract
+from extract_route import extract, parse_color
 from centerline import process
 from register_pixels import register, fit_registration
 from road_match import match, _load_segments
@@ -118,7 +118,7 @@ class APIPlanner:
         messages = [{'role':'system','content':PROMPT}, {'role':'user','content':[
             {'type':'text','text':f'Analyze screenshot. Oriented size: {state["image_size"]}. All results must stay unverified.'},
             {'type':'image_url','image_url':{'url':'data:image/png;base64,'+image}}]}]
-        messages.append({'role':'user','content':json.dumps({'goal':state.get('goal','pixels'), 'controls_available':(Path(folder)/'controls.json').exists() and not state.get('controls_invalidated',False), 'registered':state.get('registered',False), 'osm_available':(Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
+        messages.append({'role':'user','content':json.dumps({'goal':state.get('goal','pixels'), 'controls_available':controls_current(state,folder), 'registered':state.get('registered',False), 'osm_available':(Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
         messages.extend(state['messages'])
         # Append current evidence AFTER history: old reports are historical, not current state.
         feedback = visual_feedback(state, folder)
@@ -165,7 +165,7 @@ class DemoPlanner:
         if not state.get('centerlined'):
             return {'action':'centerline'}
         if state.get('goal') in ('registration','roads') and not state.get('registered'):
-            if not (Path(folder)/'controls.json').exists() or state.get('controls_invalidated', False):
+            if not controls_current(state,folder):
                 return {'action':'ask','question':'请用 resume --controls-file 提供 WGS84 控制点及独立检查点文件；不能从像素猜测地理坐标。'}
             return {'action':'register'}
         if state.get('goal') == 'roads' and not state.get('match_attempted'):
@@ -198,10 +198,58 @@ def download_task_map(state, folder):
     return result
 
 
+def controls_current(state, folder):
+    """文件存在不代表坐标可用；控制点必须显式绑定到当前裁剪坐标系。"""
+    crop = state.get('extraction_config',{}).get('crop')
+    return (bool(crop) and state.get('controls_crop') == crop
+            and not state.get('controls_invalidated',False)
+            and (Path(folder)/'controls.json').exists())
+
+
+def invalidate_extraction(state, invalidate_controls=False):
+    """只撤销当前证据标记，旧产物留在磁盘供审计，不再当作有效结果。"""
+    state.update(extracted=False, centerlined=False, registered=False,
+                 registration_gate_passed=False, match_attempted=False)
+    for key in ('road_diagnostics','road_match_status','artifacts','summary'):
+        state.pop(key,None)
+    if invalidate_controls:
+        # 控制点使用裁剪局部像素；裁剪框变化后绝不能继续套用旧坐标。
+        state['controls_invalidated'] = True
+
+
+def apply_extraction_correction(state, color=None, crop=None):
+    """结构化用户修正先校验再改状态，不让模型覆盖用户指定的参数。"""
+    if color is None and crop is None:
+        raise ValueError('Provide color or crop correction')
+    config = dict(state.get('extraction_config',{}))
+    if color is not None:
+        parse_color(color)
+        config['color'] = color.upper()
+    if crop is not None:
+        w,h = state['image_size']
+        if (len(crop) != 4 or any(type(v) is not int for v in crop)
+                or not 0 <= crop[0] < crop[2] <= w or not 0 <= crop[1] < crop[3] <= h):
+            raise ValueError('Correction crop outside oriented screenshot')
+        config['crop'] = list(crop)
+    previous_crop = state.get('extraction_config',{}).get('crop')
+    crop_changed = crop is not None and list(crop) != previous_crop
+    invalidate_extraction(state, invalidate_controls=crop_changed)
+    if crop_changed:
+        state['colors_inspected'] = False
+        state.pop('color_inspection',None)
+    state['extraction_config'] = config
+    state['user_extraction_constraints'] = dict(config)
+
+
 def run(state, folder, planner, budget=6, consent_map=False):
     for _ in range(budget):
         try:
-            action = planner.decide(state, folder)
+            # 已知完整的用户修正直接走确定性提线，避免再让模型猜颜色或裁剪框。
+            config = state.get('user_extraction_constraints',{})
+            if not state.get('extracted') and all(k in config for k in ('color','crop')):
+                action = {'action':'extract', **config}
+            else:
+                action = planner.decide(state, folder)
             if not isinstance(action,dict):
                 raise ValueError('Action must be an object')
             name = action.get('action')
@@ -223,9 +271,18 @@ def run(state, folder, planner, budget=6, consent_map=False):
                 state['color_inspection'] = result
                 tool_result = {'tool':'inspect_colors', **result}
             elif name == 'extract':
-                state.update(extracted=False,centerlined=False,registered=False,match_attempted=False)
+                constraints = state.get('user_extraction_constraints',{})
+                for key in ('crop','color'):
+                    if key in constraints:
+                        action[key] = constraints[key]
+                old_crop = state.get('extraction_config',{}).get('crop')
+                # 旧任务没有裁剪来源时保守失效；第一次提线尚无旧坐标系，不误伤预先提供的控制点。
+                has_old_frame = 'extraction_config' in state or state.get('centerlined') or state.get('registered')
+                changed = has_old_frame and old_crop != action.get('crop')
+                invalidate_extraction(state,invalidate_controls=changed)
                 save(state,folder)
                 result = extract(Path(folder)/'input.png',Path(folder)/'extraction',action['color'],action['crop'])
+                state['extraction_config'] = {'color':action['color'],'crop':result['crop_xyxy']}
                 state['extracted'] = result['status'] != 'no_detection'
                 state['centerlined'] = False
                 state['registered'] = False
@@ -247,9 +304,9 @@ def run(state, folder, planner, budget=6, consent_map=False):
             elif name == 'register':
                 if not state.get('centerlined'):
                     raise ValueError('Centerline required before registration')
-                if not (Path(folder)/'controls.json').exists() or state.get('controls_invalidated', False):
+                if not controls_current(state,folder):
                     raise ValueError('User-supplied controls file required; model cannot invent controls')
-                state.update(registered=False,match_attempted=False)
+                state.update(registered=False,registration_gate_passed=False,match_attempted=False)
                 save(state,folder)
                 result = register(Path(folder)/'centerline/pixel-graph.json',Path(folder)/'controls.json',Path(folder)/'registration')
                 state['match_attempted'] = False
@@ -356,6 +413,8 @@ def main():
     resume.add_argument('--consent-map', action='store_true', help='Allow this invocation to send route bounds to Overpass (not screenshot)')
     resume.add_argument('--osm-file',help='Local OSM XML only; model cannot choose filesystem paths')
     resume.add_argument('--controls-file',help='User supplied WGS84 landmark JSON; never produced by model')
+    resume.add_argument('--color',help='用户修正轨迹颜色，如 #00BFA5；保留已知裁剪框')
+    resume.add_argument('--crop',nargs=4,type=int,metavar=('LEFT','TOP','RIGHT','BOTTOM'),help='用户修正原截图裁剪框；旧控制点失效')
     resume.add_argument('--reset-extraction',action='store_true',help='Invalidate pixels for image/crop/color corrections')
     answers = resume.add_mutually_exclusive_group()
     answers.add_argument('--answer')
@@ -370,6 +429,7 @@ def main():
             state = load(args.task_dir)
         else:
             demo = args.demo if args.command=='start' else load(args.task_dir)['mode']=='demo'
+            # 地图下载同意不等于截图上传同意；每次真实调用均重新检查。
             if not demo and not args.consent_upload:
                 raise ValueError('Real mode uploads screenshot, derived overlays, diagnostics + conversation. Explicit --consent-upload required each invocation.')
             planner = DemoPlanner() if demo else APIPlanner()
@@ -379,9 +439,13 @@ def main():
                     raise ValueError('Choose fetch-map or osm-file, not both')
                 if args.fetch_map and not args.consent_map:
                     raise ValueError('--fetch-map requires explicit --consent-map each invocation')
-                if not args.answer and not args.answer_file and not args.controls_file and not args.osm_file and not args.fetch_map:
+                if not args.answer and not args.answer_file and not args.controls_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None:
                     raise ValueError('Provide answer, answer-file, controls-file or osm-file')
                 answer = args.answer or 'User supplied local evidence file.'
+                if args.color is not None or args.crop is not None:
+                    if args.reset_extraction:
+                        raise ValueError('Choose structured color/crop correction or reset-extraction')
+                    apply_extraction_correction(state,args.color,args.crop)
                 if args.fetch_map:
                     if (Path(args.task_dir)/'map.osm').exists():
                         raise ValueError('Task already has map data; use a fresh task to change download bounds')
@@ -402,8 +466,13 @@ def main():
                         raise ValueError('Controls file exceeds 1 MB')
                     controls = json.loads(controls_path.read_text(encoding='utf-8-sig'))
                     fit_registration(controls)
+                    crop = state.get('extraction_config',{}).get('crop')
+                    if not crop or not state.get('extracted'):
+                        raise ValueError('Extract current pixels before supplying controls; crop frame must be known')
                     (Path(args.task_dir)/'controls.json').write_text(json.dumps(controls,allow_nan=False),encoding='utf-8')
+                    state['controls_crop'] = list(crop)
                     state['registered'] = False
+                    state['registration_gate_passed'] = False
                     state['controls_invalidated'] = False
                     state['match_attempted'] = False
                     if state.get('goal') != 'roads':
@@ -422,11 +491,8 @@ def main():
                 if args.reset_extraction:
                     state['colors_inspected'] = False
                     state.pop('color_inspection',None)
-                    state['extracted'] = False
-                    state['centerlined'] = False
-                    state['registered'] = False
-                    state['controls_invalidated'] = True
-                    state['match_attempted'] = False
+                    invalidate_extraction(state,invalidate_controls=True)
+                    state.pop('user_extraction_constraints',None)
                 state.pop('artifacts', None)
                 state.pop('summary', None)
                 state.pop('registration_notice', None)

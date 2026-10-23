@@ -97,6 +97,7 @@ def inspect_colors(image_path, output_dir, crop=None):
     hsv = np.asarray(sample.convert('HSV'))
     hue = hsv[:, :, 0].astype(np.int16)
     saturated = (hsv[:, :, 1] >= 90) & (hsv[:, :, 2] >= 51)
+    # 色相是环形量：红色横跨 0/255，计算距离时不能按普通线性数值切开。
     hist = np.bincount(hue[saturated], minlength=256)
     bins = np.arange(256)
     distances = np.abs(bins[:, None] - bins[None, :])
@@ -105,6 +106,7 @@ def inspect_colors(image_path, output_dir, crop=None):
     eligible = np.ones(256, dtype=bool)
     minimum = max(3, math.ceil(size[0] * size[1] * 0.0001))
     candidates, masks = [], []
+    # 只按采样颜色支持度排序，不输出语义置信度；地图按钮和绿地也可能入选。
     for _ in range(MAX_CANDIDATES):
         ranked = np.where(eligible, scores, -1)
         center = int(np.argmax(ranked))  # ascending hue resolves all ties

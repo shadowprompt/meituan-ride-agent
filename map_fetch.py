@@ -188,6 +188,7 @@ def fetch_roads(bounds, output_path, *, consent_download=False):
     Caller must ask permission to disclose the bbox before passing consent=True.
     """
     bounds, area = _bounds(bounds)
+    # 地理范围也是敏感信息：同意仅针对本次调用，不能从旧任务状态继承。
     if consent_download is not True:
         raise MapFetchError('Explicit consent_download=True required to send bounding box to Overpass')
     try:

@@ -373,6 +373,7 @@ def match(segments_path, osm_path, output_dir, tolerance_m=50):
             'original_gps': False, 'status': 'needs_confirmation',
             'ordered_shape_distance_m': round(distance, 3)},
             'geometry': {'type': 'LineString', 'coordinates': coords}})
+    # 分段覆盖率不是距离覆盖率，更不是识别准确率；缺段不能靠直线补齐。
     matched_indices = [f['properties']['input_segment_index'] for f in features]
     report = {'matched_segment_indices': matched_indices,
               'missing_segment_indices': [i for i in range(len(references)) if i not in matched_indices],
