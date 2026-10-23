@@ -57,6 +57,53 @@ class AgentTests(unittest.TestCase):
             state=run(start(self.fixture(tmp),folder,True),folder,Repeater(),budget=2)
             self.assertEqual(state['status'],'paused')
 
+    def test_registration_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'task'
+            state=start(self.fixture(tmp),folder,True,goal='registration')
+            state['messages'].append({'role':'user','content':json.dumps({'crop':[0,0,80,60],'color':'#00BFA5'})})
+            state=run(state,folder,DemoPlanner())
+            self.assertEqual(state['status'],'waiting_for_user')
+            self.assertTrue(state['centerlined'])
+            controls=json.loads(Path('examples/synthetic-controls.json').read_text())
+            (folder/'controls.json').write_text(json.dumps(controls))
+            state=run(state,folder,DemoPlanner())
+            self.assertEqual(state['status'],'needs_confirmation')
+            self.assertTrue(state['registered'])
+            self.assertTrue(state['registration_gate_passed'])
+            self.assertIn('registration/registered-segments.geojson',state['artifacts'])
+
+    def test_register_cannot_invent_controls(self):
+        class Bad:
+            def decide(self,*args): return {'action':'register','controls':{'fake':True}}
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'task'
+            state=start(self.fixture(tmp),folder,True)
+            state['centerlined']=True
+            state=run(state,folder,Bad())
+            self.assertEqual(state['status'],'error')
+            self.assertIn('User-supplied',state['error'])
+
+    def test_mock_api_request(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self,*args): pass
+            def read(self,n):
+                return json.dumps({'choices':[{'message':{'content':json.dumps({'action':'ask','question':'crop?'})}}]}).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'task'
+            state=start(self.fixture(tmp),folder,True)
+            with patch.dict(os.environ,{'RIDE_API_BASE':'https://example.com/v1','RIDE_API_KEY':'fake','RIDE_MODEL':'fake'}):
+                planner=APIPlanner()
+                with patch('urllib.request.build_opener') as opener:
+                    opener.return_value.open.return_value=Response()
+                    result=planner.decide(state,folder)
+                    self.assertEqual(result['action'],'ask')
+                    request=opener.return_value.open.call_args.args[0]
+                    self.assertEqual(request.get_header('Authorization'),'Bearer fake')
+                    body=json.loads(request.data)
+                    self.assertTrue(body['messages'][1]['content'][1]['image_url']['url'].startswith('data:image/png;base64,'))
+
     def test_api_security(self):
         with patch.dict(os.environ,{'RIDE_API_BASE':'http://example.com/v1','RIDE_API_KEY':'fake','RIDE_MODEL':'fake'}):
             with self.assertRaises(ValueError):APIPlanner()

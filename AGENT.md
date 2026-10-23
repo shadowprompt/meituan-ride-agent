@@ -58,11 +58,11 @@ python ride_agent.py resume --task-dir outputs/real-task --answer '{"crop":[0,0,
 
 ## 工具边界、任务状态与限制
 
-- 模型工具白名单仅有 `extract`、`centerline`；模型不能执行 shell、任意程序或指定任意文件路径。
+- 模型工具白名单为 `extract`、`centerline`、`register`；模型不能执行 shell、任意程序或指定任意文件路径。
 - 输出路径由程序固定在当前任务目录内；模型只提供经校验的处理参数，不能决定输入／输出文件位置。
 - 任务目录保存 `task.json` 和工具产物；`task.json` 包含用户回答与模型消息，可能含敏感数据。`outputs/` 为 gitignored 本地产物目录，不应提交；使用其他任务路径时需自行确认忽略规则。Git 忽略不等于加密或访问控制。
 - 中心线／像素图仍需人工核验；不因流程运行完成而自动认定路线正确、方向正确或已获用户确认。
-- 当前编排尚无自动地理定位、OSM 获取或候选道路匹配；不会自动把截图像素变成已确认 GPS 轨迹。项目中其他离线模块的存在不意味着本 CLI 已集成它们。
+- 当前编排支持人工控制点配准，但尚无自动地理定位、OSM 获取或候选道路匹配；不会自动把截图像素变成已确认 GPS 轨迹。项目中其他离线模块的存在不意味着本 CLI 已集成它们。
 
 ## Windows 推荐用法
 
@@ -83,4 +83,20 @@ $env:RIDE_API_KEY = "你的密钥"
 $env:RIDE_MODEL = "支持图像的模型名称"
 ```
 
-提交回答会使旧提取/中心线状态失效并重新分析，避免交付过期产物。模型需输出严格 JSON；错误、超时或格式不兼容时任务保存为 error，不冒充成功。每轮最多六次动作，可用 resume 恢复。现阶段不自动重试远端调用，避免重复费用。
+普通补充回答保留已有阶段；修改裁剪或颜色请加 `--reset-extraction`，显式使旧提取、中心线及配准状态失效。模型需输出严格 JSON；错误、超时或格式不兼容时任务保存为 error，不冒充成功。每轮最多六次动作，可用 resume 恢复。现阶段不自动重试远端调用，避免重复费用。
+
+## Agent 内人工配准（新增）
+
+无需手工串联 register_pixels.py：Agent 可先完成像素分析，再请求独立控制点文件。
+
+```powershell
+python ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/registration-agent --demo --goal registration
+python ride_agent.py resume --task-dir outputs/registration-agent --answer-file examples/demo-answer.json
+python ride_agent.py resume --task-dir outputs/registration-agent --controls-file examples/synthetic-controls.json
+```
+
+第二步应暂停请求控制点，第三步自动配准并交付额外的 `registration/registration.json` 与 `registration/registered-segments.geojson`。控制点必须由用户通过文件提供；模型动作不能提交或捏造控制点。文件内容仍需人工确认，系统不能验证地标真实性。真实模式每一步仍需 `--consent-upload`；本地报告误差可进入模型上下文。
+
+`--controls-file` 也可把已有像素任务推进到配准目标。它会保留有效的提取、中心线，只使配准失效。改变裁剪框后，旧控制点局部像素坐标可能不再适用，务必提供新文件。
+
+本轮新增模拟 HTTP 请求测试（检查图像载荷和认证头），不发送真实网络请求，不代表供应商联调通过。全量 36 项测试。
