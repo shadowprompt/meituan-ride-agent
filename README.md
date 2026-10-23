@@ -118,3 +118,15 @@ python centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-cent
 输出骨架图、端点/分叉检查图及 `pixel-graph.json`。仅单一开放无分支链导出几何有序点；
 分叉、断线、闭环不擅自拼接。坐标为掩码局部像素，不是 GPS，不推断骑行方向或重叠次数。
 详见 [CENTERLINE.md](CENTERLINE.md)。当前全量自动化测试共 23 项。
+
+## 人工控制点配准（新增）
+
+中心线分段可通过人工确认的 WGS84 控制点映射到候选地理坐标：
+
+```sh
+python register_pixels.py --graph outputs/demo-centerline/pixel-graph.json --controls examples/synthetic-controls.json --output-dir outputs/demo-registration
+```
+
+详见 [REGISTRATION.md](REGISTRATION.md)。至少三个不共线控制点；独立检查门槛要求至少两个未参与拟合的检查点。
+输出是未验证的地理分段集合，不自动贴路、不确定骑行顺序，不能直接作为单一有序路线提交给评测器。
+当前全量测试共 28 项；合成演示不是独立真实精度评测。
