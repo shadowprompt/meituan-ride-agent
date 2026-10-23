@@ -106,3 +106,15 @@ python extract_route.py --image examples/synthetic-ride.png --color "#00BFA5" --
 
 目录约定：源代码和合成示例纳入 Git；个人输入放 `local-data/`，下载缓存放 `cache/`，生成结果放 `outputs/`，三者均不提交。
 旧 `reconstruction/` 暂作为私有历史实验保留，不直接迁移含硬编码位置的脚本；可复用能力逐步提取至正式模块。
+
+## 像素中心线与拓扑（新增）
+
+在颜色提取后运行：
+
+```sh
+python centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-centerline
+```
+
+输出骨架图、端点/分叉检查图及 `pixel-graph.json`。仅单一开放无分支链导出几何有序点；
+分叉、断线、闭环不擅自拼接。坐标为掩码局部像素，不是 GPS，不推断骑行方向或重叠次数。
+详见 [CENTERLINE.md](CENTERLINE.md)。当前全量自动化测试共 23 项。
