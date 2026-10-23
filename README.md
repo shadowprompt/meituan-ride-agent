@@ -90,3 +90,19 @@ python training-demo/train.py
 仓库不发布个人截图、实验轨迹及下载的 OSM 数据；`reconstruction/` 仅在开发机保留。
 EVALUATION.md 中该目录的命令属于开发机实验，首次克隆请使用本节合成示例。
 当前没有 Web 服务、截图上传入口或大模型 API 接入。
+
+## 截图轨迹颜色提取（新增）
+
+手动选择截图裁剪范围和轨迹颜色，生成掩码与叠图，不恢复经纬度。
+
+```sh
+python -m pip install -r requirements.txt
+python examples/make_synthetic_screenshot.py
+python extract_route.py --image examples/synthetic-ride.png --color "#00BFA5" --output-dir outputs/demo
+```
+
+完整参数与真实截图用法见 [EXTRACTION.md](EXTRACTION.md)。安装依赖后全量测试共 15 项。
+仅评测模块仍无第三方依赖，可用 `python -m unittest test_route_eval -v` 单独测试。
+
+目录约定：源代码和合成示例纳入 Git；个人输入放 `local-data/`，下载缓存放 `cache/`，生成结果放 `outputs/`，三者均不提交。
+旧 `reconstruction/` 暂作为私有历史实验保留，不直接迁移含硬编码位置的脚本；可复用能力逐步提取至正式模块。

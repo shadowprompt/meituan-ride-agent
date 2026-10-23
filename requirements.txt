@@ -1,0 +1,3 @@
+# Screenshot extraction and optional synthetic training demo
+Pillow>=10.4,<13
+numpy>=1.24,<3

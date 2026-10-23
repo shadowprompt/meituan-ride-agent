@@ -15,6 +15,8 @@ reconstruction/
 media/
 local-data/
 outputs/
+cache/
+examples/synthetic-ride.png
 *.osm
 *.gpx
 *.zip
