@@ -58,11 +58,11 @@ python ride_agent.py resume --task-dir outputs/real-task --answer '{"crop":[0,0,
 
 ## 工具边界、任务状态与限制
 
-- 模型工具白名单为 `extract`、`centerline`、`register`、`match`；模型不能执行 shell、任意程序或指定任意文件路径。
+- 模型工具白名单为 `extract`、`centerline`、`register`、`fetch_map`、`match`；模型不能执行 shell、任意程序或指定任意文件路径。
 - 输出路径由程序固定在当前任务目录内；模型只提供经校验的处理参数，不能决定输入／输出文件位置。
 - 任务目录保存 `task.json` 和工具产物；`task.json` 包含用户回答与模型消息，可能含敏感数据。`outputs/` 为 gitignored 本地产物目录，不应提交；使用其他任务路径时需自行确认忽略规则。Git 忽略不等于加密或访问控制。
 - 中心线／像素图仍需人工核验；不因流程运行完成而自动认定路线正确、方向正确或已获用户确认。
-- 当前编排支持人工控制点配准，但尚无自动地理定位、OSM 获取或候选道路匹配；不会自动把截图像素变成已确认 GPS 轨迹。项目中其他离线模块的存在不意味着本 CLI 已集成它们。
+- 当前编排支持人工控制点配准，可接本地路网或经明确同意获取 OSM 并匹配，但尚无自动地理定位；不会自动把截图像素变成已确认 GPS 轨迹。项目中其他离线模块的存在不意味着本 CLI 已集成它们。
 
 ## Windows 推荐用法
 
@@ -105,3 +105,22 @@ python ride_agent.py resume --task-dir outputs/registration-agent --controls-fil
 
 新增 `start --goal roads` 与 `resume --osm-file`，可在人工配准后继续匹配本地道路，生成灰色路网/蓝色参考/红色候选示意图。完整演示见 [ROAD_MATCHING.md](ROAD_MATCHING.md)。
 不是自动定位，控制点和地图区域仍需用户指定；配准独立误差门槛不通过时停止匹配并请求修正。每段独立匹配，不冒充确定了整条骑行顺序。
+
+
+## 按配准范围获取地图（新增）
+
+道路阶段不必再手工导出 OSM：已有配准且独立误差门槛通过后，可运行：
+
+```powershell
+python ride_agent.py resume --task-dir outputs/registration-agent --fetch-map --consent-map
+```
+
+真实模型模式还需要本次 `--consent-upload`。两种同意相互独立：
+- `--consent-map`：允许本次将 **WGS84 地理范围** 发送到固定 Overpass 服务（`https://overpass-api.de/api/interpreter`），泄露位置范围但不发送截图、控制点文件或密钥。地理范围本身仍是敏感信息。
+- `--consent-upload`：允许向配置的视觉供应商发送截图与对话，包括工具报告和位置范围。
+
+范围完全取自本地配准分段，并四边增加固定 0.002 度余量；模型不能提供任意坐标、下载地址或文件路径。范围上限为单边 0.1 度且面积不超过 25 km²，响应上限 10 MB，转换后 XML 上限 30 MB；完整 way 可能延伸到范围外。大范围、超大响应、服务错误会停在可恢复的 error，不自动重试，也不会冒充匹配成功。可稍后再次明确同意，或提供 `--osm-file` 离线继续。已有地图不会被下载覆盖；更换控制点导致范围变化时请用新任务或显式提供新的本地地图。
+
+这不是自动地理定位：仍需要用户地标控制点及独立检查点。下载到道路也不代表道路当前允许骑行；OSM 来源需按 OpenStreetMap/ODbL 要求署名（© OpenStreetMap contributors），不得当作导航验证。
+
+网络单元测试使用模拟响应；不代表公网服务可达、真实模型联调或真实截图盲测已通过。

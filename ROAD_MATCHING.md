@@ -48,3 +48,8 @@ python road_match.py --segments outputs/road-demo/registration/registered-segmen
 - OSM 文件自行从合规来源取得并遵守数据许可；实际 OSM 数据展示须保留 OpenStreetMap contributors 归属。示例生成器不下载数据。
 
 当前仍缺截图自动地理定位、自动地标配准、真实视觉供应商联调及独立真实截图验收。
+
+
+### Agent 下载地图
+
+已完成配准且独立误差门槛通过后，可用 `resume --task-dir … --fetch-map --consent-map` 替代 `--osm-file`。程序从配准分段计算范围，模型不能指定地址或坐标；固定 Overpass 服务将收到该地理范围。真实模型任务另需 `--consent-upload`。下载与匹配仍是候选，不是自动定位或骑行导航。限额及隐私说明见 `AGENT.md`。
