@@ -29,7 +29,7 @@ Return ONE JSON object only, one of:
 {"action":"fetch_map"}
 {"action":"match"}
 {"action":"deliver","summary":"Chinese factual summary of observed tool outputs and remaining limitations"}
-Use image dimensions and visible evidence. Before choosing extraction color you may call inspect_colors with an optional screenshot crop (omit crop for full image). It returns heuristic saturated-color candidates, NOT semantic route detection or confidence. Compare the candidate preview against the screenshot; UI icons, parks and text can dominate. Ask when ambiguous; never automatically treat the highest rank as the route. Crop coordinates refer to supplied EXIF-oriented image. If uncertain ask rather than guess. You may extract with full crop if suitable. Deliver only after successful extract and centerline. No shell, URLs, file paths, invented coordinates, GPS, or claims of automatic geolocation. If trusted user-supplied controls are available you may register after centerline. Tool register accepts no model-generated control points. If goal=roads, after registration ask user for local OSM using resume --osm-file, or explicit resume --fetch-map --consent-map to download a bounded map derived from registered segments, then call match. fetch_map accepts no parameters or coordinates and requires fresh map consent. Never request map download unless map_download_requested=true. Delivery requires match attempt, not necessarily success. If goal=registration, ask for a controls JSON file through resume --controls-file, and deliver only after registration. If controls are absent, ask; never invent them. Preserve user corrections. Inspect current tool preview images alongside numeric results; old reports in history may be invalidated by corrections. Preview images are resized and crop-local, not original screenshot coordinates. If no_match or partial coverage, explicitly explain missing_segment_indices and ask for the necessary correction rather than claim completion. Color masks and centerline are not verified routes. Never infer actual traversal order at overlap. Tools execute at fixed local paths. Your goal is a pixel-analysis candidate with artifacts and honest uncertainty, not final GPS reconstruction.'''
+Use image dimensions and visible evidence. Before choosing extraction color you may call inspect_colors with an optional screenshot crop (omit crop for full image). It returns heuristic color candidates (which may omit gray or low-saturation routes), NOT semantic route detection or confidence. Gray and low-saturation lines are valid extraction targets: use their observed #RRGGBB color with extract, not an unrelated saturated candidate. A no_signal inspection does not prove there is no route; inspect the screenshot and ask for the intended line if ambiguous. Compare the candidate preview against the screenshot; UI icons, parks and text can dominate. Ask when ambiguous; never automatically treat the highest rank as the route. Crop coordinates refer to supplied EXIF-oriented image. If uncertain ask rather than guess. You may extract with full crop if suitable. Deliver only after successful extract and centerline. No shell, URLs, file paths, invented coordinates, GPS, or claims of automatic geolocation. If trusted user-supplied controls are available you may register after centerline. Tool register accepts no model-generated control points. If goal=roads, after registration ask user for local OSM using resume --osm-file, or explicit resume --fetch-map --consent-map to download a bounded map derived from registered segments, then call match. fetch_map accepts no parameters or coordinates and requires fresh map consent. Never request map download unless map_download_requested=true. Delivery requires match attempt, not necessarily success. If goal=registration, ask for a controls JSON file through resume --controls-file, and deliver only after registration. Only for goal=registration or goal=roads, if controls are absent, ask; never invent them. For goal=pixels, extract and centerline are sufficient: do not require controls, registration, OSM, or road matching. A rejected premature deliver returns LOCAL_TOOL_RESULT with missing stages; follow its next_step or ask for required user input, then retry delivery only after the missing evidence exists. Never claim a rejected delivery succeeded. Preserve user corrections. Inspect current tool preview images alongside numeric results; old reports in history may be invalidated by corrections. Preview images are resized and crop-local, not original screenshot coordinates. If no_match or partial coverage, explicitly explain missing_segment_indices and ask for the necessary correction rather than claim completion. Color masks and centerline are not verified routes. Never infer actual traversal order at overlap. Tools execute at fixed local paths. Your goal is a pixel-analysis candidate with artifacts and honest uncertainty, not final GPS reconstruction.'''
 
 
 def save(state, folder):
@@ -241,7 +241,38 @@ def apply_extraction_correction(state, color=None, crop=None):
     state['user_extraction_constraints'] = dict(config)
 
 
+MAX_DELIVERY_CORRECTIONS = 3
+
+
+def delivery_requirements(state, folder):
+    """Current evidence only; never promote missing tools to success."""
+    required = ['extract', 'centerline']
+    flags = {'extract':'extracted', 'centerline':'centerlined',
+             'register':'registered', 'match':'match_attempted'}
+    goal = state.get('goal','pixels')
+    if goal in ('registration','roads'):
+        required.append('register')
+    if goal == 'roads':
+        required.append('match')
+    missing = [tool for tool in required if not state.get(flags[tool],False)]
+    if not missing:
+        return None
+    next_step = missing[0]
+    if next_step == 'register' and not controls_current(state,folder):
+        next_step = 'ask user for resume --controls-file; never invent control points'
+    elif next_step == 'match':
+        if not state.get('registration_gate_passed'):
+            next_step = 'ask user to correct controls/check points with resume --controls-file; independent error gate failed'
+        elif not (Path(folder)/'map.osm').exists():
+            next_step = ('fetch_map (only with fresh consent)' if state.get('map_download_requested')
+                         else 'ask user for resume --osm-file or explicit resume --fetch-map --consent-map')
+    return {'tool':'deliver', 'status':'rejected', 'reason':'missing_required_tool_outputs',
+            'goal':goal, 'missing_tools':missing, 'next_step':next_step,
+            'verified':False, 'message':'No delivery occurred. Run missing tools or ask for necessary user input; do not claim completion.'}
+
+
 def run(state, folder, planner, budget=6, consent_map=False):
+    delivery_corrections = 0
     for _ in range(budget):
         try:
             # 已知完整的用户修正直接走确定性提线，避免再让模型猜颜色或裁剪框。
@@ -338,12 +369,22 @@ def run(state, folder, planner, budget=6, consent_map=False):
                 state['road_diagnostics'].update(verified=False, original_gps=False)
                 tool_result = {'tool':'match', **{k:result[k] for k in ('status','matched_segment_count','input_segment_count','matched_segment_indices','missing_segment_indices','coverage_fraction','warnings')}}
             elif name == 'deliver':
-                if not state.get('extracted') or not state.get('centerlined'):
-                    raise ValueError('Delivery requires successful extract and centerline')
-                if state.get('goal') in ('registration','roads') and not state.get('registered'):
-                    raise ValueError('Registration goal requires registration tool output')
-                if state.get('goal') == 'roads' and not state.get('match_attempted'):
-                    raise ValueError('Road goal requires matching attempt')
+                rejection = delivery_requirements(state,folder)
+                if rejection is not None:
+                    delivery_corrections += 1
+                    rejection['corrections_remaining'] = MAX_DELIVERY_CORRECTIONS-delivery_corrections
+                    state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps(rejection,ensure_ascii=False)})
+                    # A rejected summary is not an artifact or a successful delivery.
+                    state.pop('summary',None)
+                    state.pop('artifacts',None)
+                    state.pop('error',None)
+                    state['status'] = 'analyzing'
+                    if delivery_corrections >= MAX_DELIVERY_CORRECTIONS:
+                        state.update(status='paused',question='模型多次提前交付，尚缺必要工具结果。请检查记录后继续；未生成成功交付。')
+                    save(state,folder)
+                    if state['status'] == 'paused':
+                        return state
+                    continue
                 summary = action.get('summary')
                 if not isinstance(summary,str) or not summary.strip() or len(summary)>6000:
                     raise ValueError('Invalid summary')

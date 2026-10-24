@@ -16,7 +16,7 @@ MAX_CANDIDATES = 5
 HUE_RADIUS = 12  # Pillow HSV bins; circular distance, approximately 17 degrees
 HUE_SEPARATION = 32  # approximately 45 degrees
 WARNING = ('Heuristic color candidates only, not semantic route identification or '
-           'confidence. No map crop or geolocation is inferred. Counts refer to '
+           'confidence. Neutral candidates are brightness proposals and may include text. No map crop or geolocation is inferred. Counts refer to '
            'sampled pixels; downsampling can miss thin features. Bounding boxes '
            'enclose sampled support, not an exact full-resolution segmentation.')
 
@@ -128,13 +128,45 @@ def inspect_colors(image_path, output_dir, crop=None):
         masks.append(mask)
         eligible &= distances[center] >= HUE_SEPARATION
 
-    report = {'status': 'needs_confirmation' if candidates else 'no_signal',
+    # Neutral/tinted-gray proposals use brightness, never undefined gray hue.
+    # Keep separate from saturated proposals so consumers can inspect both honestly.
+    neutral_candidates, neutral_masks = [], []
+    neutral = (hsv[:, :, 1] <= 81) & (hsv[:, :, 2] >= 25) & (hsv[:, :, 2] <= 215)
+    value = hsv[:, :, 2].astype(np.int16)
+    brightness_hist = np.bincount(value[neutral], minlength=256)
+    available = np.ones(256, dtype=bool)
+    for _ in range(2):
+        scores_gray = np.convolve(brightness_hist, np.ones(25, dtype=np.int64), mode='same')
+        center = int(np.argmax(np.where(available, scores_gray, -1)))
+        mask = neutral & (np.abs(value-center) <= 12)
+        count = int(mask.sum())
+        available &= np.abs(np.arange(256)-center) > 30
+        if count < minimum:
+            break
+        if count > size[0]*size[1]*0.2:
+            continue  # flat gray background is not a useful route proposal
+        yy, xx = np.nonzero(mask)
+        color = np.median(rgb[mask], axis=0).astype(np.uint8)
+        x0, y0, _, _ = bounds
+        neutral_candidates.append({
+            'color': '#%02X%02X%02X' % tuple(color.tolist()),
+            'supporting_pixel_count': count,
+            'bbox_xyxy': [x0+int(xx.min())*cw//size[0], y0+int(yy.min())*ch//size[1],
+                          x0+math.ceil((int(xx.max())+1)*cw/size[0]),
+                          y0+math.ceil((int(yy.max())+1)*ch/size[1])],
+            'kind': 'heuristic_neutral_candidate',
+            'warning': 'Brightness proposal only; may include text, not route confidence'})
+        neutral_masks.append(mask)
+
+    report = {'status': 'needs_confirmation' if candidates or neutral_candidates else 'no_signal',
               'warning': WARNING, 'crop': bounds, 'image_size': [w, h],
               'coordinate_frame': 'original_exif_oriented_pixels',
               'bbox_convention': 'xyxy_right_bottom_exclusive',
               'sample_size': list(size), 'count_frame': 'sampled_pixels',
               'sampling': 'nearest_neighbor', 'minimum_support': minimum,
-              'candidates': candidates}
+              'candidates': candidates, 'neutral_candidates': neutral_candidates}
+    candidates = candidates + neutral_candidates
+    masks = masks + neutral_masks
     # Fixed-size-bounded contact sheet: sampled original plus one panel/candidate.
     panel_w, panel_h = max(size[0], 300), size[1] + 60
     sheet = Image.new('RGB', (panel_w * (1 + len(candidates)), panel_h), 'white')
@@ -142,7 +174,7 @@ def inspect_colors(image_path, output_dir, crop=None):
     draw = ImageDraw.Draw(sheet)
     draw.text((5, 5), 'Sampled crop - heuristic only', fill='black')
     if not candidates:
-        draw.text((5, 25), 'No saturated color signal', fill='black')
+        draw.text((5, 25), 'No useful color signal', fill='black')
     for i, (candidate, mask) in enumerate(zip(candidates, masks), 1):
         left = i * panel_w
         draw.rectangle((left + 5, 5, left + 35, 30), fill=candidate['color'])

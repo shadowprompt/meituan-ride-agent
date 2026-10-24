@@ -53,10 +53,47 @@ def artifact_current(state, name):
     return valid and bool(state.get('registration_gate_passed')) and bool(state.get('match_attempted'))
 
 
+# Internal failures expose only fixed categories and recovery tips, never
+# exception text, subprocess output, remote responses or local paths.
+GUIDANCE = {
+    'extraction_required': '尚无有效轨迹提取；请先提供或修正颜色和裁剪范围，完成提取后再上传控制点或继续。',
+    'centerline_required': '尚无有效中心线；请检查提取预览、修正颜色或裁剪，再继续生成中心线。',
+    'registration_required': '尚未完成当前裁剪的配准；请上传与当前裁剪对应的控制点 JSON，完成配准后再下载地图或匹配。',
+    'registration_gate_failed': '配准尚未通过独立检查；请核对控制点坐标及独立检查点，重新配准后再下载地图或匹配。',
+    'road_processing_failed': '道路处理未完成；请检查配准范围及本地 OSM 数据，或重新授权地图下载后继续。结果不可用于导航。',
+    'task_processing_failed': '任务处理未完成；请刷新状态、核对输入和服务端模型配置，再重新授权继续。',
+    'cli_failed': '执行未完成；请刷新任务状态，核对截图格式、输入文件和服务端模型配置后重试。',
+    'timeout': '运行超时；任务可能已保存，请先刷新状态，避免重复提交，再重新授权继续。',
+    'request_rejected': '请求未接受；请按提示修正输入或刷新网页后重试。',
+    'local_state_failed': '本地状态不可用；请刷新状态或创建新任务，必要时由服务端管理员检查。',
+}
+
+
+def processing_category(state):
+    """Report observed prerequisites, not a guessed cause from raw error text."""
+    if not state.get('extracted'):
+        return 'extraction_required'
+    if not state.get('centerlined'):
+        return 'centerline_required'
+    if state.get('goal') in ('registration', 'roads'):
+        if not state.get('registered'):
+            return 'registration_required'
+        if state.get('goal') == 'roads':
+            if not state.get('registration_gate_passed'):
+                return 'registration_gate_failed'
+            return 'road_processing_failed'
+    return 'task_processing_failed'
+
+
 class WebError(Exception):
-    def __init__(self, message, code=400):
+    def __init__(self, message, code=400, category='request_rejected'):
         super().__init__(message)
         self.code = code
+        self.category = category if category in GUIDANCE else 'request_rejected'
+
+    def public(self):
+        return {'error': str(self), 'error_category': self.category,
+                'recovery_hint': GUIDANCE[self.category]}
 
 
 def safe_path(root, *parts):
@@ -126,10 +163,26 @@ class RideServer(ThreadingHTTPServer):
                                     cwd=str(BASE), shell=False, capture_output=True,
                                     timeout=self.cli_timeout, check=False)
         except subprocess.TimeoutExpired:
-            raise WebError('运行超时，任务可能已保存；请刷新状态后再继续', 504) from None
+            raise WebError('运行超时，任务可能已保存；请刷新状态后再继续', 504, 'timeout') from None
         # 不向页面返回 stdout/stderr：异常中可能包含密钥、远端响应或本地路径。
         if result.returncode:
-            raise WebError('CLI 运行失败；请检查输入、服务端模型配置和任务状态', 422)
+            category = 'cli_failed'
+            # A prerequisite may be rejected before task.json is updated.
+            # Inspect local stage flags only, never stdout/stderr.
+            try:
+                from ride_agent import load
+                state = load(Path(args[args.index('--task-dir')+1]))
+                if '--controls-file' in args and not state.get('extracted'):
+                    category = 'extraction_required'
+                elif '--fetch-map' in args and not state.get('registered'):
+                    category = 'registration_required'
+                elif '--fetch-map' in args and not state.get('registration_gate_passed'):
+                    category = 'registration_gate_failed'
+                elif state.get('status') == 'error':
+                    category = processing_category(state)
+            except (OSError, ValueError, TypeError, KeyError, IndexError):
+                pass
+            raise WebError('CLI 运行失败（详细错误不在网页公开）', 422, category)
 
     def status(self, task_id):
         from ride_agent import load
@@ -142,8 +195,10 @@ class RideServer(ThreadingHTTPServer):
         fields = ('mode', 'goal', 'status', 'question', 'summary', 'warnings',
                   'registration_notice', 'road_notice', 'verified', 'original_gps')
         result = {key: state[key] for key in fields if key in state}
-        if state.get('error'):
-            result['error'] = '任务处理错误，请核对输入后重试（详细错误不在网页公开）'
+        if state.get('error') or state.get('status') == 'error':
+            category = processing_category(state)
+            result.update(error='任务处理错误（详细错误不在网页公开）',
+                          error_category=category, recovery_hint=GUIDANCE[category])
         result['task_id'] = task_id
         available = []
         for name in sorted(ARTIFACTS):
@@ -198,7 +253,7 @@ class RideServer(ThreadingHTTPServer):
             self.run_cli(args)
         except WebError as exc:
             # 创建失败仍提供编号，以便用户查看已落盘的任务状态。
-            raise WebError(str(exc)+'；任务编号：'+task_id, exc.code) from None
+            raise WebError(str(exc)+'；任务编号：'+task_id, exc.code, exc.category) from None
         return self.status(task_id)
 
     def resume(self, task_id, data):
@@ -271,23 +326,25 @@ class RideServer(ThreadingHTTPServer):
 
 PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>骑行截图分析（本地）</title>
-<style>body{max-width:950px;margin:2em auto;padding:0 1em;font-family:system-ui;line-height:1.6}fieldset{margin:1em 0}label{display:block;margin:.5em 0}textarea{width:95%;height:6em}button{padding:.5em 1em}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1em}img{max-width:100%;max-height:420px}input[type=text]{width:70%}</style>
+<style>body{max-width:950px;margin:2em auto;padding:0 1em;font-family:system-ui;line-height:1.6}fieldset{margin:1em 0}label{display:block;margin:.5em 0}textarea{width:95%;height:6em}button{padding:.5em 1em}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1em}img{max-width:100%;max-height:420px}input[type=text]{width:70%}.consent{border:2px solid #855400;background:#fff4cf;padding:1em;font-weight:bold}</style>
 <h1>骑行截图分析 · 本地网页</h1><p>结果只是未验证候选，不是真实 GPS，不可用于导航。Demo 为固定离线演示，并非模型识别。截图不会通过本网页向外发送；只有明确同意的 API / 地图步骤会访问外部服务。</p>
 <fieldset><legend>1. 创建任务</legend><label>截图（PNG/JPEG/WebP，≤20 MB、≤400万像素） <input id="image" type="file" accept="image/png,image/jpeg,image/webp"></label>
 <label>模式 <select id="mode"><option value="demo">离线 Demo</option><option value="api">真实视觉 API</option></select></label>
-<label>目标 <select id="goal"><option value="pixels">提取轨迹像素</option><option value="registration">手工控制点配准</option><option value="roads">道路候选匹配</option></select></label><button id="create">创建并开始</button></fieldset>
-<label><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（创建/继续后自动取消）</label>
+<label>目标 <select id="goal"><option value="pixels">提取轨迹像素</option><option value="registration">手工控制点配准</option><option value="roads">道路候选匹配</option></select></label>
+<label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
+<button id="create">创建并开始</button></fieldset>
 <fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre></fieldset>
 <fieldset><legend>3. 回答 / 修正 / 上传证据</legend><label>回答（Demo 首次可填 {"crop":[0,0,80,60],"color":"#00BFA5"}）<textarea id="answer"></textarea></label>
 <label>修正颜色 <input id="color" type="text" placeholder="#00BFA5，空白不修改"></label>
 <label>修正裁剪 <input id="crop" type="text" placeholder="[左,上,右,下]，空白不修改"></label>
 <p>裁剪变更会使旧控制点失效。控制点必须使用当前裁剪坐标，网页不会自动地理定位。</p>
 <label>控制点 JSON <input id="controls" type="file" accept=".json,application/json"></label><label>本地 OSM XML <input id="osm" type="file" accept=".osm,.xml"></label>
+<p id="roadsNotice">注意：勾选下载地图或上传本地 OSM 后，点击“继续处理”会将任务目标自动切换为 roads（道路候选匹配），即使原目标为像素提取或配准。下载须先完成配准并通过独立检查；下载授权与 API 上传授权相互独立，未勾选不会下载。</p>
 <label><input id="fetch" type="checkbox">下载当前配准范围的地图（不可同时上传 OSM）</label><label><input id="mapConsent" type="checkbox">仅本次同意向 Overpass 发送地理范围（不发送截图）</label>
 <button id="resume">继续处理</button></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。</p><div id="artifacts"></div>
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
-async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error(d.error||'请求失败');return d;}
+async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
 function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
 async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('uploadConsent').checked=false;$('mapConsent').checked=false;}}
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
@@ -371,9 +428,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
             raise WebError('页面不存在', 404)
         except WebError as exc:
-            self.send_json(exc.code, {'error': str(exc)})
+            self.send_json(exc.code, exc.public())
         except (OSError, ValueError, TypeError, KeyError, RecursionError):
-            self.send_json(500, {'error': '本地状态读取失败'})
+            self.send_json(500, WebError('本地状态读取失败', 500, 'local_state_failed').public())
 
     def do_POST(self):
         try:
@@ -410,10 +467,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, self.server.resume(match[1], data))
         except WebError as exc:
             self.close_connection = True
-            self.send_json(exc.code, {'error': str(exc)})
+            self.send_json(exc.code, exc.public())
         except (OSError, ValueError, TypeError, KeyError, RecursionError):
             self.close_connection = True
-            self.send_json(500, {'error': '本地任务处理失败'})
+            self.send_json(500, WebError('本地任务处理失败', 500, 'local_state_failed').public())
 
     def do_OPTIONS(self):
         self.send_json(405, {'error': '不支持跨域访问'})

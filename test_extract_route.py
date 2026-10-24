@@ -38,8 +38,9 @@ class ExtractionTests(unittest.TestCase):
                        {'min_saturation': 2}]:
             with self.assertRaises(ValueError):
                 segment(self.sample(), (0, 191, 165), **kwargs)
-        with self.assertRaises(ValueError):
-            segment(self.sample(), (128, 128, 128))
+        mask, stats = segment(self.sample(), (128, 128, 128))
+        self.assertFalse(mask.any())
+        self.assertEqual(stats['segmentation_mode'], 'neutral_brightness')
 
     def test_artifacts_and_crop(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,4 +1,4 @@
-"""Manual crop + HSV color segmentation baseline; NOT semantic/GPS recognition."""
+"""Crop + chromatic HSV / neutral brightness segmentation; NOT semantic/GPS recognition."""
 import argparse
 from collections import deque
 import hashlib
@@ -22,7 +22,7 @@ def parse_color(value):
         raise ValueError('Color must be #RRGGBB') from None
 
 
-def filter_components(mask, minimum):
+def filter_components(mask, minimum, minimum_span=1):
     """8-connected components; preserve every component meeting size threshold."""
     h, w = mask.shape
     seen = np.zeros_like(mask, dtype=bool)
@@ -44,6 +44,8 @@ def filter_components(mask, minimum):
                         todo.append((ny, nx))
         if len(points) >= minimum:
             yy, xx = zip(*points)
+            if max(max(xx)-min(xx)+1, max(yy)-min(yy)+1) < minimum_span:
+                continue
             kept[yy, xx] = True
             components.append({'pixels': len(points), 'bbox_crop_xyxy':
                                [min(xx), min(yy), max(xx)+1, max(yy)+1]})
@@ -51,29 +53,42 @@ def filter_components(mask, minimum):
     return kept, components
 
 
-def segment(image, color, hue_tolerance=20, min_saturation=0.35, min_value=0.2, min_component=20):
+def segment(image, color, hue_tolerance=20, min_saturation=0.35, min_value=0.2, min_component=20,
+            gray_value_tolerance=0.12, gray_max_saturation=0.32, gray_min_span=16):
     if not math.isfinite(hue_tolerance) or not 0 < hue_tolerance <= 180:
         raise ValueError('Hue tolerance must be in (0, 180] degrees')
     if any(not math.isfinite(v) or not 0 <= v <= 1 for v in (min_saturation, min_value)):
         raise ValueError('Saturation/value thresholds must be in [0, 1]')
     if isinstance(min_component, bool) or not isinstance(min_component, int) or min_component < 1:
         raise ValueError('min_component must be a positive integer')
+    if any(not math.isfinite(v) or not 0 <= v <= 1
+           for v in (gray_value_tolerance, gray_max_saturation)):
+        raise ValueError('Gray thresholds must be finite and in [0, 1]')
+    if type(gray_min_span) is not int or gray_min_span < 1:
+        raise ValueError('gray_min_span must be a positive integer')
     if image.width*image.height > MAX_PIXELS:
         raise ValueError('Crop exceeds pixel limit')
     target = np.array(Image.new('RGB', (1, 1), color).convert('HSV'))[0, 0]
-    if int(target[1]) < 20:
-        raise ValueError('Target color must be chromatic; gray/white/black hue is undefined')
     hsv = np.array(image.convert('RGB').convert('HSV')).astype(np.float32)
-    dh = np.abs(hsv[:, :, 0]-float(target[0])) * (360/255)
-    dh = np.minimum(dh, 360-dh)
-    raw = (dh <= hue_tolerance) & (hsv[:, :, 1] >= min_saturation*255) & (hsv[:, :, 2] >= min_value*255)
-    mask, components = filter_components(raw, min_component)
+    neutral = int(target[1]) < 64  # saturation < 0.25: hue is unstable/uninformative
+    if neutral:
+        # Match neutral brightness explicitly. Never widen hue to include all map colors.
+        raw = ((hsv[:, :, 1] <= gray_max_saturation*255)
+               & (np.abs(hsv[:, :, 2]-float(target[2])) <= gray_value_tolerance*255))
+    else:
+        dh = np.abs(hsv[:, :, 0]-float(target[0])) * (360/255)
+        dh = np.minimum(dh, 360-dh)
+        raw = ((dh <= hue_tolerance) & (hsv[:, :, 1] >= min_saturation*255)
+               & (hsv[:, :, 2] >= min_value*255))
+    mask, components = filter_components(raw, min_component, gray_min_span if neutral else 1)
     return mask, {'raw_pixels': int(raw.sum()), 'selected_pixels': int(mask.sum()),
+                  'segmentation_mode': 'neutral_brightness' if neutral else 'chromatic_hsv',
                   'components': components}
 
 
 def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
-            min_saturation=0.35, min_value=0.2, min_component=20):
+            min_saturation=0.35, min_value=0.2, min_component=20,
+            gray_value_tolerance=0.12, gray_max_saturation=0.32, gray_min_span=16):
     source = Path(image_path)
     if source.stat().st_size > 50_000_000:
         raise ValueError('Image exceeds 50 MB limit')
@@ -95,12 +110,15 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
     if not (0 <= left < right <= w and 0 <= top < bottom <= h):
         raise ValueError('Crop outside oriented image or empty')
     region = image.crop(tuple(crop))
-    mask, stats = segment(region, parse_color(color), hue_tolerance, min_saturation, min_value, min_component)
+    mask, stats = segment(region, parse_color(color), hue_tolerance, min_saturation, min_value, min_component,
+                          gray_value_tolerance, gray_max_saturation, gray_min_span)
     overlay = np.array(region)
     overlay[mask] = (overlay[mask]*0.35 + np.array([255, 0, 80])*0.65).astype(np.uint8)
     warnings = ['Color segmentation only: same-colored icons/text may be included; occluded lines may be missed.',
                 'No centerline, traversal order, geolocation or GPS reconstruction.',
                 'Crop coordinates refer to EXIF-oriented image; bbox right/bottom are exclusive.']
+    if stats['segmentation_mode'] == 'neutral_brightness':
+        warnings.append('Neutral brightness candidate only: same-gray text/roads may remain; short fragments are filtered. No gaps are bridged. Inspect overlay and use a map-only crop.')
     if not stats['selected_pixels']:
         warnings.append('No pixels retained. Check crop, target color and thresholds.')
     if stats['selected_pixels'] > mask.size*0.2:
@@ -108,12 +126,15 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
     if len(stats['components']) > 1:
         warnings.append('Multiple components retained; do not assume they form a single ordered route.')
     report = {'status': 'needs_confirmation' if stats['selected_pixels'] else 'no_detection',
-              'verified': False, 'original_gps': False, 'method': 'manual_crop_hsv_threshold_v1',
+              'verified': False, 'original_gps': False, 'method': 'manual_crop_color_threshold_v2',
               'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
               'oriented_image_size': [w, h], 'crop_xyxy': crop,
               'parameters': {'color': color, 'hue_tolerance_degrees': hue_tolerance,
                              'min_saturation': min_saturation, 'min_value': min_value,
-                             'min_component': min_component},
+                             'min_component': min_component,
+                             'gray_value_tolerance': gray_value_tolerance,
+                             'gray_max_saturation': gray_max_saturation,
+                             'gray_min_span': gray_min_span},
               **stats, 'warnings': warnings}
     out.mkdir(parents=True, exist_ok=True)
     Image.fromarray(mask.astype(np.uint8)*255).save(out/'mask.png')
@@ -131,11 +152,15 @@ def main():
     parser.add_argument('--min-saturation', type=float, default=0.35)
     parser.add_argument('--min-value', type=float, default=0.2)
     parser.add_argument('--min-component', type=int, default=20)
+    parser.add_argument('--gray-value-tolerance', type=float, default=0.12)
+    parser.add_argument('--gray-max-saturation', type=float, default=0.32)
+    parser.add_argument('--gray-min-span', type=int, default=16)
     parser.add_argument('--output-dir', required=True)
     args = parser.parse_args()
     try:
         report = extract(args.image, args.output_dir, args.color, args.crop, args.hue_tolerance,
-                         args.min_saturation, args.min_value, args.min_component)
+                         args.min_saturation, args.min_value, args.min_component,
+                         args.gray_value_tolerance, args.gray_max_saturation, args.gray_min_span)
     except (ValueError, OSError, Image.DecompressionBombError) as exc:
         parser.error(str(exc))
     print(json.dumps({'status': report['status'], 'selected_pixels': report['selected_pixels'],

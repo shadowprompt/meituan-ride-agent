@@ -49,3 +49,11 @@ python extract_route.py --image examples/synthetic-ride.png --crop 0 0 640 480 -
 ```
 
 查看 `outputs/demo/mask.png`、`outputs/demo/overlay.png` 和 `outputs/demo/extraction.json`。合成图仅用于检查颜色提取流程，不代表真实截图上的识别效果。
+
+## 灰色 / 偏蓝灰色线路
+
+低饱和度参考色自动使用明度邻域与最大饱和度筛选，不使用灰色的色相。
+可设置 `--gray-value-tolerance 0.12 --gray-max-saturation 0.32 --gray-min-span 16`。
+同色文字或道路仍可能入选；短区域过滤可能遗漏短路线段。不会自动连接遮挡断点。
+颜色检查的 `neutral_candidates` 仅是明度候选，不能按数量排名认定路线。
+详见 `GRAY_UPDATE.md`。

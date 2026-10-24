@@ -47,7 +47,8 @@ class AgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)/'task'
             state=run(start(self.fixture(tmp),folder,True),folder,Bad())
-            self.assertEqual(state['status'],'error')
+            self.assertEqual(state['status'],'paused')
+            self.assertNotIn('summary',state)
 
     def test_loop_budget(self):
         class Repeater:
@@ -113,8 +114,9 @@ class AgentTests(unittest.TestCase):
             state=start(self.fixture(tmp),folder,True,goal='roads')
             state.update(extracted=True,centerlined=True,registered=True)
             state=run(state,folder,Bad())
-            self.assertEqual(state['status'],'error')
-            self.assertIn('matching attempt',state['error'])
+            self.assertEqual(state['status'],'paused')
+            self.assertNotIn('summary',state)
+            self.assertFalse(state.get('match_attempted',False))
 
     def test_bad_registration_blocks_roads(self):
         class Attempt:
