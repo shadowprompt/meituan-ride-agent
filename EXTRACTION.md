@@ -57,3 +57,8 @@ python extract_route.py --image examples/synthetic-ride.png --crop 0 0 640 480 -
 同色文字或道路仍可能入选；短区域过滤可能遗漏短路线段。不会自动连接遮挡断点。
 颜色检查的 `neutral_candidates` 仅是明度候选，不能按数量排名认定路线。
 详见 `GRAY_UPDATE.md`。
+
+## 线路带内部修复
+
+灰色分支在细化之前增加有原图证据约束的封闭内部清理，详见 `BAND_FIX.md`。
+新增像素记录在 `mask_cleanup`，不自动封闭开放断点，不声称保留真实骑行拓扑。

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
+from mask_cleanup import fill_supported_interiors
 
 MAX_PIXELS = 12_000_000
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
@@ -23,7 +24,7 @@ def parse_color(value):
 
 
 def filter_components(mask, minimum, minimum_span=1):
-    """8-connected components; preserve every component meeting size threshold."""
+    """八邻域连通分量筛选：只按面积和跨度过滤，不按最大分量猜路线。"""
     h, w = mask.shape
     seen = np.zeros_like(mask, dtype=bool)
     kept = np.zeros_like(mask, dtype=bool)
@@ -70,9 +71,9 @@ def segment(image, color, hue_tolerance=20, min_saturation=0.35, min_value=0.2, 
         raise ValueError('Crop exceeds pixel limit')
     target = np.array(Image.new('RGB', (1, 1), color).convert('HSV'))[0, 0]
     hsv = np.array(image.convert('RGB').convert('HSV')).astype(np.float32)
-    neutral = int(target[1]) < 64  # saturation < 0.25: hue is unstable/uninformative
+    neutral = int(target[1]) < 64  # 低饱和度颜色的色相不稳定，改用明度和饱和度范围
     if neutral:
-        # Match neutral brightness explicitly. Never widen hue to include all map colors.
+        # 明确匹配中性明度；不能简单放宽色相，把整张底图都选进来。
         raw = ((hsv[:, :, 1] <= gray_max_saturation*255)
                & (np.abs(hsv[:, :, 2]-float(target[2])) <= gray_value_tolerance*255))
     else:
@@ -80,10 +81,15 @@ def segment(image, color, hue_tolerance=20, min_saturation=0.35, min_value=0.2, 
         dh = np.minimum(dh, 360-dh)
         raw = ((dh <= hue_tolerance) & (hsv[:, :, 1] >= min_saturation*255)
                & (hsv[:, :, 2] >= min_value*255))
+    # 灰色路线优先保留实心带：只修补有原图支持的封闭内部，不跨断点连线。
+    raw_count = int(raw.sum())
+    cleanup = {'filled_holes': 0, 'added_pixels': 0, 'method': 'not_applied'}
+    if neutral:
+        raw, cleanup = fill_supported_interiors(raw, image)
     mask, components = filter_components(raw, min_component, gray_min_span if neutral else 1)
-    return mask, {'raw_pixels': int(raw.sum()), 'selected_pixels': int(mask.sum()),
+    return mask, {'raw_pixels': raw_count, 'selected_pixels': int(mask.sum()),
                   'segmentation_mode': 'neutral_brightness' if neutral else 'chromatic_hsv',
-                  'components': components}
+                  'mask_cleanup': cleanup, 'components': components}
 
 
 def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
@@ -119,6 +125,8 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
                 'Crop coordinates refer to EXIF-oriented image; bbox right/bottom are exclusive.']
     if stats['segmentation_mode'] == 'neutral_brightness':
         warnings.append('Neutral brightness candidate only: same-gray text/roads may remain; short fragments are filtered. No gaps are bridged. Inspect overlay and use a map-only crop.')
+    if stats['mask_cleanup']['added_pixels']:
+        warnings.append('Source-supported enclosed interiors were filled before thinning; inspect overlay. This is heuristic, not recovered traversal evidence.')
     if not stats['selected_pixels']:
         warnings.append('No pixels retained. Check crop, target color and thresholds.')
     if stats['selected_pixels'] > mask.size*0.2:

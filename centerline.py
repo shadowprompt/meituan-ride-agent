@@ -8,7 +8,11 @@ from PIL import Image, ImageDraw
 
 
 def thin(mask, max_iterations=2048):
-    """Zhang-Suen thinning with padded border, simultaneous substep deletion."""
+    """Zhang-Suen 细化：补零边界，每个子步骤同时删点，避免遍历顺序影响结果。
+
+    输入必须是线路区域而非两侧轮廓；细化本身不会理解或合并平行边缘。
+    孔洞由上游有原图证据的掩码清理处理，这里保留剩余拓扑，不强删真实环路。
+    """
     a = np.pad(np.asarray(mask, dtype=bool), 1)
     for iteration in range(max_iterations):
         changed = False
