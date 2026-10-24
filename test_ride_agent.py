@@ -39,7 +39,7 @@ class AgentTests(unittest.TestCase):
             folder=Path(tmp)/'task'
             state=run(start(self.fixture(tmp),folder,True),folder,Bad())
             self.assertEqual(state['status'],'error')
-            self.assertIn('Unknown action',state['error'])
+            self.assertEqual(state['error_category'],'model_action_invalid')
 
     def test_no_false_delivery(self):
         class Bad:
@@ -84,7 +84,7 @@ class AgentTests(unittest.TestCase):
             state['centerlined']=True
             state=run(state,folder,Bad())
             self.assertEqual(state['status'],'error')
-            self.assertIn('User-supplied',state['error'])
+            self.assertEqual(state['error_category'],'model_action_invalid')
 
     def test_mock_api_request(self):
         class Response:

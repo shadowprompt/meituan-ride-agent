@@ -23,6 +23,8 @@ import threading
 from urllib.parse import urlsplit
 import uuid
 
+from ride_errors import GUIDANCE as STRUCTURED_GUIDANCE
+
 BASE = Path(__file__).resolve().parent
 MAX_IMAGE = 20_000_000
 MAX_BODY = 44_000_000  # 30 MB OSM XML plus JSON overhead
@@ -81,7 +83,7 @@ GUIDANCE = {
     'registration_required': '尚未完成当前裁剪的配准；请上传与当前裁剪对应的控制点 JSON，完成配准后再下载地图或匹配。',
     'registration_gate_failed': '配准尚未通过独立检查；请核对控制点坐标及独立检查点，重新配准后再下载地图或匹配。',
     'road_processing_failed': '道路处理未完成；请检查配准范围及本地 OSM 数据，或重新授权地图下载后继续。结果不可用于导航。',
-    'task_processing_failed': '任务处理未完成；请刷新状态、核对输入和服务端模型配置，再重新授权继续。',
+    'task_processing_failed': '任务处理未完成，当前证据不足以确定原因；不要仅凭无产物反复修改颜色/裁剪。请先刷新状态，必要时提供脱敏 error_category、error_stage 与错误类型，不要发送密钥、环境文件或完整任务。',
     'cli_failed': '执行未完成；请刷新任务状态，核对截图格式、输入文件和服务端模型配置后重试。',
     'api_timeout': '模型 API 连接或写入超时；已有提取不会失效。可勾选仅本地继续生成中心线，无需重新上传；需模型时再授权重试。',
     'api_network': '模型 API 网络连接失败；已有结果已保存。可仅本地继续；需要视觉判断时检查服务配置后重新授权。',
@@ -90,23 +92,13 @@ GUIDANCE = {
     'local_state_failed': '本地状态不可用；请刷新状态或创建新任务，必要时由服务端管理员检查。',
 }
 
+GUIDANCE.update(STRUCTURED_GUIDANCE)
+
 
 def processing_category(state):
-    """Report observed prerequisites, not a guessed cause from raw error text."""
-    if state.get('error_category') in ('api_timeout','api_network'):
-        return state['error_category']
-    if not state.get('extracted'):
-        return 'extraction_required'
-    if not state.get('centerlined'):
-        return 'centerline_required'
-    if state.get('goal') in ('registration', 'roads'):
-        if not state.get('registered'):
-            return 'registration_required'
-        if state.get('goal') == 'roads':
-            if not state.get('registration_gate_passed'):
-                return 'registration_gate_failed'
-            return 'road_processing_failed'
-    return 'task_processing_failed'
+    """优先使用固定错误代码；旧任务缺少结构化证据时不按产物缺失猜原因。"""
+    category = state.get('error_category')
+    return category if isinstance(category, str) and category in GUIDANCE else 'task_processing_failed'
 
 
 class WebError(Exception):
@@ -191,6 +183,15 @@ class RideServer(ThreadingHTTPServer):
         # 不向页面返回 stdout/stderr：异常中可能包含密钥、远端响应或本地路径。
         if result.returncode:
             category = 'cli_failed'
+            # 仅解析 CLI 自产的固定代码，不公开或匹配 stderr 原文。
+            try:
+                if len(result.stderr or b'') <= 4096:
+                    report = json.loads(result.stderr)
+                    code = report.get('error_category')
+                    if isinstance(code, str) and code in GUIDANCE:
+                        category = code
+            except (ValueError, TypeError, AttributeError):
+                pass
             # A prerequisite may be rejected before task.json is updated.
             # Inspect local stage flags only, never stdout/stderr.
             try:
@@ -202,7 +203,7 @@ class RideServer(ThreadingHTTPServer):
                     category = 'registration_required'
                 elif '--fetch-map' in args and not state.get('registration_gate_passed'):
                     category = 'registration_gate_failed'
-                elif state.get('status') == 'error':
+                elif category == 'cli_failed' and state.get('status') == 'error':
                     category = processing_category(state)
             except (OSError, ValueError, TypeError, KeyError, IndexError):
                 pass
@@ -223,6 +224,9 @@ class RideServer(ThreadingHTTPServer):
             category = processing_category(state)
             result.update(error='任务处理错误（详细错误不在网页公开）',
                           error_category=category, recovery_hint=GUIDANCE[category])
+            stage = state.get('error_stage')
+            if isinstance(stage, str) and stage in ('planner','action','inspect_colors','extract','centerline','register','fetch_map','match'):
+                result['error_stage'] = stage
         result['task_id'] = task_id
         available = []
         for name in sorted(ARTIFACTS):

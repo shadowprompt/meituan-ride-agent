@@ -64,12 +64,11 @@ class GuidanceTests(unittest.TestCase):
         self.assertNotIn('.innerHTML', PAGE)
 
     def test_status_fixed_categories_never_raw_exception(self):
-        stages = [({}, 'extraction_required'),
-                  ({'extracted': True}, 'centerline_required'),
-                  ({'extracted': True, 'centerlined': True}, 'registration_required'),
-                  ({'extracted': True, 'centerlined': True, 'registered': True}, 'registration_gate_failed'),
-                  ({'extracted': True, 'centerlined': True, 'registered': True,
-                    'registration_gate_passed': True}, 'road_processing_failed')]
+        stages = [({}, 'task_processing_failed'),
+                  ({'extracted': True}, 'task_processing_failed'),
+                  ({'error_category':'api_configuration'}, 'api_configuration'),
+                  ({'error_category':'extraction_failed'}, 'extraction_failed'),
+                  ({'error_category':'SECRET'}, 'task_processing_failed')]
         for flags, category in stages:
             with self.subTest(category=category):
                 task = self.state(goal='roads', status='error',
