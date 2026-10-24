@@ -1,6 +1,32 @@
-"""有原图证据约束的掩码内部填充；开放补全不连接不同原始连通分量。"""
+"""有原图证据约束的掩码内部填充；开放补全须有局部原图证据。"""
 from collections import deque
 import numpy as np
+
+
+def thin_edge_evidence(mask, maximum=3):
+    """用最窄穿线宽度识别薄边，不把斜边的切向长游程误判为实心臂。
+
+    每个方向同时计算两侧连续原始像素，总宽度不超过三像素才是薄边。
+    实心臂即便采样点位于边界，其向内游程仍计入；图外未知按实心处理。
+    只使用原始掩码，新增像素不会滚动成为下一轮证据。
+    """
+    source = np.asarray(mask, dtype=bool)
+    h, w = source.shape
+    narrowest = np.full(source.shape, 2*maximum+1, dtype=np.uint8)
+    for dy, dx in ((0,1),(1,0),(1,1),(1,-1)):
+        width = source.astype(np.uint8)
+        for sign in (-1,1):
+            run = source.copy()
+            for k in range(1, maximum+1):
+                sy, sx = sign*dy*k, sign*dx*k
+                sample = np.ones_like(source)
+                y0,y1 = max(0,-sy),min(h,h-sy)
+                x0,x1 = max(0,-sx),min(w,w-sx)
+                sample[y0:y1,x0:x1] = source[y0+sy:y1+sy,x0+sx:x1+sx]
+                run &= sample
+                width += run
+        narrowest = np.minimum(narrowest, width)
+    return source & (narrowest <= maximum)
 
 
 def fill_supported_interiors(mask, image, max_area=12000, max_width=24, evidence_mask=None):
@@ -98,11 +124,12 @@ def fill_supported_interiors(mask, image, max_area=12000, max_width=24, evidence
                     'method': 'enclosed_source_supported_thin_shell_v2'}
 
 
-def complete_open_interiors(mask, image, max_width=24):
-    """在同一原始分量的相对边缘之间补窄带，不做无条件闭运算。
+def complete_open_interiors(mask, image, max_width=24, *, source_contrast=True):
+    """在相对边缘之间补有原图支持的窄带，不做无条件闭运算。
 
     每条短截线内部必须全部具有低饱和、相近明度的原图支持；白色背景、
-    道路间隔和箭头均不能作为开放补线证据。不同原始分量绝不连接。
+    道路间隔和箭头均不能作为开放补线证据。默认不连接不同原始分量；
+    仅双侧薄暗边、内部更亮且至少一侧外部更亮时允许局部例外。
     四方向截线覆盖斜线；上限按欧氏距离计算而不是框宽。不是语义识别。
     原始薄边界以外的厚实线臂间隙保守保留；细到三像素以内的去回程
     与灰带两侧仍可能不可区分，不能据此声称恢复了折返或重复顺序。
@@ -123,8 +150,9 @@ def complete_open_interiors(mask, image, max_width=24):
                     if source[ny,nx] and not labels[ny,nx]:
                         labels[ny,nx] = label; queue.append((ny,nx))
     hsv = np.asarray(image.convert('RGB').convert('HSV')).astype(np.float32)
+    thin_edges = thin_edge_evidence(source)
     result = source.copy()
-    accepted = rejected = 0
+    accepted = rejected = contrast_sections = cross_component_sections = 0
     risk = np.zeros_like(source)
     for dy,dx in ((0,1),(1,0),(1,1),(1,-1)):
         for length in range(2, int(max_width/(2**.5 if dx and dy else 1))+1):
@@ -135,7 +163,8 @@ def complete_open_interiors(mask, image, max_width=24):
                 continue
             a = labels[y0:y1,x0:x1]
             b = labels[y0+dy*length:y1+dy*length,x0+dx*length:x1+dx*length]
-            valid = (a>0)&(a==b)
+            valid = (a>0)&(b>0)
+            same_component = a == b
             ref = (hsv[y0:y1,x0:x1,2]+hsv[y0+dy*length:y1+dy*length,x0+dx*length:x1+dx*length,2])/2
             for k in range(1,length):
                 v = hsv[y0+dy*k:y1+dy*k,x0+dx*k:x1+dx*k]
@@ -145,28 +174,52 @@ def complete_open_interiors(mask, image, max_width=24):
                           &(np.abs(v[:,:,2]-ref)<=.24*255))
             if not valid.any():
                 continue
-            # 同分量不等于同一路带的两侧：发夹两臂也属于同一分量。
-            # 两端沿截线向外连续四像素均被选中，说明至少一端是实心臂，
-            # 而非待补灰带的薄边。仅根据原始掩码判定，不迭代吞掉间隙。
+            # 法向短截线须见到两侧薄暗边、较亮淡灰内带及至少一侧亮背景。
+            # 另一侧可能紧邻下一条实线臂，不能要求两侧背景都宽达四像素。
+            # 只有这份双侧原图证据可覆盖斜边切向厚度误判，或跨越被箭头
+            # 切断的原始边缘分量；仅仅两条线颜色相同绝不构成连接许可。
+            interior = np.zeros_like(ref)
+            for k in range(1,length):
+                interior += hsv[y0+dy*k:y1+dy*k,x0+dx*k:x1+dx*k,2]
+            interior /= length-1
+            contrast = (thin_edges[y0:y1,x0:x1] &
+                        thin_edges[y0+dy*length:y1+dy*length,
+                                   x0+dx*length:x1+dx*length])
             thick = np.zeros_like(valid)
+            outside_evidence = np.zeros_like(valid)
             for endpoint, sign in ((0,-1),(length,1)):
+                edge = hsv[y0+dy*endpoint:y1+dy*endpoint,
+                           x0+dx*endpoint:x1+dx*endpoint,2]
+                contrast &= interior >= edge+12
                 run = np.ones_like(valid)
+                exterior_light = np.zeros_like(valid)
                 for k in range(4):
                     ys = y0+dy*(endpoint+sign*k)
                     xs = x0+dx*(endpoint+sign*k)
-                    # 越界按未知处理，保守阻止补全，避免负索引回绕。
                     sample = np.ones_like(valid)
-                    iy0, iy1 = max(0,-ys), min(y1-y0,h-ys)
-                    ix0, ix1 = max(0,-xs), min(x1-x0,w-xs)
+                    light = np.zeros_like(valid)
+                    iy0,iy1 = max(0,-ys),min(y1-y0,h-ys)
+                    ix0,ix1 = max(0,-xs),min(x1-x0,w-xs)
                     if iy1>iy0 and ix1>ix0:
                         sample[iy0:iy1,ix0:ix1] = source[ys+iy0:ys+iy1,xs+ix0:xs+ix1]
+                        light[iy0:iy1,ix0:ix1] = (hsv[ys+iy0:ys+iy1,xs+ix0:xs+ix1,2]
+                                                        >= interior[iy0:iy1,ix0:ix1]+20)
                     run &= sample
+                    exterior_light |= light
                 thick |= run
+                outside_evidence |= exterior_light
+            contrast &= outside_evidence
+            if not source_contrast:
+                contrast[:] = False
+            valid &= same_component | contrast
+            thick &= ~contrast
             blocked = valid & thick
             rejected += int(blocked.sum())
             for k in range(1,length):
                 risk[y0+dy*k:y1+dy*k,x0+dx*k:x1+dx*k] |= blocked
             valid &= ~thick
+            contrast_sections += int((valid & contrast).sum())
+            cross_component_sections += int((valid & ~same_component).sum())
             accepted += int(valid.sum())
             for k in range(1,length):
                 result[y0+dy*k:y1+dy*k,x0+dx*k:x1+dx*k] |= valid
@@ -175,5 +228,8 @@ def complete_open_interiors(mask, image, max_width=24):
                     'protected_gap_pixels': int(risk.sum()),
                     'protected_gap_bbox_xyxy': ([int(rx.min()), int(ry.min()), int(rx.max()+1), int(ry.max()+1)] if len(rx) else None),
                     'open_added_pixels':int((result & ~source).sum()),
-                    'supported_cross_sections':accepted, 'open_max_width':max_width,
-                    'open_method':'same_component_source_supported_thin_edges_v2'}
+                    'supported_cross_sections':accepted,
+                    'contrast_supported_cross_sections':contrast_sections,
+                    'cross_component_supported_sections':cross_component_sections,
+                    'open_max_width':max_width,
+                    'open_method':'source_supported_normal_width_contrast_v3'}

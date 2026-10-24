@@ -82,15 +82,22 @@ def segment(image, color, hue_tolerance=20, min_saturation=0.35, min_value=0.2, 
         dh = np.minimum(dh, 360-dh)
         raw = ((dh <= hue_tolerance) & (hsv[:, :, 1] >= min_saturation*255)
                & (hsv[:, :, 2] >= min_value*255))
-    # 灰色路线优先保留实心带：先补同一分量内有原图支持的短截线，再补封闭孔洞。
+    # 灰色路线优先保留实心带：先补有原图对比证据的短截线，再补封闭孔洞。
     raw_count = int(raw.sum())
     cleanup = {'filled_holes': 0, 'added_pixels': 0, 'method': 'not_applied'}
     if neutral:
         evidence_mask = raw.copy()
+        # 先独立完成既有保守孔洞判断，防止新增截线切开一个旧箭头孔洞后，
+        # 改变其薄边壳比例而反向丢失已获支持的像素；两路径只合并，不迭代。
+        baseline, _ = complete_open_interiors(raw, image, source_contrast=False)
+        baseline, _ = fill_supported_interiors(baseline, image, evidence_mask=evidence_mask)
         raw, open_stats = complete_open_interiors(raw, image)
+        baseline_only = int((baseline & ~raw).sum())
+        raw |= baseline
         raw, cleanup = fill_supported_interiors(raw, image, evidence_mask=evidence_mask)
         cleanup.update(open_stats)
-        cleanup['added_pixels'] += open_stats['open_added_pixels']
+        cleanup['retained_baseline_pixels'] = baseline_only
+        cleanup['added_pixels'] = int((raw & ~evidence_mask).sum())
     mask, components = filter_components(raw, min_component, gray_min_span if neutral else 1)
     return mask, {'raw_pixels': raw_count, 'selected_pixels': int(mask.sum()),
                   'segmentation_mode': 'neutral_brightness' if neutral else 'chromatic_hsv',
@@ -148,7 +155,9 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
                 'Crop coordinates refer to EXIF-oriented image; bbox right/bottom are exclusive.']
     warnings.append(selection['reason'])
     if stats['segmentation_mode'] == 'neutral_brightness':
-        warnings.append('Neutral brightness candidate only: same-gray text/roads may remain; short fragments are filtered. No gaps are bridged. Inspect overlay and use a map-only crop.')
+        warnings.append('Neutral brightness candidate only: same-gray text/roads may remain; short fragments are filtered. Only source-supported short interiors may be completed; white/unknown gaps remain. Inspect overlay and use a map-only crop.')
+    if stats['mask_cleanup'].get('cross_component_supported_sections'):
+        warnings.append('局部双侧薄暗边及内外明度对比支持了跨原始边缘分量的短截线补全；这不是路线连通性或骑行顺序证明，须核对原图。')
     if stats['mask_cleanup']['added_pixels']:
         warnings.append('Source-supported narrow open/enclosed interiors were filled before thinning; inspect overlay. This is heuristic, not recovered traversal evidence.')
     if not stats['selected_pixels']:
