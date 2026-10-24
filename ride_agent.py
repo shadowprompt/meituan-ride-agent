@@ -6,6 +6,7 @@ import io
 import json
 import os
 import shutil
+import socket
 from pathlib import Path
 import urllib.error
 import urllib.parse
@@ -176,6 +177,22 @@ class APIPlanner:
             raise ValueError('Unsupported API response structure') from exc
 
 
+class LocalPlanner:
+    """仅继续已有证据；不猜颜色、不上传、不冒充视觉模型。"""
+    local_pipeline = True
+
+    def decide(self, state, folder):
+        return {'action':'ask', 'question':'本地执行需要已知颜色和裁剪，或当前有效掩码；请提供修正。需要视觉判断时另行明确同意 API 上传。'}
+
+
+class ConsentedPlanner:
+    """延迟创建 API 客户端；确定性步骤无需密钥或逐步网络调用。"""
+    local_pipeline = True
+
+    def decide(self, state, folder):
+        return APIPlanner().decide(state, folder)
+
+
 class DemoPlanner:
     """Hard-coded orchestration fixture, not model inference."""
     def decide(self, state, folder):
@@ -305,6 +322,11 @@ def run(state, folder, planner, budget=6, consent_map=False):
             config = state.get('user_extraction_constraints',{})
             if not state.get('extracted') and all(k in config for k in ('color','crop')):
                 action = {'action':'extract', **config}
+            elif getattr(planner, 'local_pipeline', False) and state.get('extracted') and not state.get('centerlined'):
+                action = {'action':'centerline'}
+            elif (getattr(planner, 'local_pipeline', False) and state.get('goal','pixels') == 'pixels'
+                  and state.get('extracted') and state.get('centerlined')):
+                action = {'action':'deliver', 'summary':'本地提线及中心线候选已生成，尚未验证完整路线、真实起终点或行进顺序。请检查原图、掩码与骨架；不可导航。'}
             else:
                 action = planner.decide(state, folder)
             if not isinstance(action,dict):
@@ -444,10 +466,17 @@ def run(state, folder, planner, budget=6, consent_map=False):
                 raise ValueError('Unknown action; only ask/inspect_colors/extract/centerline/register/fetch_map/match/deliver allowed')
             state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps(tool_result,ensure_ascii=False)})
             state['status'] = 'analyzing'
+            state.pop('error',None)
+            state.pop('error_category',None)
             save(state,folder)
         except (ValueError, KeyError, TypeError, OSError) as exc:
             # Keep recoverable state. Model errors are not success or arbitrary execution.
-            state.update(status='error',error=str(exc)[:1000])
+            # 网络故障不能按缺失中心线来猜原因；公开层只显示固定类别。
+            category = ('api_timeout' if (isinstance(exc, (TimeoutError, socket.timeout)) or
+                         isinstance(getattr(exc,'reason',None), (TimeoutError, socket.timeout))) else
+                        'api_network' if isinstance(exc, (urllib.error.URLError, ConnectionError)) else
+                        'task_processing_failed')
+            state.update(status='error',error=str(exc)[:1000],error_category=category)
             save(state,folder)
             return state
     state.update(status='paused',question='工具循环达到本轮上限。检查任务记录后可提供修正并继续。')
@@ -465,7 +494,9 @@ def start(image_path, folder, demo=False, goal="pixels"):
     if source.stat().st_size>20_000_000:
         raise ValueError('Screenshot exceeds 20 MB')
     with Image.open(source) as opened:
-        if opened.format not in ('PNG','JPEG','WEBP') or opened.width*opened.height>4_000_000:
+        if opened.format not in ('PNG','JPEG','WEBP'):
+            raise ValueError(f'Unsupported decoded image format: {opened.format or "unknown"}; only PNG/JPEG/WebP supported. Filename extension is not format evidence; convert locally to PNG before retrying.')
+        if opened.width*opened.height>4_000_000:
             raise ValueError('Expected PNG/JPEG/WebP with at most 4 million pixels; crop/resize first')
         image = ImageOps.exif_transpose(opened).convert('RGB')
     folder.mkdir(parents=True,exist_ok=True)
@@ -488,6 +519,7 @@ def main():
     begin.add_argument('--demo',action='store_true')
     begin.add_argument('--goal',choices=['pixels','registration','roads'],default='pixels')
     resume = sub.add_parser('resume')
+    resume.add_argument('--local-only', action='store_true', help='仅用已有证据本地继续，不上传截图，不调用模型 API')
     resume.add_argument('--fetch-map', action='store_true', help='Download roads for checked registration bounds; requires --consent-map')
     resume.add_argument('--consent-map', action='store_true', help='Allow this invocation to send route bounds to Overpass (not screenshot)')
     resume.add_argument('--osm-file',help='Local OSM XML only; model cannot choose filesystem paths')
@@ -509,16 +541,17 @@ def main():
         else:
             demo = args.demo if args.command=='start' else load(args.task_dir)['mode']=='demo'
             # 地图下载同意不等于截图上传同意；每次真实调用均重新检查。
-            if not demo and not args.consent_upload:
+            local_only = getattr(args,'local_only',False)
+            if not demo and not args.consent_upload and not local_only:
                 raise ValueError('Real mode uploads screenshot, derived overlays, diagnostics + conversation. Explicit --consent-upload required each invocation.')
-            planner = DemoPlanner() if demo else APIPlanner()
+            planner = LocalPlanner() if local_only else (DemoPlanner() if demo else ConsentedPlanner())
             state = start(args.image,args.task_dir,demo,args.goal) if args.command=='start' else load(args.task_dir)
             if args.command=='resume':
                 if args.fetch_map and args.osm_file:
                     raise ValueError('Choose fetch-map or osm-file, not both')
                 if args.fetch_map and not args.consent_map:
                     raise ValueError('--fetch-map requires explicit --consent-map each invocation')
-                if not args.answer and not args.answer_file and not args.controls_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None:
+                if not args.answer and not args.answer_file and not args.controls_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None and not local_only:
                     raise ValueError('Provide answer, answer-file, controls-file or osm-file')
                 answer = args.answer or 'User supplied local evidence file.'
                 if args.color is not None or args.crop is not None:
@@ -578,6 +611,7 @@ def main():
                 state.pop('road_notice', None)
                 state['question'] = None
                 state.pop('error',None)
+                state.pop('error_category',None)
                 state['status']='analyzing'
                 save(state,args.task_dir)
             state = run(state,args.task_dir,planner, consent_map=getattr(args,'consent_map',False))

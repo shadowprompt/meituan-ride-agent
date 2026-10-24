@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
-from mask_cleanup import fill_supported_interiors
+from mask_cleanup import fill_supported_interiors, complete_open_interiors
 
 MAX_PIXELS = 12_000_000
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
@@ -81,11 +81,14 @@ def segment(image, color, hue_tolerance=20, min_saturation=0.35, min_value=0.2, 
         dh = np.minimum(dh, 360-dh)
         raw = ((dh <= hue_tolerance) & (hsv[:, :, 1] >= min_saturation*255)
                & (hsv[:, :, 2] >= min_value*255))
-    # 灰色路线优先保留实心带：只修补有原图支持的封闭内部，不跨断点连线。
+    # 灰色路线优先保留实心带：先补同一分量内有原图支持的短截线，再补封闭孔洞。
     raw_count = int(raw.sum())
     cleanup = {'filled_holes': 0, 'added_pixels': 0, 'method': 'not_applied'}
     if neutral:
+        raw, open_stats = complete_open_interiors(raw, image)
         raw, cleanup = fill_supported_interiors(raw, image)
+        cleanup.update(open_stats)
+        cleanup['added_pixels'] += open_stats['open_added_pixels']
     mask, components = filter_components(raw, min_component, gray_min_span if neutral else 1)
     return mask, {'raw_pixels': raw_count, 'selected_pixels': int(mask.sum()),
                   'segmentation_mode': 'neutral_brightness' if neutral else 'chromatic_hsv',
@@ -104,7 +107,7 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
         raise ValueError('Output must not overwrite input image')
     with Image.open(source) as opened:
         if opened.format not in ('PNG', 'JPEG', 'WEBP'):
-            raise ValueError('Only PNG/JPEG/WebP supported')
+            raise ValueError(f'Unsupported decoded image format: {opened.format or "unknown"}; only PNG/JPEG/WebP supported. Filename extension is not format evidence; convert locally to PNG before retrying.')
         if opened.width*opened.height > MAX_PIXELS:
             raise ValueError('Image exceeds 12 million pixel limit')
         image = ImageOps.exif_transpose(opened).convert('RGB')
@@ -126,7 +129,7 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
     if stats['segmentation_mode'] == 'neutral_brightness':
         warnings.append('Neutral brightness candidate only: same-gray text/roads may remain; short fragments are filtered. No gaps are bridged. Inspect overlay and use a map-only crop.')
     if stats['mask_cleanup']['added_pixels']:
-        warnings.append('Source-supported enclosed interiors were filled before thinning; inspect overlay. This is heuristic, not recovered traversal evidence.')
+        warnings.append('Source-supported narrow open/enclosed interiors were filled before thinning; inspect overlay. This is heuristic, not recovered traversal evidence.')
     if not stats['selected_pixels']:
         warnings.append('No pixels retained. Check crop, target color and thresholds.')
     if stats['selected_pixels'] > mask.size*0.2:

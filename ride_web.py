@@ -63,6 +63,8 @@ GUIDANCE = {
     'road_processing_failed': '道路处理未完成；请检查配准范围及本地 OSM 数据，或重新授权地图下载后继续。结果不可用于导航。',
     'task_processing_failed': '任务处理未完成；请刷新状态、核对输入和服务端模型配置，再重新授权继续。',
     'cli_failed': '执行未完成；请刷新任务状态，核对截图格式、输入文件和服务端模型配置后重试。',
+    'api_timeout': '模型 API 连接或写入超时；已有提取不会失效。可勾选仅本地继续生成中心线，无需重新上传；需模型时再授权重试。',
+    'api_network': '模型 API 网络连接失败；已有结果已保存。可仅本地继续；需要视觉判断时检查服务配置后重新授权。',
     'timeout': '运行超时；任务可能已保存，请先刷新状态，避免重复提交，再重新授权继续。',
     'request_rejected': '请求未接受；请按提示修正输入或刷新网页后重试。',
     'local_state_failed': '本地状态不可用；请刷新状态或创建新任务，必要时由服务端管理员检查。',
@@ -71,6 +73,8 @@ GUIDANCE = {
 
 def processing_category(state):
     """Report observed prerequisites, not a guessed cause from raw error text."""
+    if state.get('error_category') in ('api_timeout','api_network'):
+        return state['error_category']
     if not state.get('extracted'):
         return 'extraction_required'
     if not state.get('centerlined'):
@@ -258,22 +262,25 @@ class RideServer(ThreadingHTTPServer):
 
     def resume(self, task_id, data):
         allowed = {'answer', 'color', 'crop', 'controls_json', 'osm_xml',
-                   'fetch_map', 'consent_map', 'consent_upload'}
+                   'fetch_map', 'consent_map', 'consent_upload', 'local_only'}
         if data.keys() - allowed:
             raise WebError('未知继续参数（不接受文件路径）')
         folder = self.folder(task_id)
         self.tree_safe(folder)
         state = self.status(task_id)
         upload = flag(data, 'consent_upload')
+        local_only = flag(data, 'local_only')
         consent_map = flag(data, 'consent_map')
         fetch_map = flag(data, 'fetch_map')
-        if state['mode'] == 'api' and not upload:
+        if state['mode'] == 'api' and not upload and not local_only:
             raise WebError('真实 API 每次继续均需重新同意上传', 403)
         if fetch_map and not consent_map:
             raise WebError('下载地图须明确同意发送范围坐标', 403)
         if fetch_map and 'osm_xml' in data:
             raise WebError('地图下载与本地 OSM 不能同时选择')
         args = ['resume', '--task-dir', str(folder/'task')]
+        if local_only:
+            args.append('--local-only')
         pending = {}
         if 'answer' in data:
             answer = text(data['answer'], '回答', 32000)
@@ -310,7 +317,7 @@ class RideServer(ThreadingHTTPServer):
                 raise WebError('OSM XML 为空或含禁止的 DTD/实体')
             pending['osm-upload.xml'] = osm.encode('utf-8')
             args += ['--osm-file', str(folder/'inputs'/'osm-upload.xml')]
-        if not any(k in data for k in ('answer', 'color', 'crop', 'controls_json', 'osm_xml')) and not fetch_map:
+        if not any(k in data for k in ('answer', 'color', 'crop', 'controls_json', 'osm_xml')) and not fetch_map and not local_only:
             raise WebError('请提供回答、修正或证据文件')
         if upload:
             args.append('--consent-upload')
@@ -341,6 +348,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <label>控制点 JSON <input id="controls" type="file" accept=".json,application/json"></label><label>本地 OSM XML <input id="osm" type="file" accept=".osm,.xml"></label>
 <p id="roadsNotice">注意：勾选下载地图或上传本地 OSM 后，点击“继续处理”会将任务目标自动切换为 roads（道路候选匹配），即使原目标为像素提取或配准。下载须先完成配准并通过独立检查；下载授权与 API 上传授权相互独立，未勾选不会下载。</p>
 <label><input id="fetch" type="checkbox">下载当前配准范围的地图（不可同时上传 OSM）</label><label><input id="mapConsent" type="checkbox">仅本次同意向 Overpass 发送地理范围（不发送截图）</label>
+<label><input id="localOnly" type="checkbox">仅本地继续（已有颜色/裁剪或有效掩码；不上传、不调用模型，可恢复中心线；地图下载仍单独授权）</label>
 <button id="resume">继续处理</button></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。</p><div id="artifacts"></div>
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
@@ -351,7 +359,7 @@ function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(i
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
 $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked}));});
 $('refresh').onclick=()=>action(async()=>render(await request(taskPath())));
-$('resume').onclick=()=>action(async()=>{const d={consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined)d.controls_json=controls;if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
+$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined)d.controls_json=controls;if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
 </script></html>'''
 
 
