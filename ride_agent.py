@@ -254,6 +254,8 @@ def invalidate_extraction(state, invalidate_controls=False):
     state.update(extracted=False, centerlined=False, registered=False,
                  registration_gate_passed=False, match_attempted=False)
     state.pop('component_selection', None)
+    state.pop('hole_review', None)
+    state.pop('hole_correction', None)
     for key in ('extraction_diagnostics','road_diagnostics','road_match_status','artifacts','summary'):
         state.pop(key,None)
     if invalidate_controls:

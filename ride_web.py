@@ -39,13 +39,30 @@ ARTIFACTS = frozenset((
 UUID_RE = re.compile(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\Z')
 
 
+def allowed_artifact(name):
+    """动态目录只允许服务端 UUID 与固定文件名/有界孔编号。"""
+    from web_hole_review import AUDIT_NAMES
+    if name in ARTIFACTS:
+        return True
+    parts = name.split('/')
+    if len(parts) != 3 or not UUID_RE.fullmatch(parts[1]):
+        return False
+    if parts[0] == 'hole-reviews':
+        return parts[2] in ('numbered.png','review.json') or bool(re.fullmatch(r'hole-(?:[1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])\.png', parts[2]))
+    return parts[0] == 'hole-audit' and parts[2] in AUDIT_NAMES
+
+
 def artifact_current(state, name):
     """旧文件可留作审计，但网页必须逐项标记失效，不能只靠统一免责声明。"""
     prefix = name.split('/')[0]
+    if prefix in ('hole-reviews', 'hole-audit'):
+        return False  # 独立审计，不冒充当前提取产物
     if prefix == 'inspection':
         return bool(state.get('colors_inspected'))
     valid = bool(state.get('extracted'))
     if prefix == 'extraction':
+        if state.get('hole_correction') and name in ('extraction/component-ids.png', 'extraction/candidates-mask.png', 'extraction/components-overlay.png', 'extraction/structure-diagnostics.png'):
+            return False
         return valid
     valid = valid and bool(state.get('centerlined'))
     if prefix == 'centerline':
@@ -200,7 +217,7 @@ class RideServer(ThreadingHTTPServer):
         except (ValueError, OSError, TypeError, KeyError):
             raise WebError('任务状态尚未生成或无法读取', 409) from None
         fields = ('component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
-                  'registration_notice', 'road_notice', 'verified', 'original_gps')
+                  'registration_notice', 'road_notice', 'verified', 'original_gps', 'hole_correction')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
             category = processing_category(state)
@@ -212,6 +229,29 @@ class RideServer(ThreadingHTTPServer):
             if safe_path(self.root, task_id, 'task', name).is_file():
                 available.append({'name': name, 'url': '/artifacts/'+task_id+'/'+name,
                                   'current': artifact_current(state,name)})
+        candidate = state.get('hole_review')
+        if candidate:
+            from review_mask_holes import load_inputs
+            valid = False
+            if state.get('extracted') and not candidate.get('applied'):
+                try:
+                    source = safe_path(self.root, task_id, 'task', 'extraction/source-crop.png')
+                    mask = safe_path(self.root, task_id, 'task', 'extraction/mask.png')
+                    valid = load_inputs(source, mask)[2] == candidate['fingerprint']
+                except (ValueError, OSError):
+                    pass
+            result['hole_review'] = dict(candidate, current=valid)
+        for prefix in ('hole-reviews', 'hole-audit'):
+            directory = safe_path(self.root, task_id, 'task', prefix)
+            if directory.is_dir():
+                for sub in sorted(directory.iterdir()):
+                    safe_path(self.root, task_id, 'task', prefix, sub.name)
+                    if not UUID_RE.fullmatch(sub.name) or not sub.is_dir():
+                        continue
+                    for item in sorted(sub.iterdir()):
+                        name = prefix+'/'+sub.name+'/'+item.name
+                        if allowed_artifact(name) and safe_path(self.root, task_id, 'task', name).is_file():
+                            available.append({'name': name, 'url': '/artifacts/'+task_id+'/'+name, 'current': False})
         result['artifacts'] = available
         result['artifact_notice'] = '产物可能来自先前步骤，修改颜色/裁剪后旧文件可能失效；仅为未验证候选，不可导航。'
         # 纵使模型意外复述了环境密钥，也不能显示给浏览器。
@@ -341,6 +381,23 @@ class RideServer(ThreadingHTTPServer):
         self.run_cli(args)
         return self.status(task_id)
 
+    def holes(self, task_id, action, data):
+        from web_hole_review import preview, apply
+        folder = self.folder(task_id)
+        self.tree_safe(folder)
+        allowed = set() if action == 'preview' else {'review_id','fingerprint','fill_hole_ids','confirm_source_reviewed'}
+        if data.keys() - allowed:
+            raise WebError('未知逐孔复核参数；不接受路径或画笔坐标')
+        try:
+            if action == 'preview':
+                preview(folder/'task')
+            else:
+                apply(folder/'task', data)
+        except ValueError as exc:
+            # 仅返回本地固定校验提示，不回显异常或路径。
+            raise WebError('逐孔操作未接受：候选过期、未确认、编号无效或输入超限；请刷新并重新生成预览', 409) from None
+        return self.status(task_id)
+
 
 PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>骑行截图分析（本地）</title>
@@ -361,6 +418,12 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <h4 id="zoomTitle">局部放大（先查看某个候选）</h4><div style="overflow:auto;max-height:480px"><canvas id="componentZoom" aria-labelledby="zoomTitle" style="image-rendering:pixelated"></canvas></div>
 <div id="components"></div><button id="applyComponents" type="button" disabled>应用选择并重新生成</button>
 <p>仅本地提交选中编号并重新生成，不上传、不下载地图；不会提交回答或颜色/裁剪修改。未选区域仍保留审计，空选不可提交。</p></fieldset>
+<fieldset><legend>逐孔人工复核 · 当前任务内纠错</legend>
+<p>先生成当前原图/掩码绑定预览，默认全部保留。每孔三联图依次为未叠加原图、精确孔洞标红、二值掩码，可点击图片打开原尺寸放大。只有明确的漏选才勾选；真实回转孔、相邻臂间隙、边界混合孔请保留。暂不支持局部画笔，不能整孔安全填时不要选择。不连接图标开放断裂，不按环数最小化自动修复。</p>
+<button id="previewHoles" type="button">生成当前任务逐孔预览</button><p id="holeNotice" role="status"></p><div id="holes"></div>
+<label><input id="holeAck" type="checkbox">我已逐孔对照未叠加原图，所选孔是漏选而非真实间隙</label>
+<button id="applyHoles" type="button" disabled>应用选中补孔并重新生成中心线</button>
+<p>本地操作，不上传、不下载地图。仅增加选中封闭小孔，不删除原前景；前后掩码、原图、选择与中心线独立审计。已应用 mask 修正不代表验证了路线顺序或 GPS。</p></fieldset>
 <label>修正颜色 <input id="color" type="text" placeholder="#00BFA5，空白不修改"></label>
 <label>修正裁剪 <input id="crop" type="text" placeholder="[左,上,右,下]，空白不修改"></label>
 <p>裁剪变更会使旧控制点失效。控制点必须使用当前裁剪坐标，网页不会自动地理定位。</p>
@@ -372,7 +435,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
 async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
-function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderComponents(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
+function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderComponents(d);renderHoles(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
 // 所有预览只读本地白名单产物；编号逐像素解码，不把重叠包围框当成候选。
 let componentView=null, componentEpoch=0;
 function selectedComponentIds(){return Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));}
@@ -422,7 +485,32 @@ $('componentCanvas').onclick=e=>{const v=componentView;if(!v)return;const r=e.cu
 $('clearFocus').onclick=()=>{if(componentView){componentView.focus=0;$('componentZoom').width=0;$('zoomTitle').textContent='局部放大（先查看某个候选）';paintComponents();}};
 $('applyComponents').onclick=()=>action(async()=>{if(!componentView||componentView.taskId!==$('task').value.trim())throw Error('请先刷新当前任务的像素预览');const ids=selectedComponentIds();if(!ids.length)throw Error('请至少保留一个候选');render(await request(taskPath()+'/resume',{local_only:true,component_ids:ids}));});
 
-async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('uploadConsent').checked=false;$('mapConsent').checked=false;}}
+let holeView=null;
+function holeSelection(){return [...document.querySelectorAll('input[name=hole]:checked')].map(x=>Number(x.value));}
+function updateHoleChoice(){
+ const ids=holeSelection();for(const box of document.querySelectorAll('input[name=hole]')){box.closest('section').style.border=box.checked?'3px solid #d05':'1px solid #aaa';box.closest('section').style.background=box.checked?'#fff0f5':'';}
+ $('applyHoles').disabled=!holeView||!ids.length||!$('holeAck').checked;
+ if(holeView)$('holeNotice').textContent='本地待应用：'+(ids.length?'仅补孔 '+ids.join('、'):'全部保留（默认）')+'；尚未修改掩码或中心线。';
+}
+function renderHoles(d){
+ holeView=null;$('holes').replaceChildren();$('holeAck').checked=false;$('applyHoles').disabled=true;
+ const r=d.hole_review;
+ if(!r?.current){$('holeNotice').textContent=r?.applied?'本次修正已应用；旧候选已消费。可生成新预览。':'尚无当前逐孔预览或候选已失效，请先完成提取再生成。';return;}
+ holeView={...r,taskId:d.task_id};
+ const base='/artifacts/'+d.task_id+'/hole-reviews/'+r.review_id+'/';
+ const image=(name,alt)=>{const a=document.createElement('a'),im=document.createElement('img');a.href=base+name;a.target='_blank';a.rel='noopener';im.src=a.href;im.alt=alt;im.style.imageRendering='pixelated';a.append(im);return a;};
+ $('holes').append(image('numbered.png','当前孔洞编号总图'));
+ for(const h of r.holes){const row=document.createElement('section'),label=document.createElement('label'),box=document.createElement('input');box.type='checkbox';box.name='hole';box.value=h.id;box.disabled=!h.eligible;box.onchange=updateHoleChoice;label.append(box,document.createTextNode('补孔 #'+h.id+' · '+h.area+' 像素 · 框 '+JSON.stringify(h.bbox_xyxy)+(h.eligible?'':'（超界，仅保留）')));row.append(label,image('hole-'+h.id+'.png','孔 '+h.id+'：原图 / 精确红色孔像素 / 掩码放大'));$('holes').append(row);}
+ updateHoleChoice();
+}
+$('holeAck').onchange=updateHoleChoice;
+$('previewHoles').onclick=()=>action(async()=>render(await request(taskPath()+'/holes/preview',{})));
+$('applyHoles').onclick=()=>action(async()=>{
+ if(!holeView||holeView.taskId!==$('task').value.trim()||!$('holeAck').checked)throw Error('请先刷新当前逐孔预览并确认原图');
+ render(await request(taskPath()+'/holes/apply',{review_id:holeView.review_id,fingerprint:holeView.fingerprint,fill_hole_ids:holeSelection(),confirm_source_reviewed:true}));
+});
+
+async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('applyHoles').disabled=!holeView||!holeSelection().length||!$('holeAck').checked;$('uploadConsent').checked=false;$('mapConsent').checked=false;}}
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
 $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked}));});
@@ -492,7 +580,7 @@ class Handler(BaseHTTPRequestHandler):
                 if match:
                     task_id, name = match.groups()
                     self.server.folder(task_id)
-                    if name not in ARTIFACTS:
+                    if not allowed_artifact(name):
                         raise WebError('产物不在公开列表', 404)
                     target = safe_path(self.server.root, task_id, 'task', name)
                     if not target.is_file():
@@ -536,6 +624,10 @@ class Handler(BaseHTTPRequestHandler):
                 if path == '/api/tasks':
                     result = self.server.create(data)
                     self.send_json(201, result)
+                    return
+                hole_match = re.fullmatch(r'/api/tasks/([^/]+)/holes/(preview|apply)', path)
+                if hole_match:
+                    self.send_json(200, self.server.holes(*hole_match.groups(), data))
                     return
                 match = re.fullmatch(r'/api/tasks/([^/]+)/resume', path)
                 if not match:
