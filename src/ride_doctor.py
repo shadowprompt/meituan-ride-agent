@@ -19,8 +19,8 @@ def diagnose():
             add(module,True,'已安装')
         except ImportError:
             add(module,False,'请运行 python -m pip install -r requirements.txt')
-    root=Path(__file__).resolve().parent
-    for filename in ('ride_agent.py','ride_web.py','requirements.txt'):
+    root=Path(__file__).resolve().parent.parent
+    for filename in ('src/ride_agent.py','src/ride_web.py','requirements.txt'):
         add(filename,(root/filename).is_file(),'交付文件存在性')
     # 只报告配置是否具备，不回显供应商地址、用户名、密钥或模型值。
     key=bool(os.environ.get('RIDE_API_KEY'))

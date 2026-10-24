@@ -84,7 +84,7 @@ class OpenBandTests(unittest.TestCase):
             ImageDraw.Draw(im).line((10,30,80,30),fill='#6A778B',width=7);im.save(p/'im.png')
             start(p/'im.png',p/'task')
             env={k:v for k,v in os.environ.items() if not k.startswith('RIDE_API') and k!='RIDE_MODEL'}
-            result=subprocess.run([sys.executable,str(Path(__file__).with_name('ride_agent.py')),
+            result=subprocess.run([sys.executable,str(Path(__file__).parent/'src'/'ride_agent.py'),
                 'resume','--task-dir',str(p/'task'),'--local-only','--color','#6A778B',
                 '--crop','0','0','90','60'],capture_output=True,text=True,env=env,timeout=30)
             self.assertEqual(result.returncode,0,result.stderr)

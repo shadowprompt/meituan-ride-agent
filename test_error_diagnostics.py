@@ -48,7 +48,7 @@ class DiagnosticTests(unittest.TestCase):
             child_env = {k:v for k,v in os.environ.items() if k not in ('RIDE_API_KEY','RIDE_MODEL','RIDE_API_BASE')}
             child_env.update(env)
             folder = self.root/('cli-'+str(i))
-            result = subprocess.run([sys.executable,'ride_agent.py','start','--image',str(self.source),
+            result = subprocess.run([sys.executable,'src/ride_agent.py','start','--image',str(self.source),
                 '--task-dir',str(folder),'--consent-upload'],capture_output=True,env=child_env,timeout=20)
             self.assertEqual(result.returncode,0,result.stderr)
             state = agent.load(folder)

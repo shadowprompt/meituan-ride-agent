@@ -1,8 +1,26 @@
 # 美团骑行轨迹识别 Agent
 
-> **无需 API 的第一阶段入口：** `python3 ride_web.py` 后访问 `http://127.0.0.1:8765/pixel-route`。可在原图上按经过顺序人工点击、方向预览、保存/重开及导出有序像素 JSON；保留重复经过，明确人工近似、未验证、非 GPS。操作和真实浏览器验收见 [PIXEL_ROUTE_ACCEPTANCE.md](PIXEL_ROUTE_ACCEPTANCE.md)。自动图段排序尚未实现。
+> **无需 API 的第一阶段入口：** `python3 src/ride_web.py` 后访问 `http://127.0.0.1:8765/pixel-route`。可在原图上按经过顺序人工点击、方向预览、保存/重开及导出有序像素 JSON；保留重复经过，明确人工近似、未验证、非 GPS。操作和真实浏览器验收见 [PIXEL_ROUTE_ACCEPTANCE.md](PIXEL_ROUTE_ACCEPTANCE.md)。自动图段排序尚未实现。
 
-> **当前交付入口：[本地试用与验收说明](DELIVERY.md)。** 运行 `python ride_web.py` 使用本地网页；运行 `python ride_doctor.py` 检查本机条件。当前是待真实模型验收的试用版，仍需人工配准，未实现自动定位。下面早期 OCR／指标目标属于规划，不能视作当前已实现功能。
+> **当前交付入口：[本地试用与验收说明](DELIVERY.md)。** 运行 `python src/ride_web.py` 使用本地网页；运行 `python src/ride_doctor.py` 检查本机条件。当前是待真实模型验收的试用版，仍需人工配准，未实现自动定位。下面早期 OCR／指标目标属于规划，不能视作当前已实现功能。
+
+## 源码目录与运行方式
+
+请始终在项目根目录执行命令（无需 `cd src`）：
+
+```bash
+python -m pip install -r requirements.txt
+python src/ride_doctor.py
+python src/ride_web.py --port 8765
+# 测试仍位于根目录，显式指定源码导入路径
+PYTHONPATH=src python -m unittest discover -v
+```
+
+- `src/`：业务源码、网页与 CLI 入口。
+- 根目录 `test_*.py`：回归测试；`examples/`：合成示例；`training-demo/`：独立训练演示。
+- `outputs/`、`local-data/`：本地任务与私有数据，仍在原位置，不会迁入 `src/`。
+- Web 单次 CLI 执行默认超时从 **180 秒延长为 300 秒（5 分钟）**；模型 API 单次连接/读取超时同步从 90 秒延长为 300 秒。二者不是叠加等待保证，完整多轮任务仍受 Web 单次执行 300 秒上限约束；地图下载、浏览器请求头读取等其他安全限时不变。不自动重试，超时后先刷新任务状态。
+- 旧命令 `python ride_web.py` 改为 `python src/ride_web.py`；其他业务脚本同理。已有 `outputs/web` 任务可直接继续，无需重传。
 
 ## 目标
 
@@ -76,8 +94,8 @@
 需要 Python 3.10+。评测器与测试仅使用标准库：
 
 ```sh
-python -m unittest discover -s . -p "test_*.py" -v
-python route_eval.py --reference examples/reference.geojson --candidate examples/reference.geojson --candidate examples/shifted.geojson --output outputs/evaluation.json
+PYTHONPATH=src python -m unittest discover -s . -p "test_*.py" -v
+python src/route_eval.py --reference examples/reference.geojson --candidate examples/reference.geojson --candidate examples/shifted.geojson --output outputs/evaluation.json
 ```
 
 `examples/` 是不含个人位置的合成几何示例，不是真实骑行数据。
@@ -102,11 +120,11 @@ EVALUATION.md 中该目录的命令属于开发机实验，首次克隆请使用
 ```sh
 python -m pip install -r requirements.txt
 python examples/make_synthetic_screenshot.py
-python extract_route.py --image examples/synthetic-ride.png --color "#00BFA5" --output-dir outputs/demo
+python src/extract_route.py --image examples/synthetic-ride.png --color "#00BFA5" --output-dir outputs/demo
 ```
 
 完整参数与真实截图用法见 [EXTRACTION.md](EXTRACTION.md)。安装依赖后全量测试共 15 项。
-仅评测模块仍无第三方依赖，可用 `python -m unittest test_route_eval -v` 单独测试。
+仅评测模块仍无第三方依赖，可用 `PYTHONPATH=src python -m unittest test_route_eval -v` 单独测试。
 
 目录约定：源代码和合成示例纳入 Git；个人输入放 `local-data/`，下载缓存放 `cache/`，生成结果放 `outputs/`，三者均不提交。
 旧 `reconstruction/` 暂作为私有历史实验保留，不直接迁移含硬编码位置的脚本；可复用能力逐步提取至正式模块。
@@ -116,7 +134,7 @@ python extract_route.py --image examples/synthetic-ride.png --color "#00BFA5" --
 在颜色提取后运行：
 
 ```sh
-python centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-centerline
+python src/centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-centerline
 ```
 
 输出骨架图、端点/分叉检查图及 `pixel-graph.json`。仅单一开放无分支链导出几何有序点；
@@ -128,7 +146,7 @@ python centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-cent
 中心线分段可通过人工确认的 WGS84 控制点映射到候选地理坐标：
 
 ```sh
-python register_pixels.py --graph outputs/demo-centerline/pixel-graph.json --controls examples/synthetic-controls.json --output-dir outputs/demo-registration
+python src/register_pixels.py --graph outputs/demo-centerline/pixel-graph.json --controls examples/synthetic-controls.json --output-dir outputs/demo-registration
 ```
 
 详见 [REGISTRATION.md](REGISTRATION.md)。至少三个不共线控制点；独立检查门槛要求至少两个未参与拟合的检查点。
@@ -141,8 +159,8 @@ python register_pixels.py --graph outputs/demo-centerline/pixel-graph.json --con
 
 ```sh
 python examples/make_synthetic_screenshot.py
-python ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/agent-demo --demo
-python ride_agent.py resume --task-dir outputs/agent-demo --answer-file examples/demo-answer.json
+python src/ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/agent-demo --demo
+python src/ride_agent.py resume --task-dir outputs/agent-demo --answer-file examples/demo-answer.json
 ```
 
 此 demo 是固定流程编排，不是视觉模型识别。真实模式支持 OpenAI 兼容视觉 API，必须配置模型并逐次明确同意上传截图/对话；真实供应商尚未联调。详见 [AGENT.md](AGENT.md)。

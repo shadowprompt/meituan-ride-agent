@@ -13,10 +13,10 @@
 ## 可重现测试
 
 ```sh
-python3 -m unittest test_api_failure_recovery test_error_diagnostics test_web_review_continue
+PYTHONPATH=src python3 -m unittest test_api_failure_recovery test_error_diagnostics test_web_review_continue
 RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" \
 RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" \
-python3 -m unittest discover -v
+PYTHONPATH=src python3 -m unittest discover -v
 git diff --check
 ```
 

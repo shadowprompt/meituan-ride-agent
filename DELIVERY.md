@@ -19,9 +19,10 @@
 ```powershell
 git pull --ff-only
 python -m pip install -r requirements.txt
-python ride_doctor.py
+python src/ride_doctor.py
+$env:PYTHONPATH = "src"
 python -m unittest discover
-python ride_web.py
+python src/ride_web.py
 ```
 
 在浏览器访问终端显示的本地地址。网页仅监听回环地址，不能直接部署到公网；不包含账户系统、TLS、多用户隔离、生产级审计或持久任务队列。关闭进程后任务文件保留，可重启后按任务 ID 恢复。不要把端口转发给其他人。
@@ -44,8 +45,8 @@ python ride_web.py
 $env:RIDE_API_BASE = "https://your-provider.example/v1"
 $env:RIDE_API_KEY = "替换为本机密钥"
 $env:RIDE_MODEL = "供应商支持图像的模型名"
-python ride_doctor.py
-python ride_web.py
+python src/ride_doctor.py
+python src/ride_web.py
 ```
 
 预检只验证配置存在和基本格式，**不发送网络请求，不代表供应商兼容性已通过**。真实任务每次推进都要同意截图、当前叠图、诊断及对话上传。地图下载另需同意将配准地理范围发给固定 Overpass 服务；两种同意不能互相替代。
@@ -77,3 +78,7 @@ python ride_web.py
 - 控制点失效：改裁剪框后重新提供对应局部坐标控制点；不要绕过误差门槛。
 - 地图下载限额／超时：缩小任务范围或上传本地 OSM；不要无限重试公共服务。
 - 敏感任务文件：`outputs/web/` 含截图、位置及对话。Git 忽略不代表加密；交付结束后由用户按本机数据政策清理。
+
+## 源码目录调整
+
+业务源码现位于 `src/`，启动命令改为 `python src/ride_web.py --port 8765`。在项目根目录运行，已有 `outputs/web` 任务路径不变。Web 单次执行默认限时与模型 API 单次连接/读取限时均为 300 秒（5 分钟），不是完整多轮任务可无限等待。测试使用 `PYTHONPATH=src python -m unittest discover -v`。

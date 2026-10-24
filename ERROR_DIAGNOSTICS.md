@@ -25,8 +25,8 @@
 ```sh
 RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" \
 RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" \
-python3 -m unittest discover -q
-python3 -m py_compile ride_agent.py ride_web.py ride_errors.py test_error_diagnostics.py
+PYTHONPATH=src python3 -m unittest discover -q
+python3 -m py_compile src/ride_agent.py src/ride_web.py src/ride_errors.py test_error_diagnostics.py
 git diff --check
 ```
 

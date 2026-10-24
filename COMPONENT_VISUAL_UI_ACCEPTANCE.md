@@ -19,7 +19,7 @@
 
 ## 验证
 
-- `RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" python3 -m unittest discover -v`：176 项全部通过，包含真实图本地回归，无跳过。
+- `RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" PYTHONPATH=src python3 -m unittest discover -v`：176 项全部通过，包含真实图本地回归，无跳过。
 - 新测试覆盖嵌套/重叠 bbox 下真实像素编号可区分、mask 和编号一致性、显式选择后审计编号不变、Node 执行前端像素着色/淡化算法、白名单/路径穿越/符号链接/CSRF。
 - `git diff --check` 通过。
 - 使用本机 agent-browser/Chromium 检查合成嵌套候选，成功显示 focus=2、局部放大宽度 630；取消 #1 后明确本地预览，点击应用得到 `explicit / selected_ids:[2] / excluded_ids:[1]` 和 `needs_confirmation`，不调用 API。

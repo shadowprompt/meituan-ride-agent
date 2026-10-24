@@ -16,7 +16,7 @@ python -m pip install -r requirements.txt
 ## 提取本地截图
 
 ```bash
-python extract_route.py --image local-data/ride.jpg --crop 0 500 1260 1800 --color '#00BFA5' --hue-tolerance 20 --min-saturation 0.35 --min-value 0.2 --min-component 20 --output-dir outputs/ride
+python src/extract_route.py --image local-data/ride.jpg --crop 0 500 1260 1800 --color '#00BFA5' --hue-tolerance 20 --min-saturation 0.35 --min-value 0.2 --min-component 20 --output-dir outputs/ride
 ```
 
 - `--image`：本地截图路径。
@@ -45,7 +45,7 @@ python extract_route.py --image local-data/ride.jpg --crop 0 500 1260 1800 --col
 
 ```bash
 python examples/make_synthetic_screenshot.py
-python extract_route.py --image examples/synthetic-ride.png --crop 0 0 640 480 --color '#00BFA5' --output-dir outputs/demo
+python src/extract_route.py --image examples/synthetic-ride.png --crop 0 0 640 480 --color '#00BFA5' --output-dir outputs/demo
 ```
 
 查看 `outputs/demo/mask.png`、`outputs/demo/overlay.png` 和 `outputs/demo/extraction.json`。合成图仅用于检查颜色提取流程，不代表真实截图上的识别效果。
@@ -74,8 +74,8 @@ python extract_route.py --image examples/synthetic-ride.png --crop 0 0 640 480 -
 网页“候选路线片段”显示面积、框和编号，用户可勾选多个片段，再勾选“本次使用上面勾选的编号”并继续；通常明显孤立小图标场景无需额外操作。选择可覆盖自动结果，包括重新保留被排除的片段。CLI：
 
 ```sh
-python3 ride_agent.py resume --task-dir outputs/task --local-only --component-ids 1 3
-python3 extract_route.py --image local-data/image.png --crop 200 1160 1040 1460 --color '#6B798C' --component-ids 1 --output-dir outputs/extraction
+python3 src/ride_agent.py resume --task-dir outputs/task --local-only --component-ids 1 3
+python3 src/extract_route.py --image local-data/image.png --crop 200 1160 1040 1460 --color '#6B798C' --component-ids 1 --output-dir outputs/extraction
 ```
 
 编号只适用于当前颜色与裁剪；修改颜色/裁剪会清除旧选择，必须先查看新候选。模型不能生成或覆盖用户显式编号。选择不改变裁剪坐标系，不导致同坐标系控制点失效；后续几何、配准、道路结果则重新生成。截图上传授权、地图授权不变，`--local-only` 不调用模型 API。

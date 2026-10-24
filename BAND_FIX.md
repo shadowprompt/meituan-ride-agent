@@ -18,5 +18,5 @@
 
 ## 更新
 
-停止旧服务后执行 `git pull --ff-only`，在已配置 API 环境变量的终端运行 `python ride_web.py --port 8765`。
+停止旧服务后执行 `git pull --ff-only`，在已配置 API 环境变量的终端运行 `python src/ride_web.py --port 8765`。
 旧产物不会自动重算；新建 pixels 任务或明确修正提取参数后重算，并检查新产物。

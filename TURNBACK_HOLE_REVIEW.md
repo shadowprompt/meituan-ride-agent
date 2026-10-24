@@ -29,7 +29,7 @@
 先生成本地静态预览（必须使用提取产物中对应的**未叠加 source-crop**）：
 
 ```sh
-python3 review_mask_holes.py \
+python3 src/review_mask_holes.py \
   --source-crop local-data/turnback-after/source-crop.png \
   --mask local-data/turnback-after/mask.png \
   --output-dir local-data/my-hole-review
@@ -38,7 +38,7 @@ python3 review_mask_holes.py \
 打开生成的 `review.html`：编号总图，以及每孔的原图、该孔标红、二值掩码三联放大图。所有复选框默认不选；明确确认原图复核后才可下载 `selection.json`。不运行服务、不发网络请求、不自动改动掩码。然后显式应用选择：
 
 ```sh
-python3 review_mask_holes.py \
+python3 src/review_mask_holes.py \
   --source-crop local-data/turnback-after/source-crop.png \
   --mask local-data/turnback-after/mask.png \
   --selection /本地路径/selection.json \
@@ -73,8 +73,8 @@ python3 review_mask_holes.py \
 ```sh
 RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" \
 RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" \
-python3 -m unittest discover -q
-python3 -m py_compile review_mask_holes.py test_review_mask_holes.py
+PYTHONPATH=src python3 -m unittest discover -q
+python3 -m py_compile src/review_mask_holes.py test_review_mask_holes.py
 git diff --check
 ```
 

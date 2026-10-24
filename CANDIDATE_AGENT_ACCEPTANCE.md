@@ -25,7 +25,7 @@
 ```sh
 RIDE_REAL_SCREENSHOT=local-data/user-original-rgb.png \
 RIDE_TURNBACK_SCREENSHOT=local-data/turnback-original-rgb.png \
-python3 -m unittest discover -q
+PYTHONPATH=src python3 -m unittest discover -q
 ```
 
 `test_candidate_review.py` 的本地 HTTP mock 贯通网页 POST→CLI 子进程→loopback 模型 HTTP。合成图两个候选先观察，模拟模型逐项选择目标、排除旁侧图标，再中心线、观察当前骨架、记录 ambiguous、针对起点遮挡提出具体区域问题。测试解码实际请求PNG，核对1:1尺寸与原图像素，不只检查字段存在。

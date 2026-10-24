@@ -6,9 +6,9 @@
 
 ```powershell
 python examples/make_synthetic_screenshot.py
-python extract_route.py --image examples/synthetic-ride.png --color "#00BFA5" --output-dir outputs/demo
-python centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-centerline
-python register_pixels.py --graph outputs/demo-centerline/pixel-graph.json --controls examples/synthetic-controls.json --output-dir outputs/demo-registration
+python src/extract_route.py --image examples/synthetic-ride.png --color "#00BFA5" --output-dir outputs/demo
+python src/centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-centerline
+python src/register_pixels.py --graph outputs/demo-centerline/pixel-graph.json --controls examples/synthetic-controls.json --output-dir outputs/demo-registration
 ```
 
 示例控制点使用人造坐标关系，不对应真实地理位置。独立检查误差接近零只证明软件在已知仿射关系上工作，不能证明截图定位准确率。
@@ -39,7 +39,7 @@ python register_pixels.py --graph outputs/demo-centerline/pixel-graph.json --con
 - 输入只接受已知 WGS84，不推断、不转换未知坐标系。截图底图的偏移/畸变不会凭空消失。
 
 ```powershell
-python register_pixels.py --graph outputs/ride-centerline/pixel-graph.json --controls local-data/controls.json --max-error-m 35 --output-dir outputs/ride-registration
+python src/register_pixels.py --graph outputs/ride-centerline/pixel-graph.json --controls local-data/controls.json --max-error-m 35 --output-dir outputs/ride-registration
 ```
 
 ## 输出

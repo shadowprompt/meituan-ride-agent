@@ -8,9 +8,9 @@
 python -m pip install -r requirements.txt
 python examples/make_synthetic_screenshot.py
 python examples/make_synthetic_roads.py
-python ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/road-demo --demo --goal roads
-python ride_agent.py resume --task-dir outputs/road-demo --answer-file examples/demo-answer.json
-python ride_agent.py resume --task-dir outputs/road-demo --controls-file examples/synthetic-controls.json --osm-file examples/synthetic-roads.osm
+python src/ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/road-demo --demo --goal roads
+python src/ride_agent.py resume --task-dir outputs/road-demo --answer-file examples/demo-answer.json
+python src/ride_agent.py resume --task-dir outputs/road-demo --controls-file examples/synthetic-controls.json --osm-file examples/synthetic-roads.osm
 ```
 
 若任务目录已有内容，换一个新的目录。最后检查 `outputs/road-demo/roads/road-overlay.png`。图中灰色是路网、蓝色是配准参考分段、红色是匹配候选；它是本地路网示意图，没有在线地图底图。
@@ -29,7 +29,7 @@ python ride_agent.py resume --task-dir outputs/road-demo --controls-file example
 ## 工具单独运行
 
 ```powershell
-python road_match.py --segments outputs/road-demo/registration/registered-segments.geojson --osm examples/synthetic-roads.osm --output-dir outputs/roads-only
+python src/road_match.py --segments outputs/road-demo/registration/registered-segments.geojson --osm examples/synthetic-roads.osm --output-dir outputs/roads-only
 ```
 
 输出 `road-match.json`、`road-candidates.geojson`、`road-overlay.png`。

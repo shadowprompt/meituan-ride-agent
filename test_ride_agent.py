@@ -101,6 +101,7 @@ class AgentTests(unittest.TestCase):
                     opener.return_value.open.return_value=Response()
                     result=planner.decide(state,folder)
                     self.assertEqual(result['action'],'ask')
+                    self.assertEqual(opener.return_value.open.call_args.kwargs['timeout'], 300)
                     request=opener.return_value.open.call_args.args[0]
                     self.assertEqual(request.get_header('Authorization'),'Bearer fake')
                     body=json.loads(request.data)

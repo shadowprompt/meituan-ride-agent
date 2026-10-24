@@ -47,7 +47,7 @@ crop 相对截面 `(y,x0,x1)`：
 ```sh
 RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" \
 RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" \
-python3 -m unittest discover -q
+PYTHONPATH=src python3 -m unittest discover -q
 git diff --check
 ```
 

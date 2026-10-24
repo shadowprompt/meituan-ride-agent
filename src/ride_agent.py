@@ -208,7 +208,8 @@ class APIPlanner:
         req = urllib.request.Request(self.base+'/chat/completions',data=data,
                                      headers={'Authorization':'Bearer '+self.key,'Content-Type':'application/json'})
         try:
-            with urllib.request.build_opener(NoRedirect()).open(req, timeout=90) as response:
+            # 供应商慢响应允许等待五分钟；不自动重试或绕过本次上传授权。
+            with urllib.request.build_opener(NoRedirect()).open(req, timeout=300) as response:
                 raw = response.read(1_000_001)
             if len(raw)>1_000_000:
                 raise ValueError('API response exceeds limit')

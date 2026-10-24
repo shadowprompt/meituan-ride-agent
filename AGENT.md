@@ -8,9 +8,9 @@
 
 ```bash
 python -m pip install -r requirements.txt
-python ride_agent.py start --image local-data/ride.jpg --task-dir outputs/task1 --demo
-python ride_agent.py resume --task-dir outputs/task1 --answer '{"crop":[0,0,640,480],"color":"#00BFA5"}'
-python ride_agent.py status --task-dir outputs/task1
+python src/ride_agent.py start --image local-data/ride.jpg --task-dir outputs/task1 --demo
+python src/ride_agent.py resume --task-dir outputs/task1 --answer '{"crop":[0,0,640,480],"color":"#00BFA5"}'
+python src/ride_agent.py status --task-dir outputs/task1
 ```
 
 - `start --image … --task-dir … [--demo] [--consent-upload]`：创建任务；`--demo` 选择离线固定流程。
@@ -26,9 +26,9 @@ python ride_agent.py status --task-dir outputs/task1
 
 ```bash
 python examples/make_synthetic_screenshot.py
-python ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/demo-task --demo
-python ride_agent.py resume --task-dir outputs/demo-task --answer '{"crop":[0,0,640,480],"color":"#00BFA5"}'
-python ride_agent.py status --task-dir outputs/demo-task
+python src/ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/demo-task --demo
+python src/ride_agent.py resume --task-dir outputs/demo-task --answer '{"crop":[0,0,640,480],"color":"#00BFA5"}'
+python src/ride_agent.py status --task-dir outputs/demo-task
 ```
 
 固定流程先询问裁剪和颜色，再依次调用 `extract`、`centerline`，交付颜色掩码、提取叠图、骨架、图结构叠图及像素图 JSON，结果保持 `needs_confirmation`（待人工确认）。`crop` 为 `[left,top,right,bottom]`，右、下边界不包含；`color` 为 `#RRGGBB`。
@@ -43,8 +43,8 @@ python ride_agent.py status --task-dir outputs/demo-task
 export RIDE_API_BASE='https://your-provider.example/v1'
 export RIDE_API_KEY='替换为自己的密钥'
 export RIDE_MODEL='替换为供应商模型名'
-python ride_agent.py start --image local-data/ride.jpg --task-dir outputs/real-task --consent-upload
-python ride_agent.py resume --task-dir outputs/real-task --answer '{"crop":[0,0,640,480],"color":"#00BFA5"}' --consent-upload
+python src/ride_agent.py start --image local-data/ride.jpg --task-dir outputs/real-task --consent-upload
+python src/ride_agent.py resume --task-dir outputs/real-task --answer '{"crop":[0,0,640,480],"color":"#00BFA5"}' --consent-upload
 ```
 
 - `RIDE_API_BASE`：OpenAI 兼容 API 基址，必须使用 HTTPS；仅 localhost 本地服务允许 HTTP。
@@ -70,9 +70,9 @@ python ride_agent.py resume --task-dir outputs/real-task --answer '{"crop":[0,0,
 
 ```powershell
 python examples/make_synthetic_screenshot.py
-python ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/agent-demo --demo
-python ride_agent.py resume --task-dir outputs/agent-demo --answer-file examples/demo-answer.json
-python ride_agent.py status --task-dir outputs/agent-demo
+python src/ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/agent-demo --demo
+python src/ride_agent.py resume --task-dir outputs/agent-demo --answer-file examples/demo-answer.json
+python src/ride_agent.py status --task-dir outputs/agent-demo
 ```
 
 真实模型配置示例（仅配置，不会自动调用）：
@@ -90,9 +90,9 @@ $env:RIDE_MODEL = "支持图像的模型名称"
 无需手工串联 register_pixels.py：Agent 可先完成像素分析，再请求独立控制点文件。
 
 ```powershell
-python ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/registration-agent --demo --goal registration
-python ride_agent.py resume --task-dir outputs/registration-agent --answer-file examples/demo-answer.json
-python ride_agent.py resume --task-dir outputs/registration-agent --controls-file examples/synthetic-controls.json
+python src/ride_agent.py start --image examples/synthetic-ride.png --task-dir outputs/registration-agent --demo --goal registration
+python src/ride_agent.py resume --task-dir outputs/registration-agent --answer-file examples/demo-answer.json
+python src/ride_agent.py resume --task-dir outputs/registration-agent --controls-file examples/synthetic-controls.json
 ```
 
 第二步应暂停请求控制点，第三步自动配准并交付额外的 `registration/registration.json` 与 `registration/registered-segments.geojson`。控制点必须由用户通过文件提供；模型动作不能提交或捏造控制点。文件内容仍需人工确认，系统不能验证地标真实性。真实模式每一步仍需 `--consent-upload`；本地报告误差可进入模型上下文。
@@ -112,7 +112,7 @@ python ride_agent.py resume --task-dir outputs/registration-agent --controls-fil
 道路阶段不必再手工导出 OSM：已有配准且独立误差门槛通过后，可运行：
 
 ```powershell
-python ride_agent.py resume --task-dir outputs/registration-agent --fetch-map --consent-map
+python src/ride_agent.py resume --task-dir outputs/registration-agent --fetch-map --consent-map
 ```
 
 真实模型模式还需要本次 `--consent-upload`。两种同意相互独立：
@@ -152,8 +152,8 @@ python ride_agent.py resume --task-dir outputs/registration-agent --fetch-map --
 已完成过提线的任务，可直接修正颜色或裁剪，无需让模型重新猜参数：
 
 ```powershell
-python ride_agent.py resume --task-dir outputs/task1 --color "#00BFA5"
-python ride_agent.py resume --task-dir outputs/task1 --crop 20 80 620 420
+python src/ride_agent.py resume --task-dir outputs/task1 --color "#00BFA5"
+python src/ride_agent.py resume --task-dir outputs/task1 --crop 20 80 620 420
 ```
 
 真实模式仍需本次 `--consent-upload`。

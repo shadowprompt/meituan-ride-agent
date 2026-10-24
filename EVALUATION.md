@@ -17,8 +17,8 @@
 在项目目录中：
 
 ```sh
-python3 -m unittest discover -s . -p 'test_*.py' -v
-python3 route_eval.py \
+PYTHONPATH=src python3 -m unittest discover -s . -p 'test_*.py' -v
+python3 src/route_eval.py \
   --reference reconstruction/blind6-corrected-road-candidate.geojson \
   --candidate reconstruction/blind6-corrected-road-candidate.geojson \
   --candidate reconstruction/blind6-road-candidate.geojson \

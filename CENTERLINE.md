@@ -11,8 +11,8 @@
 ```bash
 python -m pip install -r requirements.txt
 python examples/make_synthetic_screenshot.py
-python extract_route.py --image examples/synthetic-ride.png --crop 0 0 640 480 --color '#00BFA5' --output-dir outputs/demo
-python centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-centerline
+python src/extract_route.py --image examples/synthetic-ride.png --crop 0 0 640 480 --color '#00BFA5' --output-dir outputs/demo
+python src/centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-centerline
 ```
 
 这些命令均为单行，也可在 Windows PowerShell 中逐条执行。合成图仅用于验证处理流程，不代表真实截图上的提取准确率。真实截图必须先人工选择裁剪范围和轨迹参考颜色，具体参数见 `EXTRACTION.md`。
@@ -20,7 +20,7 @@ python centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-cent
 ## 命令与输入限制
 
 ```bash
-python centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-centerline
+python src/centerline.py --mask outputs/demo/mask.png --output-dir outputs/demo-centerline
 ```
 
 - `--mask`：输入二值灰度掩码路径，通常使用 `extract_route.py` 生成的 `mask.png`。不是原始彩色截图。

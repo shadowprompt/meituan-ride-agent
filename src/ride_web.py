@@ -1,4 +1,4 @@
-"""Loopback-only Chinese UI. Run: python ride_web.py --port 8765.
+"""Loopback-only Chinese UI. Run: python src/ride_web.py --port 8765.
 
 POST /api/tasks: {image_base64, mode: demo|api, goal: pixels|registration|roads,
 consent_upload: bool}. POST /api/tasks/<uuid>/resume: {answer?, color?, crop?,
@@ -25,7 +25,9 @@ import uuid
 
 from ride_errors import GUIDANCE as STRUCTURED_GUIDANCE, safe_diagnostic
 
-BASE = Path(__file__).resolve().parent
+SOURCE_DIR = Path(__file__).resolve().parent
+# 源码与数据根目录分开，迁移后继续读取原有 outputs/web 任务。
+BASE = SOURCE_DIR.parent
 MAX_IMAGE = 20_000_000
 MAX_BODY = 44_000_000  # 30 MB OSM XML plus JSON overhead
 ARTIFACTS = frozenset((
@@ -150,7 +152,7 @@ class RideServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, port=8765, *, output_root=None, cli_timeout=180):
+    def __init__(self, port=8765, *, output_root=None, cli_timeout=300):
         # 绑定地址不能由浏览器、环境变量或命令行改成公网地址。
         self.root = Path(output_root) if output_root is not None else BASE/'outputs'/'web'
         safe_path(self.root)
@@ -178,7 +180,7 @@ class RideServer(ThreadingHTTPServer):
 
     def run_cli(self, args):
         try:
-            result = subprocess.run([sys.executable, str(BASE/'ride_agent.py'), *args],
+            result = subprocess.run([sys.executable, str(SOURCE_DIR/'ride_agent.py'), *args],
                                     cwd=str(BASE), shell=False, capture_output=True,
                                     timeout=self.cli_timeout, check=False)
         except subprocess.TimeoutExpired:

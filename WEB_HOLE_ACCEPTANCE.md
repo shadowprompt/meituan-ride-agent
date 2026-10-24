@@ -35,8 +35,8 @@
 ```sh
 RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" \
 RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" \
-python3 -m unittest discover -q
-python3 -m py_compile ride_web.py ride_agent.py web_hole_review.py test_web_holes.py
+PYTHONPATH=src python3 -m unittest discover -q
+python3 -m py_compile src/ride_web.py src/ride_agent.py src/web_hole_review.py test_web_holes.py
 git diff --check
 ```
 

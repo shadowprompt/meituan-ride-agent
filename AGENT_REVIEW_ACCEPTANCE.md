@@ -26,14 +26,14 @@
 
 ## 测试
 
-`python3 -m unittest test_route_review -v`：15项通过。使用实际APIPlanner的请求构造，mock urllib传输响应；真实确定性提取/骨架工具执行。
+`PYTHONPATH=src python3 -m unittest test_route_review -v`：15项通过。使用实际APIPlanner的请求构造，mock urllib传输响应；真实确定性提取/骨架工具执行。
 
 覆盖：当前原图/叠图及1:1局部图进入请求、needs_revision→局部观察→重提取→重审→交付、含裁剪偏移的局部坐标元信息、缺少复核拒绝、ambiguous必须提问、不能无新证据改口确认、重提取撤销旧版本、旁路文件修改阻止交付、无进展/观察预算有限停止、ConsentedPlanner不能旁路交付、LocalPlanner离线无网络无伪复核、越界/路径参数拒绝。集成新增：伪造当前哈希/未呈现区域无法过门、用户参数修改撤销复核及局部呈现授权、传输失败不标记呈现、完全相同重提取不能消除已报歧义；局部PNG还验证尺寸及原图裁剪像素一致。
 
 全量双本地图环境命令（本地图片不入Git）：
 
 ```sh
-RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" python3 -m unittest discover -q
+RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" PYTHONPATH=src python3 -m unittest discover -q
 ```
 
 集成全量已包含人工编辑模块回归。双图环境启用旧图和折返图，不跳过这些用例。
