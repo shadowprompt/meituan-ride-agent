@@ -1,5 +1,6 @@
 """固定错误代码与恢复文案；不按异常文本猜原因，不公开底层响应。"""
 import socket
+import ssl
 import urllib.error
 
 GUIDANCE = {
@@ -26,11 +27,71 @@ def failure_category(exc, stage=None):
     """类型和明确执行阶段是证据；缺少产物不是错误原因。"""
     if isinstance(exc, TaskFailure):
         return exc.category
+    if isinstance(exc, urllib.error.HTTPError):
+        return ('api_auth' if exc.code in (401,403) else 'api_rate_limit' if exc.code == 429
+                else 'api_server' if 500 <= exc.code <= 599 else 'api_http') if stage == 'planner' else 'task_processing_failed'
     if isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(getattr(exc, 'reason', None), (TimeoutError, socket.timeout)):
         return 'api_timeout' if stage == 'planner' else 'task_processing_failed'
-    if isinstance(exc, (urllib.error.URLError, ConnectionError)):
+    if isinstance(exc, (urllib.error.URLError, ConnectionError, socket.gaierror, ssl.SSLError)):
         return 'api_network' if stage == 'planner' else 'task_processing_failed'
     return {'extract':'extraction_failed', 'inspect_colors':'inspection_failed',
             'centerline':'centerline_failed', 'register':'registration_failed',
             'match':'road_processing_failed', 'fetch_map':'road_processing_failed',
             'action':'model_action_invalid'}.get(stage, 'task_processing_failed')
+
+# 诊断仅使用异常类型/HTTP整数，不读取异常正文、URL或响应body。
+DIAGNOSTIC_CODES = frozenset(('http_auth', 'http_rate_limit', 'http_server', 'http_client',
+    'http_other', 'timeout', 'dns', 'tls', 'connection', 'network'))
+
+
+def safe_diagnostic(value):
+    """持久化和网页共用白名单，旧任务或污染字段一律不透传。"""
+    if (not isinstance(value, dict) or not isinstance(value.get('code'), str)
+            or value['code'] not in DIAGNOSTIC_CODES):
+        return {}
+    result = {'code': value['code']}
+    status = value.get('http_status')
+    if type(status) is int and 100 <= status <= 599:
+        result['http_status'] = status
+    delay = value.get('retry_after_seconds')
+    if type(delay) is int and 0 <= delay <= 86400:
+        result['retry_after_seconds'] = delay
+    return result
+
+
+def api_diagnostic(exc):
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+    import math
+    if isinstance(exc, TaskFailure):
+        return safe_diagnostic(getattr(exc, 'diagnostic', None))
+    if isinstance(exc, urllib.error.HTTPError):
+        status = exc.code
+        code = ('http_auth' if status in (401, 403) else 'http_rate_limit' if status == 429
+                else 'http_server' if 500 <= status <= 599 else 'http_client' if 400 <= status <= 499 else 'http_other')
+        result = {'code': code, 'http_status': status}
+        if status == 429:
+            # 只读取 Retry-After，数字秒和HTTP日期；不自动重发包含截图的请求。
+            try:
+                raw = exc.headers.get('Retry-After', '')
+                seconds = int(raw) if raw.isascii() and raw.isdigit() else math.ceil(
+                    (parsedate_to_datetime(raw) - datetime.now(timezone.utc)).total_seconds())
+                if 0 <= seconds <= 86400:
+                    result['retry_after_seconds'] = seconds
+            except (ValueError, TypeError, AttributeError, OverflowError):
+                pass
+        return safe_diagnostic(result)
+    reason = getattr(exc, 'reason', exc)
+    code = ('timeout' if isinstance(reason, (TimeoutError, socket.timeout)) else
+            'dns' if isinstance(reason, socket.gaierror) else
+            'tls' if isinstance(reason, ssl.SSLError) else
+            'connection' if isinstance(reason, ConnectionError) else
+            'network' if isinstance(exc, urllib.error.URLError) else None)
+    return {'code': code} if code else {}
+
+
+GUIDANCE.update({
+    'api_auth': '模型服务拒绝鉴权或权限（401/403）。请在本机核对密钥权限与模型访问权，不要发送密钥或完整环境文件；修正后重新授权复核。',
+    'api_rate_limit': '模型服务限流（429）。请遵守服务商 Retry-After；有安全秒数时至少等待该时长再重新授权，不会自动重发截图。超过一天或无效值不显示倒计时，请本机核对服务商限制。',
+    'api_server': '模型服务暂时故障（5xx）。当前本地证据保留；检查服务状态，稍后重新授权复核，不会自动上传。',
+})

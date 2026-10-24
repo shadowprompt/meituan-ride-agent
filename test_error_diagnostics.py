@@ -97,7 +97,7 @@ class DiagnosticTests(unittest.TestCase):
             with patch('ride_agent.urllib.request.build_opener') as opener:
                 opener.return_value.open.side_effect = urllib.error.HTTPError('https://secret',401,'SECRET',{},None)
                 result = agent.run(self.state, self.folder, agent.ConsentedPlanner())
-            self.assertEqual(result['error_category'], 'api_http')
+            self.assertEqual(result['error_category'], 'api_auth')
             self.assertNotIn('SECRET', result['error'])
 
     def test_new_api_pixels_success_mock_transport_real_extraction(self):

@@ -7,6 +7,8 @@ import json
 import os
 import shutil
 import sys
+import time
+import math
 from pathlib import Path
 import urllib.error
 import urllib.parse
@@ -19,7 +21,7 @@ from register_pixels import register, fit_registration
 from road_match import match, _load_segments
 from map_fetch import fetch_roads
 from inspect_colors import inspect_colors
-from ride_errors import TaskFailure, failure_category
+from ride_errors import TaskFailure, failure_category, api_diagnostic
 import route_review
 import candidate_review
 import hole_proposal
@@ -160,6 +162,14 @@ class APIPlanner:
             raise TaskFailure('api_configuration_missing')
 
     def decide(self, state, folder):
+        # 限流窗口内不发送原图；到期后仍须由网页/CLI重新取得本次授权。
+        deadline = state.get('api_retry_not_before')
+        if type(deadline) in (int, float) and time.time() < deadline <= time.time() + 86400:
+            failure = TaskFailure('api_rate_limit')
+            failure.diagnostic = {'code':'http_rate_limit', 'http_status':429,
+                                  'retry_after_seconds':math.ceil(deadline-time.time())}
+            raise failure
+        state.pop('api_retry_not_before', None)
         source = Path(folder)/'input.png'
         if source.stat().st_size > 20_000_000:
             raise ValueError('Stored screenshot exceeds 20 MB')
@@ -222,7 +232,13 @@ class APIPlanner:
                 candidate_review.mark_presented(state, folder)
             return action
         except urllib.error.HTTPError as exc:
-            raise TaskFailure('api_http') from None
+            failure = TaskFailure(failure_category(exc, 'planner'))
+            failure.diagnostic = api_diagnostic(exc)
+            delay = failure.diagnostic.get('retry_after_seconds')
+            if delay is not None:
+                state['api_retry_not_before'] = time.time() + delay
+            exc.close()
+            raise failure from None
         except (ValueError, KeyError, IndexError, TypeError, UnicodeError):
             raise TaskFailure('api_response_invalid') from None
 
@@ -405,6 +421,7 @@ def delivery_requirements(state, folder):
 def run(state, folder, planner, budget=12, consent_map=False):
     delivery_corrections = 0
     state.update(verified=False, original_gps=False)
+    state.pop('error_diagnostic', None)
     state['semantic_review_required'] = bool(getattr(planner, 'semantic_review', False))
     # 记录本轮实际执行来源，任务mode只是配置，不能冒充模型已经复核。
     state['execution'] = {'source':'api' if state['semantic_review_required'] else 'local', 'api_responses':0}
@@ -641,6 +658,9 @@ def run(state, folder, planner, budget=12, consent_map=False):
             category = failure_category(exc, stage)
             state.update(status='error', error='任务处理失败；底层错误不公开。',
                          error_category=category, error_stage=stage)
+            diagnostic = api_diagnostic(exc) if stage == 'planner' else {}
+            if diagnostic:
+                state['error_diagnostic'] = diagnostic
             save(state,folder)
             return state
     state.update(status='waiting_for_user' if state.get('semantic_review_required') else 'paused',question='工具循环达到本轮上限。尚未确认的区域/顺序请补充必要说明；未验证路线。')
@@ -785,7 +805,9 @@ def main():
                     state.pop('color_inspection',None)
                     invalidate_extraction(state,invalidate_controls=True)
                     state.pop('user_extraction_constraints',None)
-                state.pop('artifacts', None)
+                # 只复核当前证据不使本地产物失效，失败时仍保留交付清单。
+                if not review_continue:
+                    state.pop('artifacts', None)
                 state.pop('summary', None)
                 state.pop('registration_notice', None)
                 state.pop('road_notice', None)
@@ -793,6 +815,7 @@ def main():
                 state.pop('error',None)
                 state.pop('error_category',None)
                 state.pop('error_stage',None)
+                state.pop('error_diagnostic',None)
                 state['status']='analyzing'
                 save(state,args.task_dir)
             state = run(state,args.task_dir,planner, consent_map=getattr(args,'consent_map',False))
