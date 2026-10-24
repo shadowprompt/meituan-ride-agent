@@ -30,6 +30,7 @@ MAX_IMAGE = 20_000_000
 MAX_BODY = 44_000_000  # 30 MB OSM XML plus JSON overhead
 ARTIFACTS = frozenset((
     'inspection/colors.json', 'inspection/color-preview.png',
+    'extraction/question-source.png', 'extraction/question-overlay.png',
     'extraction/mask.png', 'extraction/overlay.png', 'extraction/extraction.json',
     'extraction/candidates-mask.png', 'extraction/components-overlay.png',
     'extraction/source-crop.png', 'extraction/component-ids.png',
@@ -62,6 +63,8 @@ def artifact_current(state, name):
     if prefix == 'inspection':
         return bool(state.get('colors_inspected'))
     valid = bool(state.get('extracted'))
+    if name in ('extraction/question-source.png', 'extraction/question-overlay.png'):
+        return bool(valid and state.get('question_evidence'))
     if prefix == 'extraction':
         if state.get('hole_correction') and name in ('extraction/component-ids.png', 'extraction/candidates-mask.png', 'extraction/components-overlay.png', 'extraction/structure-diagnostics.png'):
             return False
@@ -217,7 +220,7 @@ class RideServer(ThreadingHTTPServer):
             state = load(folder/'task')
         except (ValueError, OSError, TypeError, KeyError):
             raise WebError('任务状态尚未生成或无法读取', 409) from None
-        fields = ('component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
+        fields = ('candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
                   'registration_notice', 'road_notice', 'verified', 'original_gps', 'hole_correction')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
@@ -227,6 +230,18 @@ class RideServer(ThreadingHTTPServer):
             stage = state.get('error_stage')
             if isinstance(stage, str) and stage in ('planner','action','inspect_colors','extract','centerline','register','fetch_map','match'):
                 result['error_stage'] = stage
+        evidence = result.get('question_evidence')
+        if evidence:
+            import candidate_review
+            import route_review
+            try:
+                valid = (evidence.get('candidate_version') == candidate_review.version(state, folder/'task')
+                         and evidence.get('review_version') == route_review.version(state, folder/'task'))
+            except (ValueError, OSError):
+                valid = False
+            if not valid:
+                result.pop('question_evidence', None)
+                state = dict(state, question_evidence=None)
         result['task_id'] = task_id
         available = []
         for name in sorted(ARTIFACTS):
@@ -420,7 +435,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <label>目标 <select id="goal"><option value="pixels">提取轨迹像素</option><option value="registration">手工控制点配准</option><option value="roads">道路候选匹配</option></select></label>
 <label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
 <button id="create">创建并开始</button></fieldset>
-<fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre></fieldset>
+<fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset>
 <fieldset><legend>3. 回答 / 修正 / 上传证据</legend><label>回答（Demo 首次可填 {"crop":[0,0,80,60],"color":"#00BFA5"}）<textarea id="answer"></textarea></label>
 <fieldset><legend>候选像素区域 · 可视多选</legend>
 <p>原图裁剪与精确候选像素，不是只有包围框。点击像素或“查看”高亮该候选、淡化其余，并查看局部放大。绿色保留，橙色排除；勾选立即本地预览，不请求模型、不计算中心线。选择不是路线真实性确认，不连接断点、不确定路径顺序或 GPS。</p>
@@ -448,7 +463,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
 async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
-function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderComponents(d);renderHoles(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
+function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
 // 所有预览只读本地白名单产物；编号逐像素解码，不把重叠包围框当成候选。
 let componentView=null, componentEpoch=0;
 function selectedComponentIds(){return Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));}
@@ -475,6 +490,11 @@ function paintComponents(){
   const ctx=zoom.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.drawImage(canvas,x,y,w,h,0,0,zoom.width,zoom.height);
   $('zoomTitle').textContent='候选 #'+v.focus+' 局部放大 ×'+scale+'（原像素，可滚动）';
  }
+}
+function renderQuestionEvidence(d){
+ const root=$('questionEvidence');root.replaceChildren();if(!d.question_evidence)return;
+ const text=document.createElement('p');text.textContent='具体追问区域（原图坐标）'+JSON.stringify(d.question_evidence.region)+' · '+d.question_evidence.notice;root.append(text);
+ for(const name of ['extraction/question-source.png','extraction/question-overlay.png']){const a=d.artifacts?.find(x=>x.current&&x.name===name);if(!a)continue;const label=document.createElement('p');label.textContent=name.endsWith('source.png')?'原图局部 · 1:1':'当前候选局部 · 1:1';const scroll=document.createElement('div');scroll.style.cssText='overflow:auto;max-height:520px';const img=document.createElement('img');img.src=a.url;img.alt=label.textContent;img.style.cssText='max-width:none;image-rendering:pixelated';scroll.append(img);root.append(label,scroll);}
 }
 async function renderComponents(d){
  const epoch=++componentEpoch;componentView=null;$('components').replaceChildren();$('componentCanvas').width=0;$('componentZoom').width=0;$('zoomTitle').textContent='局部放大（先查看某个候选）';$('applyComponents').disabled=true;

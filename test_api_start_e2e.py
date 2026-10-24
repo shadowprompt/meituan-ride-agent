@@ -104,13 +104,14 @@ class APIStartE2ETests(unittest.TestCase):
         with Image.open(os.environ['RIDE_TURNBACK_SCREENSHOT']) as opened:
             image = opened.convert('RGB')
         code,data,calls = self.create_image(image,[{
-            'action':'extract','color':'#6A778B','crop':[240,1140,1000,1580]}])
+            'action':'extract','color':'#6A778B','crop':[240,1140,1000,1580]},
+            {'action':'ask','question':'顶部回转与右斜箭头区域仍不确定，请确认可见目标片段。'}])
         self.assertEqual(code,201,data)
         # 若分量歧义，必须显式停下让用户选择；不以完成状态掩盖安全停顿。
         self.assertIn(data['status'],('needs_confirmation','waiting_for_user'),data)
         self.assertNotIn('error_category',data)
         self.assertTrue(data['artifacts'])
-        self.assertEqual(len(calls),1)
+        self.assertEqual(len(calls),2)
 
 
 if __name__=='__main__':
