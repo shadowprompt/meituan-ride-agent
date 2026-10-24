@@ -99,8 +99,8 @@ class RealComponentTests(unittest.TestCase):
     def test_large_crop_icons_excluded_and_old_crop_kept_end_to_end(self):
         with tempfile.TemporaryDirectory() as t:
             p=Path(t)
-            for name,crop,color,expected in [('large',[200,1160,1040,1460],'#6B798C',10423),
-                                             ('old',[235,1200,1010,1420],'#6A778B',10426)]:
+            for name,crop,color,expected in [('large',[200,1160,1040,1460],'#6B798C',10366),
+                                             ('old',[235,1200,1010,1420],'#6A778B',10363)]:
                 with self.subTest(name=name):
                     folder=p/name
                     state=start(os.environ['RIDE_REAL_SCREENSHOT'],folder)
@@ -110,6 +110,8 @@ class RealComponentTests(unittest.TestCase):
                     self.assertTrue(state['centerlined'])
                     self.assertFalse(state['verified'])
                     r=json.loads((folder/'extraction/extraction.json').read_text())
+                    # 折返保护改为原始薄边截线后，旧输出像素数不再作为真值；
+                    # 实心截线、图标排除及拓扑断言仍必须同时通过。
                     self.assertEqual(r['selected_pixels'],expected)
                     mask=np.array(Image.open(folder/'extraction/mask.png'))>0
                     graph=json.loads((folder/'centerline/pixel-graph.json').read_text())
@@ -117,9 +119,9 @@ class RealComponentTests(unittest.TestCase):
                     self.assertEqual(graph['cycle_rank'],0)
                     if name=='large':
                         self.assertEqual(r['raw_pixels'],4248)
-                        self.assertEqual(r['color_candidate_pixels'],11162)
+                        self.assertEqual(r['color_candidate_pixels'],10905)
                         self.assertEqual(r['component_selection']['excluded_ids'],[2,3,4])
-                        self.assertEqual([c['pixels'] for c in r['component_selection']['candidates']],[10423,270,247,222])
+                        self.assertEqual([c['pixels'] for c in r['component_selection']['candidates']],[10366,216,172,151])
                         self.assertFalse(mask[:100].any())
                         self.assertFalse((np.array(Image.open(folder/'centerline/skeleton.png'))[:100]>0).any())
                         for xy in [(235,180),(435,193),(635,206)]:

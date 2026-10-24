@@ -31,6 +31,7 @@ ARTIFACTS = frozenset((
     'extraction/mask.png', 'extraction/overlay.png', 'extraction/extraction.json',
     'extraction/candidates-mask.png', 'extraction/components-overlay.png',
     'extraction/source-crop.png', 'extraction/component-ids.png',
+    'extraction/structure-diagnostics.png',
     'centerline/skeleton.png', 'centerline/graph-overlay.png', 'centerline/pixel-graph.json',
     'registration/registration.json', 'registration/registered-segments.geojson',
     'roads/road-match.json', 'roads/road-candidates.geojson', 'roads/road-overlay.png',
@@ -367,7 +368,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <p id="roadsNotice">注意：勾选下载地图或上传本地 OSM 后，点击“继续处理”会将任务目标自动切换为 roads（道路候选匹配），即使原目标为像素提取或配准。下载须先完成配准并通过独立检查；下载授权与 API 上传授权相互独立，未勾选不会下载。</p>
 <label><input id="fetch" type="checkbox">下载当前配准范围的地图（不可同时上传 OSM）</label><label><input id="mapConsent" type="checkbox">仅本次同意向 Overpass 发送地理范围（不发送截图）</label>
 <label><input id="localOnly" type="checkbox">仅本地继续（已有颜色/裁剪或有效掩码；不上传、不调用模型，可恢复中心线；地图下载仍单独授权）</label>
-<button id="resume">继续处理</button></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。</p><div id="artifacts"></div>
+<button id="resume">继续处理</button></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。structure-diagnostics.png 黄框仅表示被保守保护的间隙总范围，不表示已识别折返；同路往返次数和先后须人工确认。</p><div id="artifacts"></div>
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
 async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}

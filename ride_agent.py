@@ -479,7 +479,8 @@ def run(state, folder, planner, budget=6, consent_map=False):
                 state.update(status='needs_confirmation', summary=summary,
                              artifacts=['extraction/mask.png','extraction/overlay.png','extraction/extraction.json',
                                         'centerline/skeleton.png','centerline/graph-overlay.png','centerline/pixel-graph.json',
-                                        'extraction/candidates-mask.png','extraction/components-overlay.png'])
+                                        'extraction/candidates-mask.png','extraction/components-overlay.png',
+                                        'extraction/structure-diagnostics.png'])
                 if state.get('colors_inspected'):
                     state['artifacts'].extend(['inspection/colors.json','inspection/color-preview.png'])
                 if state.get('registered'):

@@ -86,8 +86,9 @@ def segment(image, color, hue_tolerance=20, min_saturation=0.35, min_value=0.2, 
     raw_count = int(raw.sum())
     cleanup = {'filled_holes': 0, 'added_pixels': 0, 'method': 'not_applied'}
     if neutral:
+        evidence_mask = raw.copy()
         raw, open_stats = complete_open_interiors(raw, image)
-        raw, cleanup = fill_supported_interiors(raw, image)
+        raw, cleanup = fill_supported_interiors(raw, image, evidence_mask=evidence_mask)
         cleanup.update(open_stats)
         cleanup['added_pixels'] += open_stats['open_added_pixels']
     mask, components = filter_components(raw, min_component, gray_min_span if neutral else 1)
@@ -104,7 +105,7 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
     if source.stat().st_size > 50_000_000:
         raise ValueError('Image exceeds 50 MB limit')
     out = Path(output_dir)
-    reserved = [out/n for n in ('mask.png', 'overlay.png', 'extraction.json', 'candidates-mask.png', 'components-overlay.png', 'source-crop.png', 'component-ids.png')]
+    reserved = [out/n for n in ('mask.png', 'overlay.png', 'extraction.json', 'candidates-mask.png', 'components-overlay.png', 'source-crop.png', 'component-ids.png', 'structure-diagnostics.png')]
     if source.resolve() in [p.resolve() for p in reserved]:
         raise ValueError('Output must not overwrite input image')
     with Image.open(source) as opened:
@@ -156,6 +157,12 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
         warnings.append('Over 20% of crop selected; likely excessive background selection.')
     if len(stats['components']) > 1:
         warnings.append('Multiple components retained; do not assume they form a single ordered route.')
+    protected_bbox = stats['mask_cleanup'].get('protected_gap_bbox_xyxy')
+    if protected_bbox:
+        warnings.append('检测到厚实近邻线臂之间的灰色间隙，已保守阻止补全；可能为发夹折返或平行路，也可能是未补全线带。请核对原图。')
+    if stats['mask_cleanup'].get('protected_enclosed_regions'):
+        warnings.append('保留了证据不足的封闭区域，可能为真实回转环；未按孔洞大小直接填平。')
+    warnings.append('同路往返、重复次数及骑行先后不能由静态像素确定；必须人工确认，不是自动恢复的有序轨迹。')
     report = {'status': 'needs_confirmation' if stats['selected_pixels'] else 'no_detection',
               'verified': False, 'original_gps': False, 'method': 'manual_crop_color_threshold_v2',
               'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
@@ -176,6 +183,14 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
     audit_image.save(out/'components-overlay.png')
     Image.fromarray(mask.astype(np.uint8)*255).save(out/'mask.png')
     Image.fromarray(overlay).save(out/'overlay.png')
+    # 诊断图不修改分量选择或掩码；框仅标示受保护截线的总范围，不宣称是路线。
+    diagnostic = Image.fromarray(overlay.copy())
+    diagnostic_draw = ImageDraw.Draw(diagnostic)
+    if protected_bbox:
+        x0, y0, x1, y1 = protected_bbox
+        diagnostic_draw.rectangle((x0,y0,x1-1,y1-1), outline='#ffb000', width=2)
+    diagnostic_draw.text((4,4), 'GAP GUARD / ORDER UNKNOWN - confirm source', fill='#b00020')
+    diagnostic.save(out/'structure-diagnostics.png')
     (out/'extraction.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)+'\n', encoding='utf-8')
     return report
 
