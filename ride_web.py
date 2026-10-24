@@ -221,7 +221,7 @@ class RideServer(ThreadingHTTPServer):
         except (ValueError, OSError, TypeError, KeyError):
             raise WebError('任务状态尚未生成或无法读取', 409) from None
         fields = ('candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
-                  'registration_notice', 'road_notice', 'verified', 'original_gps', 'hole_correction')
+                  'registration_notice', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
             category = processing_category(state)
@@ -338,6 +338,8 @@ class RideServer(ThreadingHTTPServer):
         folder = self.folder(task_id)
         self.tree_safe(folder)
         state = self.status(task_id)
+        if state.get('hole_proposal', {}).get('status') == 'pending':
+            raise WebError('请先批准或拒绝当前补孔提议；不可更改参数绕过', 409)
         upload = flag(data, 'consent_upload')
         local_only = flag(data, 'local_only')
         consent_map = flag(data, 'consent_map')
@@ -410,13 +412,19 @@ class RideServer(ThreadingHTTPServer):
 
     def holes(self, task_id, action, data):
         from web_hole_review import preview, apply
+        from hole_proposal import decide
         folder = self.folder(task_id)
         self.tree_safe(folder)
-        allowed = set() if action == 'preview' else {'review_id','fingerprint','fill_hole_ids','confirm_source_reviewed'}
+        allowed = ({'proposal_id','decision','confirm_source_reviewed','reason'} if action == 'decide' else set() if action == 'preview' else {'review_id','fingerprint','fill_hole_ids','confirm_source_reviewed'})
         if data.keys() - allowed:
             raise WebError('未知逐孔复核参数；不接受路径或画笔坐标')
         try:
-            if action == 'preview':
+            from ride_agent import load
+            if action != 'decide' and load(folder/'task').get('hole_proposal', {}).get('status') == 'pending':
+                raise ValueError('请先处理当前模型提议')
+            if action == 'decide':
+                decide(folder/'task', data)
+            elif action == 'preview':
                 preview(folder/'task')
             else:
                 apply(folder/'task', data)
@@ -447,7 +455,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <p>仅本地提交选中编号并重新生成，不上传、不下载地图；不会提交回答或颜色/裁剪修改。未选区域仍保留审计，空选不可提交。</p></fieldset>
 <fieldset><legend>逐孔人工复核 · 当前任务内纠错</legend>
 <p>先生成当前原图/掩码绑定预览，默认全部保留。每孔三联图依次为未叠加原图、精确孔洞标红、二值掩码，可点击图片打开原尺寸放大。只有明确的漏选才勾选；真实回转孔、相邻臂间隙、边界混合孔请保留。暂不支持局部画笔，不能整孔安全填时不要选择。不连接图标开放断裂，不按环数最小化自动修复。</p>
-<button id="previewHoles" type="button">生成当前任务逐孔预览</button><p id="holeNotice" role="status"></p><div id="holes"></div>
+<div id="holeProposal"></div><button id="previewHoles" type="button">生成当前任务逐孔预览</button><p id="holeNotice" role="status"></p><div id="holes"></div>
 <label><input id="holeAck" type="checkbox">我已逐孔对照未叠加原图，所选孔是漏选而非真实间隙</label>
 <button id="applyHoles" type="button" disabled>应用选中补孔并重新生成中心线</button>
 <p>本地操作，不上传、不下载地图。仅增加选中封闭小孔，不删除原前景；前后掩码、原图、选择与中心线独立审计。已应用 mask 修正不代表验证了路线顺序或 GPS。</p></fieldset>
@@ -463,7 +471,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
 async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
-function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
+function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
 // 所有预览只读本地白名单产物；编号逐像素解码，不把重叠包围框当成候选。
 let componentView=null, componentEpoch=0;
 function selectedComponentIds(){return Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));}
@@ -518,11 +526,22 @@ $('componentCanvas').onclick=e=>{const v=componentView;if(!v)return;const r=e.cu
 $('clearFocus').onclick=()=>{if(componentView){componentView.focus=0;$('componentZoom').width=0;$('zoomTitle').textContent='局部放大（先查看某个候选）';paintComponents();}};
 $('applyComponents').onclick=()=>action(async()=>{if(!componentView||componentView.taskId!==$('task').value.trim())throw Error('请先刷新当前任务的像素预览');const ids=selectedComponentIds();if(!ids.length)throw Error('请至少保留一个候选');render(await request(taskPath()+'/resume',{local_only:true,component_ids:ids}));});
 
+function renderHoleProposal(d){
+ const root=$('holeProposal');root.replaceChildren();const p=d.hole_proposal;if(!p)return;
+ const notice=document.createElement('p');notice.textContent='模型补孔提议 · '+p.status+'：可能误认真实回转孔；未批准前零修改，不连接开放断裂。';root.append(notice);
+ for(const h of p.holes){const label=document.createElement('p');label.textContent='仅提议孔 #'+h.id+' · '+h.kind+' · '+h.reason;const img=document.createElement('img');img.src='/artifacts/'+d.task_id+'/hole-reviews/'+p.review_id+'/hole-'+h.id+'.png';img.alt='提议孔 '+h.id+'：原图 / 精确新增像素 / 当前掩码';root.append(label,img);}
+ if(p.status!=='pending'){const reason=document.createElement('p');reason.textContent='用户决定理由：'+p.user_reason;root.append(reason);return;}
+ const ack=document.createElement('input');ack.type='checkbox';ack.id='proposalAck';const label=document.createElement('label');label.append(ack,document.createTextNode('我已核对以上未叠加原图，确认所有提议孔确为漏选而非真实间隙'));
+ const reason=document.createElement('input');reason.type='text';reason.id='proposalReason';reason.placeholder='批准或拒绝的具体理由';reason.setAttribute('aria-label','补孔决定理由');
+ const yes=document.createElement('button'),no=document.createElement('button');yes.textContent='批准上述提议并重建中心线';no.textContent='拒绝提议并保留掩码';yes.dataset.proposalApprove='true';yes.disabled=true;ack.onchange=()=>yes.disabled=!ack.checked;
+ for(const [button,decision] of [[yes,'approve'],[no,'reject']])button.onclick=()=>action(async()=>{if(!reason.value.trim())throw Error('请填写决定理由');render(await request('/api/tasks/'+d.task_id+'/holes/decide',{proposal_id:p.proposal_id,decision,confirm_source_reviewed:ack.checked,reason:reason.value}));});
+ root.append(label,reason,yes,no);
+}
 let holeView=null;
 function holeSelection(){return [...document.querySelectorAll('input[name=hole]:checked')].map(x=>Number(x.value));}
 function updateHoleChoice(){
  const ids=holeSelection();for(const box of document.querySelectorAll('input[name=hole]')){box.closest('section').style.border=box.checked?'3px solid #d05':'1px solid #aaa';box.closest('section').style.background=box.checked?'#fff0f5':'';}
- $('applyHoles').disabled=!holeView||!ids.length||!$('holeAck').checked;
+ $('applyHoles').disabled=!!$('proposalAck')||!holeView||!ids.length||!$('holeAck').checked;
  if(holeView)$('holeNotice').textContent='本地待应用：'+(ids.length?'仅补孔 '+ids.join('、'):'全部保留（默认）')+'；尚未修改掩码或中心线。';
 }
 function renderHoles(d){
@@ -543,7 +562,7 @@ $('applyHoles').onclick=()=>action(async()=>{
  render(await request(taskPath()+'/holes/apply',{review_id:holeView.review_id,fingerprint:holeView.fingerprint,fill_hole_ids:holeSelection(),confirm_source_reviewed:true}));
 });
 
-async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('applyHoles').disabled=!holeView||!holeSelection().length||!$('holeAck').checked;$('uploadConsent').checked=false;$('mapConsent').checked=false;}}
+async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('applyHoles').disabled=!!$('proposalAck')||!holeView||!holeSelection().length||!$('holeAck').checked;$('previewHoles').disabled=!!$('proposalAck');const approve=document.querySelector('[data-proposal-approve]');if(approve)approve.disabled=!$('proposalAck').checked;$('uploadConsent').checked=false;$('mapConsent').checked=false;}}
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
 $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked}));});
@@ -683,7 +702,7 @@ class Handler(BaseHTTPRequestHandler):
                     result = self.server.create(data)
                     self.send_json(201, result)
                     return
-                hole_match = re.fullmatch(r'/api/tasks/([^/]+)/holes/(preview|apply)', path)
+                hole_match = re.fullmatch(r'/api/tasks/([^/]+)/holes/(preview|apply|decide)', path)
                 if hole_match:
                     self.send_json(200, self.server.holes(*hole_match.groups(), data))
                     return

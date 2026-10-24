@@ -82,6 +82,8 @@ def apply(folder, data):
     state.update(extracted=False, centerlined=False, registered=False,
                  registration_gate_passed=False, match_attempted=False, verified=False)
     state.pop('summary', None)
+    for key in ('route_review','review_region','review_presented_version','review_presented_regions'):
+        state.pop(key, None)
     save(state, folder)
     shutil.copyfile(out/'mask-corrected.png', mask)
     shutil.copyfile(out/'overlay-after.png', folder/'extraction/overlay.png')
