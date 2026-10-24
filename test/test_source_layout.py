@@ -21,18 +21,18 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertEqual(Path(__file__).resolve().parent, ROOT/'test')
         self.assertTrue(diagnose()['local_ready'])
 
-    def test_default_task_location_and_five_minute_timeout(self):
+    def test_default_task_location_and_bounded_background_timeout(self):
         # 不在真实任务目录写数据；检查默认路径并拦截子进程。
         with patch('ride_web.safe_path'), patch.object(Path, 'mkdir'):
             server = ride_web.RideServer(0)
         try:
             self.assertEqual(server.root, ROOT/'outputs'/'web')
-            self.assertEqual(server.cli_timeout, 300)
+            self.assertEqual(server.cli_timeout, 4500)
             with patch('ride_web.subprocess.run', return_value=subprocess.CompletedProcess([], 0, b'', b'')) as run:
                 server.run_cli(['status', '--task-dir', str(ROOT/'outputs'/'example')])
             self.assertEqual(Path(run.call_args.args[0][1]), ROOT/'src'/'ride_agent.py')
             self.assertEqual(Path(run.call_args.kwargs['cwd']), ROOT)
-            self.assertEqual(run.call_args.kwargs['timeout'], 300)
+            self.assertEqual(run.call_args.kwargs['timeout'], 4500)
         finally:
             server.server_close()
 

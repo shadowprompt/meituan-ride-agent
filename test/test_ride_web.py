@@ -3,6 +3,7 @@ import base64
 import http.client
 import io
 import json
+import time
 from pathlib import Path
 import subprocess
 import tempfile
@@ -31,7 +32,7 @@ class WebTests(unittest.TestCase):
         self.thread.join()
         self.temp.cleanup()
 
-    def request(self, path='/', data=None, *, method=None, headers=None, raw=None):
+    def request(self, path='/', data=None, *, method=None, headers=None, raw=None, wait=True):
         method = method or ('POST' if data is not None else 'GET')
         defaults = {}
         body = None
@@ -46,6 +47,23 @@ class WebTests(unittest.TestCase):
         response = connection.getresponse()
         result = (response.status, dict(response.getheaders()), response.read())
         connection.close()
+        # 旧端到端断言等待终态；异步协议专项必须 wait=False 直接检查真实 HTTP。
+        if wait and result[0] == 202:
+            task_id = json.loads(result[2])['task_id']
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                status = WebTests.request(self, '/api/tasks/'+task_id, wait=False)
+                state = json.loads(status[2])
+                if state.get('execution_state') not in ('queued', 'running'):
+                    if state.get('web_execution', {}).get('http_error_code'):
+                        # 模拟旧同步错误响应，只用于历史用例兼容。
+                        code = state['web_execution']['http_error_code']
+                        state.update(state['web_execution'])
+                    else:
+                        code = 201 if path == '/api/tasks' else 200
+                    return code, status[1], json.dumps(state).encode()
+                time.sleep(.01)
+            raise AssertionError('后台测试任务未按时完成')
         return result
 
     def state(self, task_id=None, **fields):
@@ -272,7 +290,7 @@ class WebTests(unittest.TestCase):
                 thread.start()
             for thread in threads:
                 thread.join()
-        self.assertEqual(results, [200, 200])
+        self.assertEqual(sorted(results), [200, 409])
         self.assertEqual(peak, 1)
 
     def test_symlinked_root_and_task_are_refused(self):

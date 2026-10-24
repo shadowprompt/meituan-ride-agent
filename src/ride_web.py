@@ -1,6 +1,6 @@
 """Loopback-only Chinese UI. Run: python src/ride_web.py --port 8765.
 
-POST /api/tasks: {image_base64, mode: demo|api, goal: pixels|registration|roads,
+POST /api/tasks (202, background): {image_base64, mode: demo|api, goal: pixels|registration|roads,
 consent_upload: bool}. POST /api/tasks/<uuid>/resume: {answer?, color?, crop?,
 controls_json?, osm_xml?, fetch_map?, consent_map?, consent_upload?}.
 Every POST requires X-CSRF-Token from GET /api/config (or the root UI).
@@ -13,6 +13,8 @@ import binascii
 import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import queue
+import time
 import os
 from pathlib import Path
 import re
@@ -152,7 +154,7 @@ class RideServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, port=8765, *, output_root=None, cli_timeout=300):
+    def __init__(self, port=8765, *, output_root=None, cli_timeout=4500, workers=2, queue_limit=4, max_tasks=256):
         # 绑定地址不能由浏览器、环境变量或命令行改成公网地址。
         self.root = Path(output_root) if output_root is not None else BASE/'outputs'/'web'
         safe_path(self.root)
@@ -160,8 +162,122 @@ class RideServer(ThreadingHTTPServer):
         self.root = self.root.resolve()
         self.token = secrets.token_urlsafe(32)
         self.change_lock = threading.RLock()
-        self.cli_timeout = max(1, min(300, cli_timeout))
+        # 单次模型仍为 300 秒；12 轮另加本地工具预算，整轮上限 75 分钟。
+        self.cli_timeout = max(1, min(4500, cli_timeout))
+        self.http_slots = threading.BoundedSemaphore(16)
+        self.max_tasks = max_tasks
+        self.jobs = {}
+        self.work_queue = queue.Queue(maxsize=workers + queue_limit)
+        self.capacity = threading.BoundedSemaphore(workers + queue_limit)
+        self.stopping = threading.Event()
+        # 仅恢复执行记录，不保存/重放带上传授权的命令。
+        for folder in self.root.iterdir():
+            if UUID_RE.fullmatch(folder.name) and folder.is_dir():
+                try:
+                    record = json.loads(safe_path(self.root, folder.name, 'web-execution.json').read_text())
+                    if not isinstance(record, dict):
+                        continue
+                    if record.get('state') in ('queued', 'running'):
+                        record = self.execution_record('failed', 'interrupted')
+                        self.write_execution(folder.name, record)
+                    self.jobs[folder.name] = record
+                except (OSError, ValueError, TypeError):
+                    pass
         super().__init__(('127.0.0.1', port), Handler)
+        for index in range(workers):
+            threading.Thread(target=self.worker, name='ride-worker-'+str(index), daemon=True).start()
+
+    def process_request(self, request, client_address):
+        # 慢客户端也不能造成无限 HTTP 线程；连接拥塞时立即关闭，不排队占资源。
+        if not self.http_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.http_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.http_slots.release()
+
+    def execution_record(self, state, category=None):
+        record = {'state': state, 'updated_at': time.time(), 'budget_seconds': self.cli_timeout}
+        if category:
+            record.update(error_category=category, error='后台执行未完成，请查看安全提示并明确授权后继续',
+                          recovery_hint=('服务已重启，本轮已中断；不会自动重新上传。请检查已保存候选并重新授权继续。'
+                                         if category == 'interrupted' else GUIDANCE[category]))
+        return record
+
+    def write_execution(self, task_id, record):
+        target = safe_path(self.root, task_id, 'web-execution.json')
+        temp = safe_path(self.root, task_id, 'web-execution.tmp')
+        temp.write_text(json.dumps(record), encoding='utf-8')
+        temp.replace(target)
+
+    def idle(self, task_id):
+        if self.jobs.get(task_id, {}).get('state') in ('queued', 'running'):
+            raise WebError('任务正在排队或执行，请等待完成；不得重复继续或修改补孔', 409)
+
+    def enqueue(self, task_id, args):
+        record = self.execution_record('queued')
+        self.write_execution(task_id, record)
+        self.jobs[task_id] = record
+        self.work_queue.put_nowait((task_id, args))
+        return {'task_id': task_id, 'execution_state': 'queued', 'web_execution': record,
+                'status_url': '/api/tasks/'+task_id, 'poll_after_ms': 1000}
+
+    def worker(self):
+        while not self.stopping.is_set():
+            try:
+                task_id, args = self.work_queue.get(timeout=.2)
+            except queue.Empty:
+                continue
+            try:
+                with self.change_lock:
+                    record = self.execution_record('running')
+                    self.write_execution(task_id, record)
+                    self.jobs[task_id] = record
+                self.run_cli(args)  # 不持有 HTTP 状态锁；CLI 原子替换 task.json。
+                from ride_agent import load
+                state = load(self.folder(task_id)/'task')
+                category = processing_category(state) if state.get('status') == 'error' or state.get('error') else None
+                record = self.execution_record('failed' if category else 'succeeded', category)
+            except WebError as exc:
+                record = self.execution_record('failed', exc.category)
+                record['http_error_code'] = exc.code
+            except Exception:
+                # 不公开原始异常、命令、响应或密钥。
+                record = self.execution_record('failed', 'local_state_failed')
+                record['http_error_code'] = 500
+            finally:
+                with self.change_lock:
+                    self.jobs[task_id] = record
+                    try:
+                        self.write_execution(task_id, record)
+                    except OSError:
+                        pass
+                self.capacity.release()
+                self.work_queue.task_done()
+
+    def submit(self, task_id, data):
+        # Handler 持有短锁：同任务检查、输入落盘和入队是一个不可分割操作。
+        if task_id:
+            self.idle(task_id)
+        if not self.capacity.acquire(blocking=False):
+            raise WebError('后台队列已满，请稍后手动提交；未自动上传', 503)
+        try:
+            return self.resume(task_id, data, asynchronous=True) if task_id else self.create(data, asynchronous=True)
+        except Exception:
+            self.capacity.release()
+            raise
+
+    def server_close(self):
+        self.stopping.set()
+        super().server_close()
 
     def folder(self, task_id):
         if not UUID_RE.fullmatch(task_id):
@@ -215,6 +331,21 @@ class RideServer(ThreadingHTTPServer):
             raise WebError('CLI 运行失败（详细错误不在网页公开）', 422, category)
 
     def status(self, task_id):
+        self.folder(task_id)
+        record = self.jobs.get(task_id)
+        try:
+            result = self._status(task_id)
+        except WebError as exc:
+            if exc.code != 409 or not record:
+                raise
+            result = {'task_id': task_id, 'artifacts': []}
+        if record:
+            result.update(web_execution=dict(record), execution_state=record['state'])
+        else:
+            result['execution_state'] = 'idle'
+        return result
+
+    def _status(self, task_id):
         from ride_agent import load
         folder = self.folder(task_id)
         safe_path(self.root, task_id, 'task', 'task.json')
@@ -303,7 +434,7 @@ class RideServer(ThreadingHTTPServer):
             return value
         return redact(result)
 
-    def create(self, data):
+    def create(self, data, *, asynchronous=False):
         allowed = {'image_base64', 'mode', 'goal', 'consent_upload'}
         if data.keys() - allowed:
             raise WebError('未知创建参数（不接受文件路径）')
@@ -329,6 +460,8 @@ class RideServer(ThreadingHTTPServer):
                 APIPlanner()
             except TaskFailure as exc:
                 raise WebError('模型服务配置未就绪，未创建任务或上传截图', 422, exc.category) from None
+        if sum(1 for entry in self.root.iterdir() if UUID_RE.fullmatch(entry.name)) >= self.max_tasks:
+            raise WebError('任务存储额度已满，请由管理员归档后再创建', 503)
         task_id = str(uuid.uuid4())
         folder = safe_path(self.root, task_id)
         folder.mkdir(mode=0o700)
@@ -341,6 +474,8 @@ class RideServer(ThreadingHTTPServer):
             args.append('--demo')
         if consent:
             args.append('--consent-upload')
+        if asynchronous:
+            return self.enqueue(task_id, args)
         try:
             self.run_cli(args)
         except WebError as exc:
@@ -348,7 +483,8 @@ class RideServer(ThreadingHTTPServer):
             raise WebError(str(exc)+'；任务编号：'+task_id, exc.code, exc.category) from None
         return self.status(task_id)
 
-    def resume(self, task_id, data):
+    def resume(self, task_id, data, *, asynchronous=False):
+        self.idle(task_id)
         allowed = {'component_ids', 'answer', 'color', 'crop', 'controls_json', 'osm_xml',
                    'fetch_map', 'consent_map', 'consent_upload', 'local_only', 'review_continue'}
         if data.keys() - allowed:
@@ -433,10 +569,13 @@ class RideServer(ThreadingHTTPServer):
         for name, content in pending.items():
             target = safe_path(self.root, task_id, 'inputs', name)
             target.write_bytes(content)
+        if asynchronous:
+            return self.enqueue(task_id, args)
         self.run_cli(args)
         return self.status(task_id)
 
     def holes(self, task_id, action, data):
+        self.idle(task_id)
         from web_hole_review import preview, apply
         from hole_proposal import decide
         folder = self.folder(task_id)
@@ -499,8 +638,19 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <p><a href="/pixel-route">无需 API：本地人工有序像素路线标注、保存与导出</a></p>
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
-async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
-function render(d){$('reviewEntry').hidden=d.mode!=='api';$('reviewConsent').checked=false;const source={local:'本地执行',api:'API复核流程',unknown:'历史执行来源未知'}[d.execution?.source]||'执行来源未知';const review={not_reviewed:'尚未模型复核',consistent:'模型已报告当前版本可见一致（非真值验证）',needs_revision:'模型发现当前版本需要修正',ambiguous:'模型报告当前版本存在歧义'}[d.review_status]||'尚未模型复核';$('executionNotice').textContent=(d.execution?.source==='local'&&d.centerlined&&d.user_components_applied?'候选已应用、本地中心线已生成，':'')+review+'。本轮来源：'+source+'；成功模型响应：'+(d.execution?.api_responses||0)+'。成功响应为0不代表未发送原图（可能已发送但未收到有效响应）；mode仅为任务配置；始终未验证、非原始GPS。';$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
+async function request(path,data){const r=await fetch(path,{signal:AbortSignal.timeout(20000),method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
+let pollTimer=null,pollStarted=0,pollTask='',executionBusy=false;
+function stopPolling(){clearTimeout(pollTimer);pollTimer=null;}
+function schedulePoll(d){
+ stopPolling();executionBusy=['queued','running'].includes(d.execution_state);
+ if(!executionBusy){pollTask='';return;}
+ if(pollTask!==d.task_id){pollTask=d.task_id;pollStarted=Date.now();}
+ if(Date.now()-pollStarted>4600000){$('error').textContent='自动刷新已停止，请手动刷新状态；不会自动重试或上传。';return;}
+ const id=d.task_id;
+ pollTimer=setTimeout(async()=>{if($('task').value.trim()!==id){stopPolling();return;}try{const next=await request('/api/tasks/'+id);if($('task').value.trim()===id)render(next);}catch(e){stopPolling();$('error').textContent='状态刷新失败，请手动刷新；不会重试上传。'+e.message;}},1000);
+}
+function lockRunning(){if(executionBusy)for(const b of document.querySelectorAll('button'))if(b.id!=='refresh')b.disabled=true;}
+function render(d){schedulePoll(d);for(const b of document.querySelectorAll('button'))b.disabled=false;$('reviewEntry').hidden=d.mode!=='api';$('reviewConsent').checked=false;const source={local:'本地执行',api:'API复核流程',unknown:'历史执行来源未知'}[d.execution?.source]||'执行来源未知';const review={not_reviewed:'尚未模型复核',consistent:'模型已报告当前版本可见一致（非真值验证）',needs_revision:'模型发现当前版本需要修正',ambiguous:'模型报告当前版本存在歧义'}[d.review_status]||'尚未模型复核';$('executionNotice').textContent='后台执行：'+({queued:'排队中',running:'运行中',succeeded:'本轮已结束（非真值验证）',failed:'本轮失败',idle:'历史任务待继续'}[d.execution_state]||'待查询')+'。'+(d.web_execution?.recovery_hint||'')+(d.execution?.source==='local'&&d.centerlined&&d.user_components_applied?'候选已应用、本地中心线已生成，':'')+review+'。本轮来源：'+source+'；成功模型响应：'+(d.execution?.api_responses||0)+'。成功响应为0不代表未发送原图（可能已发送但未收到有效响应）；mode仅为任务配置；始终未验证、非原始GPS。';$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}$('previewHoles').disabled=!!$('proposalAck');lockRunning();}
 // 所有预览只读本地白名单产物；编号逐像素解码，不把重叠包围框当成候选。
 let componentView=null, componentEpoch=0;
 function selectedComponentIds(){return Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));}
@@ -518,7 +668,7 @@ function paintComponents(){
  const selected=selectedComponentIds(),canvas=$('componentCanvas');
  canvas.getContext('2d').putImageData(new ImageData(paintComponentPixels(v.source,v.labels,selected,v.focus),v.w,v.h),0,0);
  $('componentNotice').textContent='本地待应用预览：保留 '+(selected.join('、')||'无')+'；未选像素以橙色标出。尚未重新生成中心线。'+(v.focus?' 当前高亮 #'+v.focus+'，其余淡化。':'');
- $('applyComponents').disabled=!selected.length;
+ $('applyComponents').disabled=executionBusy||!selected.length;
  if(!v.focus){$('componentZoom').width=0;$('zoomTitle').textContent='局部放大（先查看某个候选）';}
  if(v.focus){
   const c=v.candidates.find(c=>c.id===v.focus),b=c.bbox_crop_xyxy;
@@ -591,7 +741,7 @@ $('applyHoles').onclick=()=>action(async()=>{
  render(await request(taskPath()+'/holes/apply',{review_id:holeView.review_id,fingerprint:holeView.fingerprint,fill_hole_ids:holeSelection(),confirm_source_reviewed:true}));
 });
 
-async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('applyHoles').disabled=!!$('proposalAck')||!holeView||!holeSelection().length||!$('holeAck').checked;$('previewHoles').disabled=!!$('proposalAck');const approve=document.querySelector('[data-proposal-approve]');if(approve)approve.disabled=!$('proposalAck').checked;$('uploadConsent').checked=false;$('reviewConsent').checked=false;$('mapConsent').checked=false;}}
+async function action(fn){$('error').textContent='处理中，请稍候（提交后后台运行；单次模型限时300秒，整轮最多75分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('applyHoles').disabled=!!$('proposalAck')||!holeView||!holeSelection().length||!$('holeAck').checked;$('previewHoles').disabled=!!$('proposalAck');const approve=document.querySelector('[data-proposal-approve]');if(approve)approve.disabled=!$('proposalAck').checked;$('uploadConsent').checked=false;$('reviewConsent').checked=false;$('mapConsent').checked=false;lockRunning();}}
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
 $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked}));});
@@ -718,7 +868,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = strict_object(json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError())))
             except (ValueError, UnicodeError, RecursionError):
                 raise WebError('JSON 无效') from None
-            # 所有任务变更及读取序列化，避免 CLI 与覆盖输入竞争。
+            # 只锁住校验/输入落盘/入队，不等待 CLI；后台执行不占用此锁。
             with self.server.change_lock:
                 if path == '/api/pixel-routes':
                     import pixel_route
@@ -730,8 +880,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(200, pixel_route.save(self.server, manual[1], data))
                     return
                 if path == '/api/tasks':
-                    result = self.server.create(data)
-                    self.send_json(201, result)
+                    result = self.server.submit(None, data)
+                    self.send_json(202, result)
                     return
                 hole_match = re.fullmatch(r'/api/tasks/([^/]+)/holes/(preview|apply|decide)', path)
                 if hole_match:
@@ -740,7 +890,7 @@ class Handler(BaseHTTPRequestHandler):
                 match = re.fullmatch(r'/api/tasks/([^/]+)/resume', path)
                 if not match:
                     raise WebError('接口不存在', 404)
-                self.send_json(200, self.server.resume(match[1], data))
+                self.send_json(202, self.server.submit(match[1], data))
         except WebError as exc:
             self.close_connection = True
             self.send_json(exc.code, exc.public())
