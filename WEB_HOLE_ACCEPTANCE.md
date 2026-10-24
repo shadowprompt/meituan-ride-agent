@@ -30,13 +30,13 @@
 
 ## 自动回归
 
-新增 `test_web_holes.py`，用真实本地HTTP覆盖默认不修正、并发重复提交仅一次生效、精确补孔、前后审计、中心线更新、重复/旧候选/source或mask变化拒绝、失效提取拒绝、预览上限、CSRF/Host/Origin、路径白名单和 symlink、真实2/4号选择。原有灰图与窄U/发夹/候选UI断言不放宽。
+新增 `test/test_web_holes.py`，用真实本地HTTP覆盖默认不修正、并发重复提交仅一次生效、精确补孔、前后审计、中心线更新、重复/旧候选/source或mask变化拒绝、失效提取拒绝、预览上限、CSRF/Host/Origin、路径白名单和 symlink、真实2/4号选择。原有灰图与窄U/发夹/候选UI断言不放宽。
 
 ```sh
 RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" \
 RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" \
-PYTHONPATH=src python3 -m unittest discover -q
-python3 -m py_compile src/ride_web.py src/ride_agent.py src/web_hole_review.py test_web_holes.py
+PYTHONPATH=src python3 -m unittest discover -s test -q
+python3 -m py_compile src/ride_web.py src/ride_agent.py src/web_hole_review.py test/test_web_holes.py
 git diff --check
 ```
 

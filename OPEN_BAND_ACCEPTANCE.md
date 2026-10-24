@@ -28,10 +28,10 @@
 
 ```sh
 # 不联网；真实图片不放进仓库。无此环境变量则真实用例明确 skipped，不冒充验收。
-RIDE_REAL_SCREENSHOT=/absolute/local/original-image PYTHONPATH=src python3 -m unittest discover
+RIDE_REAL_SCREENSHOT=/absolute/local/original-image PYTHONPATH=src python3 -m unittest discover -s test
 ```
 
-新增 `test_open_band_recovery.py`：开放灰带、不同分量灰色间隔、白色/地图背景、过宽环、真实原图截面与结构、API 写入超时分类、全本地流程、无密钥/无上传授权 CLI 恢复。
+新增 `test/test_open_band_recovery.py`：开放灰带、不同分量灰色间隔、白色/地图背景、过宽环、真实原图截面与结构、API 写入超时分类、全本地流程、无密钥/无上传授权 CLI 恢复。
 
 ## 仍有限制
 

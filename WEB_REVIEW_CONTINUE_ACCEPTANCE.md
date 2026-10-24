@@ -12,7 +12,7 @@
 
 ## 验证范围
 
-`test_web_review_continue.py`新增4项：HTTP→真实CLI子进程→loopback模型，API创建→歧义候选→用户选1/2本地重建（模型请求零新增）→同任务本次授权→当前原图、当前提取与保留选择进入模型→observe/review/deliver；掩码/骨架哈希不变。另覆盖歧义具体追问、补孔提议默认零修改、旧任务无字段、未授权/本地任务边界、CSRF/Origin/Host、失败不假复核、真实前端处理器忽略陈旧表单与创建授权。
+`test/test_web_review_continue.py`新增4项：HTTP→真实CLI子进程→loopback模型，API创建→歧义候选→用户选1/2本地重建（模型请求零新增）→同任务本次授权→当前原图、当前提取与保留选择进入模型→observe/review/deliver；掩码/骨架哈希不变。另覆盖歧义具体追问、补孔提议默认零修改、旧任务无字段、未授权/本地任务边界、CSRF/Origin/Host、失败不假复核、真实前端处理器忽略陈旧表单与创建授权。
 
 浏览器使用agent-browser真实DOM完成创建/候选勾选、本地应用、未授权报错、授权后继续。环境中浏览器CDP多次断开，保留同任务刷新恢复，并使用DOM `.click()`执行页面真实处理器；未用mock DOM冒充浏览器HTTP路径。最终本地与复核截图已目视检查。陈旧`color=#ffffff,crop=[0,0,1,1],localOnly=true`未影响复核，1/2仍选中，本次授权自动取消。仅合成图片与127.0.0.1模型mock，无真实外部上传/地图。
 
@@ -28,7 +28,7 @@
 
 最终双图全量命令：
 ```sh
-RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" PYTHONPATH=src python3 -m unittest discover -q
+RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" PYTHONPATH=src python3 -m unittest discover -s test -q
 ```
 
 最终结果：

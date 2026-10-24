@@ -36,7 +36,7 @@
 ## 验收命令
 
 ```sh
-RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" PYTHONPATH=src python3 -m unittest discover -q
+RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" PYTHONPATH=src python3 -m unittest discover -s test -q
 git diff --check
 ```
 

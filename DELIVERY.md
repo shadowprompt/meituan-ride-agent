@@ -21,7 +21,7 @@ git pull --ff-only
 python -m pip install -r requirements.txt
 python src/ride_doctor.py
 $env:PYTHONPATH = "src"
-python -m unittest discover
+python -m unittest discover -s test
 python src/ride_web.py
 ```
 
@@ -81,4 +81,4 @@ python src/ride_web.py
 
 ## 源码目录调整
 
-业务源码现位于 `src/`，启动命令改为 `python src/ride_web.py --port 8765`。在项目根目录运行，已有 `outputs/web` 任务路径不变。Web 单次执行默认限时与模型 API 单次连接/读取限时均为 300 秒（5 分钟），不是完整多轮任务可无限等待。测试使用 `PYTHONPATH=src python -m unittest discover -v`。
+业务源码现位于 `src/`，启动命令改为 `python src/ride_web.py --port 8765`。在项目根目录运行，已有 `outputs/web` 任务路径不变。Web 单次执行默认限时与模型 API 单次连接/读取限时均为 300 秒（5 分钟），不是完整多轮任务可无限等待。测试使用 `PYTHONPATH=src python -m unittest discover -s test -v`。

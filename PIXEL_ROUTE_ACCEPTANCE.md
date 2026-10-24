@@ -41,7 +41,7 @@
 
 ## 实际验收证据
 
-- 双原图全量离线回归：设置 `RIDE_REAL_SCREENSHOT=local-data/user-original-rgb.png` 与 `RIDE_TURNBACK_SCREENSHOT=local-data/turnback-original-rgb.png` 执行 `PYTHONPATH=src python3 -m unittest discover -v`，**227 项通过，无跳过**。两份是此前本地正常 PNG 编码副本；收到的伪 PNG 实为 TIFF，未放宽格式验证。
+- 双原图全量离线回归：设置 `RIDE_REAL_SCREENSHOT=local-data/user-original-rgb.png` 与 `RIDE_TURNBACK_SCREENSHOT=local-data/turnback-original-rgb.png` 执行 `PYTHONPATH=src python3 -m unittest discover -s test -v`，**227 项通过，无跳过**。两份是此前本地正常 PNG 编码副本；收到的伪 PNG 实为 TIFF，未放宽格式验证。
 - 本轮新增 11 项人工路线测试：真实 HTTP 上传/保存/导出、重复线段、空草稿、冲突、非法数值/裁剪/额外字段、原图篡改、JPEG EXIF、TIFF 拒绝、400 万像素边界、Host/Origin/CSRF/路径与读写符号链接、重启恢复、双截图。
 - 真实 Chromium 本地走通两张图：上传 → 裁剪 → 50% 缩放点击 → 重复经过 → 撤销 → 取消清空 → 顺序播放 → 保存 → 刷新恢复 → 手输任务号重开 → 下载 JSON；另验证确认清空、未保存导出隐藏、伪 TIFF 拒绝，以及第二张折返图保存/刷新/导出。
 - 浏览器验证裁剪偏移和缩放映射；真实鼠标屏幕整数取整使原图坐标误差小于 2 像素，重复点击坐标完全一致。页面异常 0、外部请求 0。

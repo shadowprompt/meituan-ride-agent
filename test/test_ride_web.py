@@ -286,7 +286,7 @@ class WebTests(unittest.TestCase):
             RideServer(0, output_root=outside)
 
     def test_actual_http_roads_and_crop_correction(self):
-        base=Path(__file__).resolve().parent/'examples'
+        base=Path(__file__).resolve().parent.parent/'examples'
         code,_,body=self.request('/api/tasks',{
             'image_base64':base64.b64encode((base/'synthetic-ride.png').read_bytes()).decode(),
             'mode':'demo','goal':'roads'})

@@ -2,7 +2,7 @@
 
 ## 实现范围
 
-核心修改 `ride_agent.py`，新增 `route_review.py`、`test_route_review.py` 和本文；集成阶段同时升级 `test_api_start_e2e.py`、`test_error_diagnostics.py` 的旧成功mock。未修改网页、颜色阈值、折返像素启发式、中心线算法或 API 配置。未访问真实视觉 API、未下载地图、未提交/推送本轮修改。并行人工编辑任务的文件不属于本实现。
+核心修改 `ride_agent.py`，新增 `route_review.py`、`test/test_route_review.py` 和本文；集成阶段同时升级 `test/test_api_start_e2e.py`、`test/test_error_diagnostics.py` 的旧成功mock。未修改网页、颜色阈值、折返像素启发式、中心线算法或 API 配置。未访问真实视觉 API、未下载地图、未提交/推送本轮修改。并行人工编辑任务的文件不属于本实现。
 
 原实现 `ConsentedPlanner.local_pipeline` 在生成中心线后直接本地交付，模型没有看到结果。本轮取消真实 API 模式下该旁路，保留确定性中心线执行，但交付必须让 APIPlanner 看当前原图、提取叠图和骨架叠图，并显式返回 `review_route`。
 
@@ -26,14 +26,14 @@
 
 ## 测试
 
-`PYTHONPATH=src python3 -m unittest test_route_review -v`：15项通过。使用实际APIPlanner的请求构造，mock urllib传输响应；真实确定性提取/骨架工具执行。
+`PYTHONPATH=src:test python3 -m unittest test_route_review -v`：15项通过。使用实际APIPlanner的请求构造，mock urllib传输响应；真实确定性提取/骨架工具执行。
 
 覆盖：当前原图/叠图及1:1局部图进入请求、needs_revision→局部观察→重提取→重审→交付、含裁剪偏移的局部坐标元信息、缺少复核拒绝、ambiguous必须提问、不能无新证据改口确认、重提取撤销旧版本、旁路文件修改阻止交付、无进展/观察预算有限停止、ConsentedPlanner不能旁路交付、LocalPlanner离线无网络无伪复核、越界/路径参数拒绝。集成新增：伪造当前哈希/未呈现区域无法过门、用户参数修改撤销复核及局部呈现授权、传输失败不标记呈现、完全相同重提取不能消除已报歧义；局部PNG还验证尺寸及原图裁剪像素一致。
 
 全量双本地图环境命令（本地图片不入Git）：
 
 ```sh
-RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" PYTHONPATH=src python3 -m unittest discover -q
+RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" PYTHONPATH=src python3 -m unittest discover -s test -q
 ```
 
 集成全量已包含人工编辑模块回归。双图环境启用旧图和折返图，不跳过这些用例。

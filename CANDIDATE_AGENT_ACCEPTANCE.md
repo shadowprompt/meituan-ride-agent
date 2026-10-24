@@ -25,10 +25,10 @@
 ```sh
 RIDE_REAL_SCREENSHOT=local-data/user-original-rgb.png \
 RIDE_TURNBACK_SCREENSHOT=local-data/turnback-original-rgb.png \
-PYTHONPATH=src python3 -m unittest discover -q
+PYTHONPATH=src python3 -m unittest discover -s test -q
 ```
 
-`test_candidate_review.py` 的本地 HTTP mock 贯通网页 POST→CLI 子进程→loopback 模型 HTTP。合成图两个候选先观察，模拟模型逐项选择目标、排除旁侧图标，再中心线、观察当前骨架、记录 ambiguous、针对起点遮挡提出具体区域问题。测试解码实际请求PNG，核对1:1尺寸与原图像素，不只检查字段存在。
+`test/test_candidate_review.py` 的本地 HTTP mock 贯通网页 POST→CLI 子进程→loopback 模型 HTTP。合成图两个候选先观察，模拟模型逐项选择目标、排除旁侧图标，再中心线、观察当前骨架、记录 ambiguous、针对起点遮挡提出具体区域问题。测试解码实际请求PNG，核对1:1尺寸与原图像素，不只检查字段存在。
 
 折返原图使用 `[240,1140,1000,1580]` / `#6A778B`；分为两块局部证据覆盖全部像素，模拟有理由保留两个断裂分量，检查中心线、后置复核与具体追问均到达。此处保留所有分量是显式 mock 动作，不是算法默认策略，更不是视觉正确性验证。
 

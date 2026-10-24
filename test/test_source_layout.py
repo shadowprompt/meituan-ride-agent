@@ -10,13 +10,15 @@ from unittest.mock import patch
 import ride_web
 from ride_doctor import diagnose
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class SourceLayoutTests(unittest.TestCase):
     def test_sources_separated_and_doctor_ready(self):
         self.assertEqual(Path(ride_web.__file__).resolve().parent, ROOT/'src')
         self.assertFalse((ROOT/'ride_agent.py').exists())
+        self.assertFalse(list(ROOT.glob('test_*.py')))
+        self.assertEqual(Path(__file__).resolve().parent, ROOT/'test')
         self.assertTrue(diagnose()['local_ready'])
 
     def test_default_task_location_and_five_minute_timeout(self):

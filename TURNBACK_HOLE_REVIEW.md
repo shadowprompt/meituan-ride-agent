@@ -73,8 +73,8 @@ python3 src/review_mask_holes.py \
 ```sh
 RIDE_REAL_SCREENSHOT="$PWD/local-data/user-original-rgb.png" \
 RIDE_TURNBACK_SCREENSHOT="$PWD/local-data/turnback-original-rgb.png" \
-PYTHONPATH=src python3 -m unittest discover -q
-python3 -m py_compile src/review_mask_holes.py test_review_mask_holes.py
+PYTHONPATH=src python3 -m unittest discover -s test -q
+python3 -m py_compile src/review_mask_holes.py test/test_review_mask_holes.py
 git diff --check
 ```
 

@@ -21,7 +21,7 @@ class CorrectionTests(unittest.TestCase):
         run(self.state,self.folder,DemoPlanner())
 
     def test_register_refuses_unbound_or_mismatched_controls(self):
-        (self.folder/'controls.json').write_text(Path('examples/synthetic-controls.json').read_text())
+        (self.folder/'controls.json').write_text((Path(__file__).resolve().parent.parent/'examples/synthetic-controls.json').read_text())
         self.state['controls_invalidated']=False
         self.assertFalse(controls_current(self.state,self.folder))
         self.state['controls_crop']=[1,0,80,60]

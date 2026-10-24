@@ -12,12 +12,12 @@
 python -m pip install -r requirements.txt
 python src/ride_doctor.py
 python src/ride_web.py --port 8765
-# 测试仍位于根目录，显式指定源码导入路径
-PYTHONPATH=src python -m unittest discover -v
+# 从项目根目录发现 test/ 内的测试，显式指定源码导入路径
+PYTHONPATH=src python -m unittest discover -s test -v
 ```
 
 - `src/`：业务源码、网页与 CLI 入口。
-- 根目录 `test_*.py`：回归测试；`examples/`：合成示例；`training-demo/`：独立训练演示。
+- `test/`：回归测试；`examples/`：合成示例；`training-demo/`：独立训练演示。
 - `outputs/`、`local-data/`：本地任务与私有数据，仍在原位置，不会迁入 `src/`。
 - Web 单次 CLI 执行默认超时从 **180 秒延长为 300 秒（5 分钟）**；模型 API 单次连接/读取超时同步从 90 秒延长为 300 秒。二者不是叠加等待保证，完整多轮任务仍受 Web 单次执行 300 秒上限约束；地图下载、浏览器请求头读取等其他安全限时不变。不自动重试，超时后先刷新任务状态。
 - 旧命令 `python ride_web.py` 改为 `python src/ride_web.py`；其他业务脚本同理。已有 `outputs/web` 任务可直接继续，无需重传。
@@ -85,7 +85,7 @@ PYTHONPATH=src python -m unittest discover -v
 ## 可运行代码进展
 
 - `route_eval.py`：统一离线候选评测 CLI（几何评分 + 可选 OSM 边检查），不是自动截图识别器。
-- `test_route_eval.py`：9 项自动化测试。
+- `test/test_route_eval.py`：9 项自动化测试。
 - 使用方式、验证结果与已知限制见 [EVALUATION.md](EVALUATION.md)。
 - `training-demo/` 仍是合成数据训练演示，未用于真实路线置信度。
 
@@ -94,7 +94,7 @@ PYTHONPATH=src python -m unittest discover -v
 需要 Python 3.10+。评测器与测试仅使用标准库：
 
 ```sh
-PYTHONPATH=src python -m unittest discover -s . -p "test_*.py" -v
+PYTHONPATH=src python -m unittest discover -s test -p "test_*.py" -v
 python src/route_eval.py --reference examples/reference.geojson --candidate examples/reference.geojson --candidate examples/shifted.geojson --output outputs/evaluation.json
 ```
 
@@ -124,7 +124,7 @@ python src/extract_route.py --image examples/synthetic-ride.png --color "#00BFA5
 ```
 
 完整参数与真实截图用法见 [EXTRACTION.md](EXTRACTION.md)。安装依赖后全量测试共 15 项。
-仅评测模块仍无第三方依赖，可用 `PYTHONPATH=src python -m unittest test_route_eval -v` 单独测试。
+仅评测模块仍无第三方依赖，可用 `PYTHONPATH=src:test python -m unittest test_route_eval -v` 单独测试。
 
 目录约定：源代码和合成示例纳入 Git；个人输入放 `local-data/`，下载缓存放 `cache/`，生成结果放 `outputs/`，三者均不提交。
 旧 `reconstruction/` 暂作为私有历史实验保留，不直接迁移含硬编码位置的脚本；可复用能力逐步提取至正式模块。
@@ -175,3 +175,5 @@ Agent 已接入 `register` 白名单工具，可用 `start --goal registration` 
 
 新增本地 `road_match.py` 工具并接入 Agent `--goal roads`。从截图提线到人工配准、路网候选和道路叠图的合成流程已跑通；3/3 分段获得候选。详见 [ROAD_MATCHING.md](ROAD_MATCHING.md)。
 全量测试 52 项。仍缺自动定位和真实视觉模型/真实截图独立验收；当前不是全自动成品。
+
+测试发现请显式使用 `-s test`，不要用裸 `unittest discover`，避免未发现测试却显示成功。单跑模块的 `PYTHONPATH=src:test` 是 POSIX 写法；PowerShell 对应 `$env:PYTHONPATH = "src;test"`。

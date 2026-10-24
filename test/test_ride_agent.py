@@ -66,7 +66,7 @@ class AgentTests(unittest.TestCase):
             state=run(state,folder,DemoPlanner())
             self.assertEqual(state['status'],'waiting_for_user')
             self.assertTrue(state['centerlined'])
-            controls=json.loads(Path('examples/synthetic-controls.json').read_text())
+            controls=json.loads((Path(__file__).resolve().parent.parent/'examples/synthetic-controls.json').read_text())
             (folder/'controls.json').write_text(json.dumps(controls))
             state['controls_crop'] = state['extraction_config']['crop']
             state=run(state,folder,DemoPlanner())
@@ -156,7 +156,7 @@ class MapAgentTests(unittest.TestCase):
 
     def test_complete_mock_download_to_candidates(self):
         import xml.etree.ElementTree as ET
-        root = ET.parse('examples/synthetic-roads.osm').getroot()
+        root = ET.parse(Path(__file__).resolve().parent.parent/'examples/synthetic-roads.osm').getroot()
         elements = []
         for n in root.findall('node'):
             elements.append(dict(type='node', id=int(n.get('id')),
@@ -177,7 +177,7 @@ class MapAgentTests(unittest.TestCase):
             state = start(source,folder,True,'roads')
             state['messages'].append({'role':'user','content':json.dumps({'crop':[0,0,640,480],'color':'#00BFA5'})})
             state = run(state,folder,DemoPlanner())
-            (folder/'controls.json').write_text(Path('examples/synthetic-controls.json').read_text())
+            (folder/'controls.json').write_text((Path(__file__).resolve().parent.parent/'examples/synthetic-controls.json').read_text())
             state['controls_crop'] = state['extraction_config']['crop']
             state = run(state,folder,DemoPlanner())
             self.assertTrue(state['registration_gate_passed'])
@@ -211,7 +211,7 @@ class MapAgentTests(unittest.TestCase):
                 self.assertTrue(consent_download)
                 self.assertAlmostEqual(bounds[0],115.998)
                 self.assertAlmostEqual(bounds[3],39.003)
-                path.write_text(Path('examples/synthetic-roads.osm').read_text())
+                path.write_text((Path(__file__).resolve().parent.parent/'examples/synthetic-roads.osm').read_text())
                 return {'bounds':bounds,'node_count':10}
             with patch('ride_agent.fetch_roads',side_effect=fetched) as fetch:
                 result=run(state,folder,DemoPlanner(),budget=1,consent_map=True)
