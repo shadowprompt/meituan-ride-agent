@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 import test_ride_web as fixtures
+from test_route_review import mock_observe, mock_review
 
 
 class APIStartE2ETests(unittest.TestCase):
@@ -28,6 +29,8 @@ class APIStartE2ETests(unittest.TestCase):
                 captured.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
                 index = min(len(captured)-1,len(actions)-1)
                 action = actions[index]
+                if callable(action):
+                    action = action(captured[-1])
                 message = ({'content':None,'tool_calls':[{'id':'mock1','type':'function','function':{
                     'name':action['action'],'arguments':json.dumps({k:v for k,v in action.items() if k!='action'})}}]}
                            if tool_calls else {'content':json.dumps(action)})
@@ -63,10 +66,11 @@ class APIStartE2ETests(unittest.TestCase):
         image = Image.new('RGB',(80,60),'white')
         ImageDraw.Draw(image).line([(10,45),(60,45),(60,10)],fill='#00BFA5',width=5)
         code, data, calls = self.create_image(image,[{'action':'inspect_colors'},
-            {'action':'extract','color':'#00BFA5','crop':[0,0,80,60]}])
+            {'action':'extract','color':'#00BFA5','crop':[0,0,80,60]},
+            mock_observe, mock_review, {'action':'deliver','summary':'离线mock当前证据复核交付'}])
         self.assertEqual(code,201,data)
         self.assertEqual(data['status'],'needs_confirmation',data)
-        self.assertEqual(len(calls),2)
+        self.assertEqual(len(calls),5)
         self.assertTrue(data['artifacts'])
         self.assertNotIn('error_category',data)
         self.assertFalse(data['verified'])
@@ -88,10 +92,11 @@ class APIStartE2ETests(unittest.TestCase):
         with Image.open(os.environ['RIDE_REAL_SCREENSHOT']) as opened:
             image = opened.convert('RGB')
         code,data,calls = self.create_image(image,[{
-            'action':'extract','color':'#6A778B','crop':[235,1200,1010,1420]}])
+            'action':'extract','color':'#6A778B','crop':[235,1200,1010,1420]},
+            mock_observe, mock_review, {'action':'deliver','summary':'原图候选mock复核，不代表真值'}])
         self.assertEqual(code,201,data)
         self.assertEqual(data['status'],'needs_confirmation',data)
-        self.assertEqual(len(calls),1)
+        self.assertEqual(len(calls),4)
         self.assertTrue(any(a['name']=='centerline/pixel-graph.json' and a['current'] for a in data['artifacts']))
 
     @unittest.skipUnless(os.environ.get('RIDE_TURNBACK_SCREENSHOT'),'需本地折返原图')

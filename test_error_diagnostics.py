@@ -15,6 +15,7 @@ import ride_agent as agent
 from ride_errors import TaskFailure
 from ride_web import GUIDANCE, processing_category
 import test_ride_web as fixtures
+from test_route_review import mock_observe, mock_review
 
 
 class DiagnosticTests(unittest.TestCase):
@@ -100,13 +101,23 @@ class DiagnosticTests(unittest.TestCase):
             self.assertNotIn('SECRET', result['error'])
 
     def test_new_api_pixels_success_mock_transport_real_extraction(self):
-        payload = json.dumps({'choices':[{'message':{'content':json.dumps({
-            'action':'extract','crop':[0,0,80,60],'color':'#00BFA5'})}}]}).encode()
+        calls = []
+        actions = [{'action':'extract','crop':[0,0,80,60],'color':'#00BFA5'},
+                   mock_observe, mock_review, {'action':'deliver','summary':'mock当前版本复核候选'}]
+        def respond(request, **kwargs):
+            body = json.loads(request.data)
+            action = actions[len(calls)]
+            calls.append(body)
+            if callable(action):
+                action = action(body)
+            payload = json.dumps({'choices':[{'message':{'content':json.dumps(action)}}]}).encode()
+            return self.response(payload)
         with patch.dict(os.environ, {'RIDE_API_KEY':'SECRET','RIDE_MODEL':'mock'}), \
              patch('ride_agent.urllib.request.build_opener') as opener:
-            opener.return_value.open.return_value = self.response(payload)
+            opener.return_value.open.side_effect = respond
             result = agent.run(self.state, self.folder, agent.ConsentedPlanner())
-        self.assertEqual(opener.return_value.open.call_count, 1)
+        self.assertEqual(opener.return_value.open.call_count, 4)
+        self.assertTrue(agent.route_review.approved(result, self.folder))
         self.assertEqual(result['status'], 'needs_confirmation')
         self.assertTrue(result['extracted'])
         self.assertTrue(result['centerlined'])
@@ -146,9 +157,25 @@ class WebDiagnosticTests(unittest.TestCase):
         def local_cli(argv, **kwargs):
             folder = Path(argv[argv.index('--task-dir')+1])
             state = agent.start(argv[argv.index('--image')+1], folder)
-            planner = unittest.mock.Mock(local_pipeline=True)
-            planner.decide.return_value = {'action':'extract','color':'#00BFA5','crop':[0,0,80,60]}
-            result = agent.run(state, folder, planner)
+            actions = [{'action':'extract','color':'#00BFA5','crop':[0,0,80,60]},
+                       mock_observe, mock_review, {'action':'deliver','summary':'网页mock复核候选'}]
+            calls = []
+            def respond(request, **kwargs):
+                body = json.loads(request.data)
+                action = actions[len(calls)]
+                calls.append(body)
+                if callable(action):
+                    action = action(body)
+                response = unittest.mock.MagicMock()
+                response.__enter__.return_value.read.return_value = json.dumps({
+                    'choices':[{'message':{'content':json.dumps(action)}}]}).encode()
+                return response
+            with patch.dict(os.environ, {'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock'}), \
+                 patch('ride_agent.urllib.request.build_opener') as opener:
+                opener.return_value.open.side_effect = respond
+                result = agent.run(state, folder, agent.ConsentedPlanner())
+            self.assertEqual(len(calls), 4)
+            self.assertTrue(agent.route_review.approved(result, folder))
             self.assertEqual(result['status'],'needs_confirmation')
             return subprocess.CompletedProcess(argv,0,b'',b'')
         with patch('ride_web.subprocess.run',side_effect=local_cli):
