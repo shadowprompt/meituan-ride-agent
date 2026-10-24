@@ -288,6 +288,14 @@ class RideServer(ThreadingHTTPServer):
             raise WebError('截图 base64 无效') from None
         if not image or len(image) > MAX_IMAGE:
             raise WebError('截图须为 1–20 MB 内的 PNG/JPEG/WebP')
+        if mode == 'api':
+            # 仅校验当前网页进程继承的配置，不发请求、不读取 .env、不输出配置值。
+            from ride_agent import APIPlanner
+            from ride_errors import TaskFailure
+            try:
+                APIPlanner()
+            except TaskFailure as exc:
+                raise WebError('模型服务配置未就绪，未创建任务或上传截图', 422, exc.category) from None
         task_id = str(uuid.uuid4())
         folder = safe_path(self.root, task_id)
         folder.mkdir(mode=0o700)
@@ -436,6 +444,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <label><input id="fetch" type="checkbox">下载当前配准范围的地图（不可同时上传 OSM）</label><label><input id="mapConsent" type="checkbox">仅本次同意向 Overpass 发送地理范围（不发送截图）</label>
 <label><input id="localOnly" type="checkbox">仅本地继续（已有颜色/裁剪或有效掩码；不上传、不调用模型，可恢复中心线；地图下载仍单独授权）</label>
 <button id="resume">继续处理</button></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。structure-diagnostics.png 黄框仅表示被保守保护的间隙总范围，不表示已识别折返；同路往返次数和先后须人工确认。</p><div id="artifacts"></div>
+<p><a href="/pixel-route">无需 API：本地人工有序像素路线标注、保存与导出</a></p>
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
 async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
@@ -572,10 +581,26 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/':
                 self.send_content(200, PAGE.replace('__TOKEN__', html.escape(self.server.token, quote=True)).encode('utf-8'), 'text/html; charset=utf-8')
                 return
+            if path == '/pixel-route':
+                from pixel_route_ui import PAGE as MANUAL_PAGE
+                self.send_content(200, MANUAL_PAGE.replace('__TOKEN__', html.escape(self.server.token, quote=True)).encode('utf-8'), 'text/html; charset=utf-8')
+                return
             if path == '/api/config':
                 self.send_json(200, {'csrf_token': self.server.token})
                 return
             with self.server.change_lock:
+                manual = re.fullmatch(r'/api/pixel-routes/([^/]+)(?:/(image|export))?', path)
+                if manual:
+                    import pixel_route
+                    task_id, kind = manual.groups()
+                    if kind == 'image':
+                        self.send_content(200, pixel_route.image_bytes(self.server, task_id), 'image/png')
+                    else:
+                        route = pixel_route.load(self.server, task_id)
+                        if kind == 'export' and len(route['points']) < 2:
+                            raise WebError('至少保存两个有序点后才能导出', 409)
+                        self.send_json(200, route if kind == 'export' else pixel_route.response(task_id, route))
+                    return
                 match = re.fullmatch(r'/api/tasks/([^/]+)', path)
                 if match:
                     self.send_json(200, self.server.status(match[1]))
@@ -625,6 +650,15 @@ class Handler(BaseHTTPRequestHandler):
                 raise WebError('JSON 无效') from None
             # 所有任务变更及读取序列化，避免 CLI 与覆盖输入竞争。
             with self.server.change_lock:
+                if path == '/api/pixel-routes':
+                    import pixel_route
+                    self.send_json(201, pixel_route.create(self.server, data))
+                    return
+                manual = re.fullmatch(r'/api/pixel-routes/([^/]+)', path)
+                if manual:
+                    import pixel_route
+                    self.send_json(200, pixel_route.save(self.server, manual[1], data))
+                    return
                 if path == '/api/tasks':
                     result = self.server.create(data)
                     self.send_json(201, result)

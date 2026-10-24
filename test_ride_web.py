@@ -16,6 +16,9 @@ from ride_web import ARTIFACTS, MAX_BODY, MAX_IMAGE, RideServer, WebError
 
 class WebTests(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict('os.environ', {'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-vision'})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)/'web'
         self.server = RideServer(0, output_root=self.root, cli_timeout=20)

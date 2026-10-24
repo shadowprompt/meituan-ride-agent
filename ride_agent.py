@@ -138,7 +138,7 @@ class APIPlanner:
         self.key = os.environ.get('RIDE_API_KEY')
         self.model = os.environ.get('RIDE_MODEL')
         if not self.key or not self.model:
-            raise TaskFailure('api_configuration')
+            raise TaskFailure('api_configuration_missing')
 
     def decide(self, state, folder):
         source = Path(folder)/'input.png'

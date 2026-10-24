@@ -4,6 +4,7 @@ import urllib.error
 
 GUIDANCE = {
     'image_input_invalid': '截图解码或格式/大小校验未通过。仅支持实际编码为 PNG/JPEG/WebP、20 MB 内且不超过400万像素的图片；后缀不是格式证据。请在本机转换或缩小后新建，不会自动放宽校验。',
+    'api_configuration_missing': '网页服务进程至少缺少 RIDE_API_KEY 或 RIDE_MODEL 中一项（或值为空），尚未调用模型。请在启动网页的同一终端正确设置并导出配置后重启网页；不会自动读取 .env，不要发送密钥。',
     'api_configuration': '模型服务配置未通过本地校验。请管理员核对 RIDE_API_BASE、RIDE_API_KEY、RIDE_MODEL；不要发送密钥或完整环境文件。',
     'api_http': '模型服务返回 HTTP 错误。请核对权限、模型、额度与服务状态后重新授权；不是颜色或裁剪错误，远端响应正文不公开。',
     'api_response_invalid': '模型服务响应不是要求的 JSON 动作结构。请检查模型是否支持视觉和结构化指令后重新授权；不会自动修复或执行响应代码。',

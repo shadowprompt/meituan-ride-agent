@@ -50,3 +50,13 @@ git diff --check
 结论仅限：在确定的本机配置与 mock 模型动作下，两个历史版本和当前版本均能走通真实 API 新建链路；已经复现并修正统一误报，但尚未复现用户环境的“全部旧图失败”底层原因。需继续等待其脱敏错误，不能归咎用户参数。
 
 追加最终验收：双截图全量 **214 项通过、无跳过**，105.598 秒；日志 `local-data/error-api-e2e-all-tests.log` 不提交。新增测试编译和 `git diff --check` 通过。
+
+## 用户确切错误已确认：服务进程配置缺失
+
+用户提供旧任务 `error: Set RIDE_API_KEY and RIDE_MODEL; use a vision-capable model`、`error_category: task_processing_failed`。这条异常仅在 `APIPlanner.__init__` 的 `if not self.key or not self.model` 触发，因此能确定：**当时 CLI 进程看到的两项环境变量中至少一项缺少或为空**，不能推断两项都缺少。ConsentedPlanner 在首次需要视觉模型时才构造 APIPlanner，读取继承自网页进程的 `os.environ`；模型调用尚未发生，不是图片颜色或裁剪导致。
+
+新增 `api_configuration_missing` 固定分类，并在 API 网页创建任务前进行同样的本地配置预检：不发网络请求、不保存截图/创建任务、不输出配置值。保留延迟客户端以免影响仅本地恢复。没有引入 dotenv、自动 source `.env` 或改变环境加载策略。测试逐一覆盖缺 key、缺 model、两项缺失、空字符串；另用真实 CLI 子进程覆盖三种缺字段路径。已有测试统一使用明确 mock 配置，不借用生产密钥。
+
+已有旧 task.json 不按异常原文迁移或猜测；新的 API 创建会明确提示配置缺失。父代理将提供安全只读检查及在设置/导出变量的同一终端重启网页说明，无需用户发送密钥。
+
+配置预检最终验收：双截图环境 **216 项通过、无跳过**（108.978 秒），聚焦诊断 **12 项通过**；编译、`git diff --check` 通过。日志 `local-data/config-preflight-tests-final.log` 不提交。

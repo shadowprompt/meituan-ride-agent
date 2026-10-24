@@ -37,9 +37,25 @@ class DiagnosticTests(unittest.TestCase):
     def test_missing_config_not_extraction_required_or_secret(self):
         with patch.dict(os.environ, {}, clear=True):
             result = agent.run(self.state, self.folder, agent.ConsentedPlanner())
-        self.assertEqual(processing_category(result), 'api_configuration')
+        self.assertEqual(processing_category(result), 'api_configuration_missing')
         self.assertFalse(result['extracted'])
-        self.assertNotIn('颜色', GUIDANCE['api_configuration'])
+        self.assertNotIn('颜色', GUIDANCE['api_configuration_missing'])
+
+    def test_each_missing_field_cli_path(self):
+        import sys
+        for i, env in enumerate(({}, {'RIDE_API_KEY':'mock-only'}, {'RIDE_MODEL':'mock-vision'})):
+            child_env = {k:v for k,v in os.environ.items() if k not in ('RIDE_API_KEY','RIDE_MODEL','RIDE_API_BASE')}
+            child_env.update(env)
+            folder = self.root/('cli-'+str(i))
+            result = subprocess.run([sys.executable,'ride_agent.py','start','--image',str(self.source),
+                '--task-dir',str(folder),'--consent-upload'],capture_output=True,env=child_env,timeout=20)
+            self.assertEqual(result.returncode,0,result.stderr)
+            state = agent.load(folder)
+            self.assertEqual(state['status'],'error')
+            self.assertEqual(state['error_category'],'api_configuration_missing')
+            self.assertEqual(state['error_stage'],'planner')
+            self.assertFalse(state['extracted'])
+            self.assertNotIn('mock-only',result.stdout.decode())
 
     def test_unknown_and_network_causes_do_not_guess_color(self):
         for error, category in [(ValueError('SECRET /private'), 'task_processing_failed'),
@@ -153,6 +169,21 @@ class WebDiagnosticTests(unittest.TestCase):
             self.assertEqual(code,200)
             self.assertEqual(json.loads(body).get('error_stage'),expected)
             self.assertNotIn(b'SECRET',body)
+
+    def test_missing_config_web_preflight_each_missing_field(self):
+        for env in ({}, {'RIDE_API_KEY':'mock-only'}, {'RIDE_MODEL':'mock-vision'},
+                    {'RIDE_API_KEY':'','RIDE_MODEL':'mock-vision'},
+                    {'RIDE_API_KEY':'mock-only','RIDE_MODEL':''}):
+            with self.subTest(fields=list(env)), patch.dict(os.environ,env,clear=True), \
+                 patch('ride_web.subprocess.run') as cli:
+                before = list(self.root.iterdir())
+                code, _, body = self.request('/api/tasks', {'mode':'api','consent_upload':True,
+                                                           'image_base64':'eA=='})
+                self.assertEqual(code,422,body)
+                self.assertEqual(json.loads(body)['error_category'],'api_configuration_missing')
+                self.assertNotIn(b'mock-only',body)
+                self.assertEqual(list(self.root.iterdir()),before)
+                cli.assert_not_called()
 
     def test_cli_fixed_code_and_unknown_stderr(self):
         task = self.state()
