@@ -29,6 +29,7 @@ MAX_BODY = 44_000_000  # 30 MB OSM XML plus JSON overhead
 ARTIFACTS = frozenset((
     'inspection/colors.json', 'inspection/color-preview.png',
     'extraction/mask.png', 'extraction/overlay.png', 'extraction/extraction.json',
+    'extraction/candidates-mask.png', 'extraction/components-overlay.png',
     'centerline/skeleton.png', 'centerline/graph-overlay.png', 'centerline/pixel-graph.json',
     'registration/registration.json', 'registration/registered-segments.geojson',
     'roads/road-match.json', 'roads/road-candidates.geojson', 'roads/road-overlay.png',
@@ -196,7 +197,7 @@ class RideServer(ThreadingHTTPServer):
             state = load(folder/'task')
         except (ValueError, OSError, TypeError, KeyError):
             raise WebError('任务状态尚未生成或无法读取', 409) from None
-        fields = ('mode', 'goal', 'status', 'question', 'summary', 'warnings',
+        fields = ('component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
                   'registration_notice', 'road_notice', 'verified', 'original_gps')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
@@ -261,7 +262,7 @@ class RideServer(ThreadingHTTPServer):
         return self.status(task_id)
 
     def resume(self, task_id, data):
-        allowed = {'answer', 'color', 'crop', 'controls_json', 'osm_xml',
+        allowed = {'component_ids', 'answer', 'color', 'crop', 'controls_json', 'osm_xml',
                    'fetch_map', 'consent_map', 'consent_upload', 'local_only'}
         if data.keys() - allowed:
             raise WebError('未知继续参数（不接受文件路径）')
@@ -300,6 +301,14 @@ class RideServer(ThreadingHTTPServer):
                     or crop[2] <= crop[0] or crop[3] <= crop[1]):
                 raise WebError('裁剪须为 [左,上,右,下] 整数且宽高大于零')
             args += ['--crop', *map(str, crop)]
+        if 'component_ids' in data:
+            ids = data['component_ids']
+            if (not isinstance(ids, list) or not 1 <= len(ids) <= 1000
+                    or any(type(n) is not int or n < 1 for n in ids) or len(set(ids)) != len(ids)):
+                raise WebError('请选择不重复的候选编号（可多个）')
+            if 'color' in data or 'crop' in data:
+                raise WebError('请先修改颜色/裁剪并查看新候选，再选择编号')
+            args += ['--component-ids', *map(str, ids)]
         if 'controls_json' in data:
             controls = text(data['controls_json'], '控制点 JSON', 1_000_000)
             try:
@@ -317,7 +326,7 @@ class RideServer(ThreadingHTTPServer):
                 raise WebError('OSM XML 为空或含禁止的 DTD/实体')
             pending['osm-upload.xml'] = osm.encode('utf-8')
             args += ['--osm-file', str(folder/'inputs'/'osm-upload.xml')]
-        if not any(k in data for k in ('answer', 'color', 'crop', 'controls_json', 'osm_xml')) and not fetch_map and not local_only:
+        if not any(k in data for k in ('component_ids', 'answer', 'color', 'crop', 'controls_json', 'osm_xml')) and not fetch_map and not local_only:
             raise WebError('请提供回答、修正或证据文件')
         if upload:
             args.append('--consent-upload')
@@ -342,6 +351,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <button id="create">创建并开始</button></fieldset>
 <fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre></fieldset>
 <fieldset><legend>3. 回答 / 修正 / 上传证据</legend><label>回答（Demo 首次可填 {"crop":[0,0,80,60],"color":"#00BFA5"}）<textarea id="answer"></textarea></label>
+<fieldset><legend>候选路线片段（有歧义时才需选择，可多选）</legend><p>绿色为保留，橙色为排除，框上编号对应下列选项。自动几何筛选可覆盖；不会盲选最大分量。请选择目标片段后点“继续处理”。</p><div id="components"></div></fieldset>
 <label>修正颜色 <input id="color" type="text" placeholder="#00BFA5，空白不修改"></label>
 <label>修正裁剪 <input id="crop" type="text" placeholder="[左,上,右,下]，空白不修改"></label>
 <p>裁剪变更会使旧控制点失效。控制点必须使用当前裁剪坐标，网页不会自动地理定位。</p>
@@ -353,13 +363,13 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
 async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
-function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
+function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');$('components').replaceChildren();for(const c of d.component_selection?.candidates||[]){const label=document.createElement('label'),box=document.createElement('input');box.type='checkbox';box.value=c.id;box.checked=c.selected;box.name='component';label.append(box,document.createTextNode(' #'+c.id+' / '+c.pixels+' 像素 / 框 '+JSON.stringify(c.bbox_crop_xyxy)+' / '+c.decision));$('components').append(label);}const choose=document.createElement('input');choose.type='checkbox';choose.id='chooseComponents';const choice=document.createElement('label');choice.append(choose,document.createTextNode('本次使用上面勾选的编号（可多选；不修改颜色/裁剪）'));$('components').append(choice);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
 async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('uploadConsent').checked=false;$('mapConsent').checked=false;}}
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
 $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked}));});
 $('refresh').onclick=()=>action(async()=>render(await request(taskPath())));
-$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined)d.controls_json=controls;if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
+$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('chooseComponents')?.checked)d.component_ids=Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined)d.controls_json=controls;if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
 </script></html>'''
 
 

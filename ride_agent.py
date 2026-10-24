@@ -32,7 +32,7 @@ Return ONE JSON object only, one of:
 {"action":"match"}
 {"action":"deliver","summary":"Chinese factual summary of observed tool outputs and remaining limitations"}
 中文提取约束：采样实心线内部的代表色，不要采样抗锯齿边缘、阴影或白色描边；灰色/蓝灰路线也应覆盖实心线内部，而非只留下边缘。裁剪应尽量包含目标线的全部可见范围及起终点标记；很窄的局部裁剪可能丢失路线。crop_diagnostics 的面积/宽高占比仅是确定性几何警告，不是路线完整性检测，也不代表识别了真实起终点。不得把骨架端点当作骑行起终点。用户明确指定的裁剪应保留，可报告局部候选及遗漏风险，不要自动拒绝或擅自扩大。局部裁剪不能直接声称完整路线；交付时说明裁剪范围、警告以及完整性/起终点未验证。即使全图提取也不能据此证明完整路线。
-Use image dimensions and visible evidence. Before choosing extraction color you may call inspect_colors with an optional screenshot crop (omit crop for full image). It returns heuristic color candidates (which may omit gray or low-saturation routes), NOT semantic route detection or confidence. Gray and low-saturation lines are valid extraction targets: use their observed #RRGGBB color with extract, not an unrelated saturated candidate. A no_signal inspection does not prove there is no route; inspect the screenshot and ask for the intended line if ambiguous. Compare the candidate preview against the screenshot; UI icons, parks and text can dominate. Ask when ambiguous; never automatically treat the highest rank as the route. Crop coordinates refer to supplied EXIF-oriented image. If uncertain ask rather than guess. You may extract with full crop if suitable. Deliver only after successful extract and centerline. No shell, URLs, file paths, invented coordinates, GPS, or claims of automatic geolocation. If trusted user-supplied controls are available you may register after centerline. Tool register accepts no model-generated control points. If goal=roads, after registration ask user for local OSM using resume --osm-file, or explicit resume --fetch-map --consent-map to download a bounded map derived from registered segments, then call match. fetch_map accepts no parameters or coordinates and requires fresh map consent. Never request map download unless map_download_requested=true. Delivery requires match attempt, not necessarily success. If goal=registration, ask for a controls JSON file through resume --controls-file, and deliver only after registration. Only for goal=registration or goal=roads, if controls are absent, ask; never invent them. For goal=pixels, extract and centerline are sufficient: do not require controls, registration, OSM, or road matching. A rejected premature deliver returns LOCAL_TOOL_RESULT with missing stages; follow its next_step or ask for required user input, then retry delivery only after the missing evidence exists. Never claim a rejected delivery succeeded. Preserve user corrections. Inspect current tool preview images alongside numeric results; old reports in history may be invalidated by corrections. Preview images are resized and crop-local, not original screenshot coordinates. If no_match or partial coverage, explicitly explain missing_segment_indices and ask for the necessary correction rather than claim completion. Color masks and centerline are not verified routes. Never infer actual traversal order at overlap. Tools execute at fixed local paths. Your goal is a pixel-analysis candidate with artifacts and honest uncertainty, not final GPS reconstruction.'''
+Use image dimensions and visible evidence. Before choosing extraction color you may call inspect_colors with an optional screenshot crop (omit crop for full image). It returns heuristic color candidates (which may omit gray or low-saturation routes), NOT semantic route detection or confidence. Gray and low-saturation lines are valid extraction targets: use their observed #RRGGBB color with extract, not an unrelated saturated candidate. A no_signal inspection does not prove there is no route; inspect the screenshot and ask for the intended line if ambiguous. Compare the candidate preview against the screenshot; UI icons, parks and text can dominate. Ask when ambiguous; never automatically treat the highest rank as the route. Crop coordinates refer to supplied EXIF-oriented image. If uncertain ask rather than guess. You may extract with full crop if suitable. Deliver only after successful extract and centerline. No shell, URLs, file paths, invented coordinates, GPS, or claims of automatic geolocation. If trusted user-supplied controls are available you may register after centerline. Tool register accepts no model-generated control points. If goal=roads, after registration ask user for local OSM using resume --osm-file, or explicit resume --fetch-map --consent-map to download a bounded map derived from registered segments, then call match. fetch_map accepts no parameters or coordinates and requires fresh map consent. Never request map download unless map_download_requested=true. Delivery requires match attempt, not necessarily success. If goal=registration, ask for a controls JSON file through resume --controls-file, and deliver only after registration. Only for goal=registration or goal=roads, if controls are absent, ask; never invent them. For goal=pixels, extract and centerline are sufficient: do not require controls, registration, OSM, or road matching. A rejected premature deliver returns LOCAL_TOOL_RESULT with missing stages; follow its next_step or ask for required user input, then retry delivery only after the missing evidence exists. Never claim a rejected delivery succeeded. Preserve user corrections. Inspect current tool preview images alongside numeric results; old reports in history may be invalidated by corrections. Preview images are resized and crop-local, not original screenshot coordinates. If no_match or partial coverage, explicitly explain missing_segment_indices and ask for the necessary correction rather than claim completion. When component selection is ambiguous the local runner pauses before centerline and asks for structured user component IDs; never invent that user choice. Color masks and centerline are not verified routes. Never infer actual traversal order at overlap. Tools execute at fixed local paths. Your goal is a pixel-analysis candidate with artifacts and honest uncertainty, not final GPS reconstruction.'''
 
 
 
@@ -253,6 +253,7 @@ def invalidate_extraction(state, invalidate_controls=False):
     """只撤销当前证据标记，旧产物留在磁盘供审计，不再当作有效结果。"""
     state.update(extracted=False, centerlined=False, registered=False,
                  registration_gate_passed=False, match_attempted=False)
+    state.pop('component_selection', None)
     for key in ('extraction_diagnostics','road_diagnostics','road_match_status','artifacts','summary'):
         state.pop(key,None)
     if invalidate_controls:
@@ -265,6 +266,8 @@ def apply_extraction_correction(state, color=None, crop=None):
     if color is None and crop is None:
         raise ValueError('Provide color or crop correction')
     config = dict(state.get('extraction_config',{}))
+    # 颜色或裁剪变化后旧分量编号不再可信。
+    config.pop('component_ids', None)
     if color is not None:
         parse_color(color)
         config['color'] = color.upper()
@@ -280,6 +283,25 @@ def apply_extraction_correction(state, color=None, crop=None):
     if crop_changed:
         state['colors_inspected'] = False
         state.pop('color_inspection',None)
+    state['extraction_config'] = config
+    state['user_extraction_constraints'] = dict(config)
+
+
+def apply_component_selection(state, folder, ids):
+    """编号只接受用户结构化输入，模型不能覆盖；重跑时沿用相同颜色与裁剪。"""
+    import numpy as np
+    from route_components import select_components
+    report_path = Path(folder)/'extraction/extraction.json'
+    report = json.loads(report_path.read_text(encoding='utf-8'))
+    config = state.get('extraction_config', {})
+    if not state.get('extracted'):
+        raise ValueError('候选已失效，请先完成当前参数提取')
+    if report['crop_xyxy'] != config.get('crop') or report['parameters']['color'] != config.get('color'):
+        raise ValueError('候选已失效，请先重提取再选择分量')
+    with Image.open(Path(folder)/'extraction/candidates-mask.png') as im:
+        select_components(np.array(im) > 0, ids)
+    invalidate_extraction(state)
+    config = dict(config, component_ids=ids)
     state['extraction_config'] = config
     state['user_extraction_constraints'] = dict(config)
 
@@ -320,7 +342,9 @@ def run(state, folder, planner, budget=6, consent_map=False):
         try:
             # 已知完整的用户修正直接走确定性提线，避免再让模型猜颜色或裁剪框。
             config = state.get('user_extraction_constraints',{})
-            if not state.get('extracted') and all(k in config for k in ('color','crop')):
+            if state.get('component_selection', {}).get('requires_selection'):
+                action = {'action':'ask', 'question':'存在多个歧义颜色分量，已保留全部候选但暂停中心线。请查看 components-overlay.png 编号，在网页勾选路线片段（可多个），或 resume --component-ids 编号；不要仅提高面积阈值。'}
+            elif not state.get('extracted') and all(k in config for k in ('color','crop')):
                 action = {'action':'extract', **config}
             elif getattr(planner, 'local_pipeline', False) and state.get('extracted') and not state.get('centerlined'):
                 action = {'action':'centerline'}
@@ -360,8 +384,12 @@ def run(state, folder, planner, budget=6, consent_map=False):
                 changed = has_old_frame and old_crop != action.get('crop')
                 invalidate_extraction(state,invalidate_controls=changed)
                 save(state,folder)
-                result = extract(Path(folder)/'input.png',Path(folder)/'extraction',action['color'],action['crop'])
+                result = extract(Path(folder)/'input.png',Path(folder)/'extraction',action['color'],action['crop'],
+                                 component_ids=constraints.get('component_ids'))
                 state['extraction_config'] = {'color':action['color'],'crop':result['crop_xyxy']}
+                if 'component_ids' in constraints:
+                    state['extraction_config']['component_ids'] = constraints['component_ids']
+                state['component_selection'] = result['component_selection']
                 state['extracted'] = result['status'] != 'no_detection'
                 state['centerlined'] = False
                 state['registered'] = False
@@ -377,8 +405,8 @@ def run(state, folder, planner, budget=6, consent_map=False):
                 tool_result = {'tool':'extract','status':result['status'],'selected_pixels':result['selected_pixels'],
                                'component_count':len(result['components']), **state['extraction_diagnostics']}
             elif name == 'centerline':
-                if not state.get('extracted'):
-                    raise ValueError('Successful extract required first')
+                if not state.get('extracted') or state.get('component_selection', {}).get('requires_selection'):
+                    raise ValueError('Successful unambiguous extract or explicit component selection required first')
                 state.update(centerlined=False,registered=False,match_attempted=False)
                 save(state,folder)
                 result = process(Path(folder)/'extraction/mask.png',Path(folder)/'centerline')
@@ -450,7 +478,8 @@ def run(state, folder, planner, budget=6, consent_map=False):
                     summary += '\n裁剪范围限制：仅生成局部裁剪内的候选，可能遗漏路线或起终点；未验证完整路线或真实起终点。'
                 state.update(status='needs_confirmation', summary=summary,
                              artifacts=['extraction/mask.png','extraction/overlay.png','extraction/extraction.json',
-                                        'centerline/skeleton.png','centerline/graph-overlay.png','centerline/pixel-graph.json'])
+                                        'centerline/skeleton.png','centerline/graph-overlay.png','centerline/pixel-graph.json',
+                                        'extraction/candidates-mask.png','extraction/components-overlay.png'])
                 if state.get('colors_inspected'):
                     state['artifacts'].extend(['inspection/colors.json','inspection/color-preview.png'])
                 if state.get('registered'):
@@ -524,6 +553,7 @@ def main():
     resume.add_argument('--consent-map', action='store_true', help='Allow this invocation to send route bounds to Overpass (not screenshot)')
     resume.add_argument('--osm-file',help='Local OSM XML only; model cannot choose filesystem paths')
     resume.add_argument('--controls-file',help='User supplied WGS84 landmark JSON; never produced by model')
+    resume.add_argument('--component-ids', nargs='+', type=int, help='用户选择当前候选分量编号（可多个）；仅几何候选，非路线验证')
     resume.add_argument('--color',help='用户修正轨迹颜色，如 #00BFA5；保留已知裁剪框')
     resume.add_argument('--crop',nargs=4,type=int,metavar=('LEFT','TOP','RIGHT','BOTTOM'),help='用户修正原截图裁剪框；旧控制点失效')
     resume.add_argument('--reset-extraction',action='store_true',help='Invalidate pixels for image/crop/color corrections')
@@ -551,13 +581,17 @@ def main():
                     raise ValueError('Choose fetch-map or osm-file, not both')
                 if args.fetch_map and not args.consent_map:
                     raise ValueError('--fetch-map requires explicit --consent-map each invocation')
-                if not args.answer and not args.answer_file and not args.controls_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None and not local_only:
+                if not args.answer and not args.answer_file and not args.controls_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only:
                     raise ValueError('Provide answer, answer-file, controls-file or osm-file')
                 answer = args.answer or 'User supplied local evidence file.'
                 if args.color is not None or args.crop is not None:
                     if args.reset_extraction:
                         raise ValueError('Choose structured color/crop correction or reset-extraction')
                     apply_extraction_correction(state,args.color,args.crop)
+                if args.component_ids is not None:
+                    if args.color is not None or args.crop is not None:
+                        raise ValueError('颜色/裁剪改变后须先查看新候选，不能同时提交旧编号')
+                    apply_component_selection(state,args.task_dir,args.component_ids)
                 if args.fetch_map:
                     if (Path(args.task_dir)/'map.osm').exists():
                         raise ValueError('Task already has map data; use a fresh task to change download bounds')

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
+from route_components import select_components
 from mask_cleanup import fill_supported_interiors, complete_open_interiors
 
 MAX_PIXELS = 12_000_000
@@ -97,12 +98,13 @@ def segment(image, color, hue_tolerance=20, min_saturation=0.35, min_value=0.2, 
 
 def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
             min_saturation=0.35, min_value=0.2, min_component=20,
-            gray_value_tolerance=0.12, gray_max_saturation=0.32, gray_min_span=16):
+            gray_value_tolerance=0.12, gray_max_saturation=0.32, gray_min_span=16,
+            component_ids=None):
     source = Path(image_path)
     if source.stat().st_size > 50_000_000:
         raise ValueError('Image exceeds 50 MB limit')
     out = Path(output_dir)
-    reserved = [out/n for n in ('mask.png', 'overlay.png', 'extraction.json')]
+    reserved = [out/n for n in ('mask.png', 'overlay.png', 'extraction.json', 'candidates-mask.png', 'components-overlay.png')]
     if source.resolve() in [p.resolve() for p in reserved]:
         raise ValueError('Output must not overwrite input image')
     with Image.open(source) as opened:
@@ -121,11 +123,29 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
     region = image.crop(tuple(crop))
     mask, stats = segment(region, parse_color(color), hue_tolerance, min_saturation, min_value, min_component,
                           gray_value_tolerance, gray_max_saturation, gray_min_span)
+    # 颜色匹配结果完整保存；目标分量选择与颜色/最小面积筛选分离。
+    candidates_mask = mask.copy()
+    mask, selection = select_components(mask, component_ids)
+    stats['color_candidate_pixels'] = stats['selected_pixels']
+    stats['selected_pixels'] = int(mask.sum())
+    stats['component_selection'] = selection
+    stats['components'] = [c for c in selection['candidates'] if c['selected']]
+    audit = np.array(region)
+    audit[candidates_mask & ~mask] = (255, 160, 0)
+    audit[mask] = (0, 190, 100)
+    from PIL import ImageDraw
+    audit_image = Image.fromarray(audit)
+    draw = ImageDraw.Draw(audit_image)
+    for c in selection['candidates']:
+        x0, y0, x1, y1 = c['bbox_crop_xyxy']
+        draw.rectangle((x0, y0, x1-1, y1-1), outline=(255, 0, 80))
+        draw.text((x0, max(0, y0-12)), str(c['id']), fill=(0, 0, 0))
     overlay = np.array(region)
     overlay[mask] = (overlay[mask]*0.35 + np.array([255, 0, 80])*0.65).astype(np.uint8)
     warnings = ['Color segmentation only: same-colored icons/text may be included; occluded lines may be missed.',
                 'No centerline, traversal order, geolocation or GPS reconstruction.',
                 'Crop coordinates refer to EXIF-oriented image; bbox right/bottom are exclusive.']
+    warnings.append(selection['reason'])
     if stats['segmentation_mode'] == 'neutral_brightness':
         warnings.append('Neutral brightness candidate only: same-gray text/roads may remain; short fragments are filtered. No gaps are bridged. Inspect overlay and use a map-only crop.')
     if stats['mask_cleanup']['added_pixels']:
@@ -148,6 +168,8 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
                              'gray_min_span': gray_min_span},
               **stats, 'warnings': warnings}
     out.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(candidates_mask.astype(np.uint8)*255).save(out/'candidates-mask.png')
+    audit_image.save(out/'components-overlay.png')
     Image.fromarray(mask.astype(np.uint8)*255).save(out/'mask.png')
     Image.fromarray(overlay).save(out/'overlay.png')
     (out/'extraction.json').write_text(json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)+'\n', encoding='utf-8')
@@ -166,12 +188,13 @@ def main():
     parser.add_argument('--gray-value-tolerance', type=float, default=0.12)
     parser.add_argument('--gray-max-saturation', type=float, default=0.32)
     parser.add_argument('--gray-min-span', type=int, default=16)
+    parser.add_argument('--component-ids', nargs='+', type=int, help='显式选择当前分量编号，可多个；省略则保守自动筛选')
     parser.add_argument('--output-dir', required=True)
     args = parser.parse_args()
     try:
         report = extract(args.image, args.output_dir, args.color, args.crop, args.hue_tolerance,
                          args.min_saturation, args.min_value, args.min_component,
-                         args.gray_value_tolerance, args.gray_max_saturation, args.gray_min_span)
+                         args.gray_value_tolerance, args.gray_max_saturation, args.gray_min_span, args.component_ids)
     except (ValueError, OSError, Image.DecompressionBombError) as exc:
         parser.error(str(exc))
     print(json.dumps({'status': report['status'], 'selected_pixels': report['selected_pixels'],
