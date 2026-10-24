@@ -683,6 +683,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # 脚本入口也复用同一模块对象，避免扩展导入第二份 WebError 导致异常逃逸。
+    sys.modules.setdefault('ride_web', sys.modules[__name__])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8765)
     args = parser.parse_args()
