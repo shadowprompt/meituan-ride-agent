@@ -30,6 +30,7 @@ ARTIFACTS = frozenset((
     'inspection/colors.json', 'inspection/color-preview.png',
     'extraction/mask.png', 'extraction/overlay.png', 'extraction/extraction.json',
     'extraction/candidates-mask.png', 'extraction/components-overlay.png',
+    'extraction/source-crop.png', 'extraction/component-ids.png',
     'centerline/skeleton.png', 'centerline/graph-overlay.png', 'centerline/pixel-graph.json',
     'registration/registration.json', 'registration/registered-segments.geojson',
     'roads/road-match.json', 'roads/road-candidates.geojson', 'roads/road-overlay.png',
@@ -351,7 +352,14 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <button id="create">创建并开始</button></fieldset>
 <fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre></fieldset>
 <fieldset><legend>3. 回答 / 修正 / 上传证据</legend><label>回答（Demo 首次可填 {"crop":[0,0,80,60],"color":"#00BFA5"}）<textarea id="answer"></textarea></label>
-<fieldset><legend>候选路线片段（有歧义时才需选择，可多选）</legend><p>绿色为保留，橙色为排除，框上编号对应下列选项。自动几何筛选可覆盖；不会盲选最大分量。请选择目标片段后点“继续处理”。</p><div id="components"></div></fieldset>
+<fieldset><legend>候选像素区域 · 可视多选</legend>
+<p>原图裁剪与精确候选像素，不是只有包围框。点击像素或“查看”高亮该候选、淡化其余，并查看局部放大。绿色保留，橙色排除；勾选立即本地预览，不请求模型、不计算中心线。选择不是路线真实性确认，不连接断点、不确定路径顺序或 GPS。</p>
+<p id="componentNotice" role="status" aria-live="polite"></p>
+<canvas id="componentCanvas" aria-label="原图裁剪与候选像素总览；也可用下方查看按钮键盘操作" style="max-width:100%;height:auto"></canvas>
+<button id="clearFocus" type="button">查看全部候选</button>
+<h4 id="zoomTitle">局部放大（先查看某个候选）</h4><div style="overflow:auto;max-height:480px"><canvas id="componentZoom" aria-labelledby="zoomTitle" style="image-rendering:pixelated"></canvas></div>
+<div id="components"></div><button id="applyComponents" type="button" disabled>应用选择并重新生成</button>
+<p>仅本地提交选中编号并重新生成，不上传、不下载地图；不会提交回答或颜色/裁剪修改。未选区域仍保留审计，空选不可提交。</p></fieldset>
 <label>修正颜色 <input id="color" type="text" placeholder="#00BFA5，空白不修改"></label>
 <label>修正裁剪 <input id="crop" type="text" placeholder="[左,上,右,下]，空白不修改"></label>
 <p>裁剪变更会使旧控制点失效。控制点必须使用当前裁剪坐标，网页不会自动地理定位。</p>
@@ -363,13 +371,62 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
 async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
-function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');$('components').replaceChildren();for(const c of d.component_selection?.candidates||[]){const label=document.createElement('label'),box=document.createElement('input');box.type='checkbox';box.value=c.id;box.checked=c.selected;box.name='component';label.append(box,document.createTextNode(' #'+c.id+' / '+c.pixels+' 像素 / 框 '+JSON.stringify(c.bbox_crop_xyxy)+' / '+c.decision));$('components').append(label);}const choose=document.createElement('input');choose.type='checkbox';choose.id='chooseComponents';const choice=document.createElement('label');choice.append(choose,document.createTextNode('本次使用上面勾选的编号（可多选；不修改颜色/裁剪）'));$('components').append(choice);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
-async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('uploadConsent').checked=false;$('mapConsent').checked=false;}}
+function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderComponents(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
+// 所有预览只读本地白名单产物；编号逐像素解码，不把重叠包围框当成候选。
+let componentView=null, componentEpoch=0;
+function selectedComponentIds(){return Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));}
+function paintComponentPixels(source, labels, selected, focus){
+ const out=new Uint8ClampedArray(source);const keep=new Set(selected);
+ for(let i=0;i<labels.length;i++){
+  const id=labels[i],p=i*4;
+  if(focus&&id!==focus){for(let k=0;k<3;k++)out[p+k]=Math.round(source[p+k]*.2+255*.8);}
+  else if(id){const color=keep.has(id)?[0,190,100]:[255,130,0];for(let k=0;k<3;k++)out[p+k]=Math.round(source[p+k]*.25+color[k]*.75);}
+ }
+ return out;
+}
+function paintComponents(){
+ const v=componentView;if(!v)return;
+ const selected=selectedComponentIds(),canvas=$('componentCanvas');
+ canvas.getContext('2d').putImageData(new ImageData(paintComponentPixels(v.source,v.labels,selected,v.focus),v.w,v.h),0,0);
+ $('componentNotice').textContent='本地待应用预览：保留 '+(selected.join('、')||'无')+'；未选像素以橙色标出。尚未重新生成中心线。'+(v.focus?' 当前高亮 #'+v.focus+'，其余淡化。':'');
+ $('applyComponents').disabled=!selected.length;
+ if(!v.focus){$('componentZoom').width=0;$('zoomTitle').textContent='局部放大（先查看某个候选）';}
+ if(v.focus){
+  const c=v.candidates.find(c=>c.id===v.focus),b=c.bbox_crop_xyxy;
+  const x=Math.max(0,b[0]-12),y=Math.max(0,b[1]-12),w=Math.min(v.w,b[2]+12)-x,h=Math.min(v.h,b[3]+12)-y;
+  const zoom=$('componentZoom'),scale=Math.max(1,Math.min(6,Math.floor(900/w)));zoom.width=w*scale;zoom.height=h*scale;
+  const ctx=zoom.getContext('2d');ctx.imageSmoothingEnabled=false;ctx.drawImage(canvas,x,y,w,h,0,0,zoom.width,zoom.height);
+  $('zoomTitle').textContent='候选 #'+v.focus+' 局部放大 ×'+scale+'（原像素，可滚动）';
+ }
+}
+async function renderComponents(d){
+ const epoch=++componentEpoch;componentView=null;$('components').replaceChildren();$('componentCanvas').width=0;$('componentZoom').width=0;$('zoomTitle').textContent='局部放大（先查看某个候选）';$('applyComponents').disabled=true;
+ const candidates=d.component_selection?.candidates||[],find=name=>d.artifacts?.find(a=>a.current&&a.name===name);
+ const source=find('extraction/source-crop.png'),ids=find('extraction/component-ids.png');
+ if(!candidates.length||!source||!ids){$('componentNotice').textContent='暂无当前像素映射预览（旧任务请重新提取颜色/裁剪）；失效产物不可用于选择。';return;}
+ $('componentNotice').textContent='正在读取本地精确像素预览…';
+ try{
+  const load=url=>new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>resolve(im);im.onerror=()=>reject(Error('本地产物读取失败'));im.src=url;});
+  const [im,map]=await Promise.all([load(source.url),load(ids.url)]);if(epoch!==componentEpoch)return;
+  if(im.width!==map.width||im.height!==map.height||im.width*im.height>12000000)throw Error('预览尺寸无效');
+  const canvas=$('componentCanvas');canvas.width=im.width;canvas.height=im.height;const ctx=canvas.getContext('2d');ctx.drawImage(im,0,0);const pixels=ctx.getImageData(0,0,im.width,im.height).data;
+  ctx.drawImage(map,0,0);const raw=ctx.getImageData(0,0,map.width,map.height).data,labels=new Uint32Array(im.width*im.height),valid=new Set(candidates.map(c=>c.id));
+  for(let i=0;i<labels.length;i++){labels[i]=raw[i*4]+raw[i*4+1]*256+raw[i*4+2]*65536;if(labels[i]&&!valid.has(labels[i]))throw Error('候选编号映射无效');}
+  componentView={source:pixels,labels,w:im.width,h:im.height,candidates,focus:0,taskId:d.task_id};
+  for(const c of candidates){const row=document.createElement('div'),label=document.createElement('label'),box=document.createElement('input'),view=document.createElement('button');box.type='checkbox';box.name='component';box.value=c.id;box.checked=c.selected;box.onchange=paintComponents;label.append(box,document.createTextNode('保留 #'+c.id+' · '+c.pixels+' 像素 · '+c.decision));view.type='button';view.textContent='查看 #'+c.id+' 并局部放大';view.onclick=()=>{componentView.focus=c.id;paintComponents();};row.append(label,view);$('components').append(row);}
+  paintComponents();
+ }catch(e){if(epoch===componentEpoch){componentView=null;$('componentNotice').textContent='预览不可用，请刷新或重新提取。';$('applyComponents').disabled=true;}}
+}
+$('componentCanvas').onclick=e=>{const v=componentView;if(!v)return;const r=e.currentTarget.getBoundingClientRect(),x=Math.floor((e.clientX-r.left)*v.w/r.width),y=Math.floor((e.clientY-r.top)*v.h/r.height);v.focus=v.labels[y*v.w+x]||0;paintComponents();};
+$('clearFocus').onclick=()=>{if(componentView){componentView.focus=0;$('componentZoom').width=0;$('zoomTitle').textContent='局部放大（先查看某个候选）';paintComponents();}};
+$('applyComponents').onclick=()=>action(async()=>{if(!componentView||componentView.taskId!==$('task').value.trim())throw Error('请先刷新当前任务的像素预览');const ids=selectedComponentIds();if(!ids.length)throw Error('请至少保留一个候选');render(await request(taskPath()+'/resume',{local_only:true,component_ids:ids}));});
+
+async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('uploadConsent').checked=false;$('mapConsent').checked=false;}}
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
 $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked}));});
 $('refresh').onclick=()=>action(async()=>render(await request(taskPath())));
-$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('chooseComponents')?.checked)d.component_ids=Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined)d.controls_json=controls;if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
+$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined)d.controls_json=controls;if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
 </script></html>'''
 
 

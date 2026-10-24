@@ -104,7 +104,7 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
     if source.stat().st_size > 50_000_000:
         raise ValueError('Image exceeds 50 MB limit')
     out = Path(output_dir)
-    reserved = [out/n for n in ('mask.png', 'overlay.png', 'extraction.json', 'candidates-mask.png', 'components-overlay.png')]
+    reserved = [out/n for n in ('mask.png', 'overlay.png', 'extraction.json', 'candidates-mask.png', 'components-overlay.png', 'source-crop.png', 'component-ids.png')]
     if source.resolve() in [p.resolve() for p in reserved]:
         raise ValueError('Output must not overwrite input image')
     with Image.open(source) as opened:
@@ -125,7 +125,7 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
                           gray_value_tolerance, gray_max_saturation, gray_min_span)
     # 颜色匹配结果完整保存；目标分量选择与颜色/最小面积筛选分离。
     candidates_mask = mask.copy()
-    mask, selection = select_components(mask, component_ids)
+    mask, selection, component_labels = select_components(mask, component_ids, return_labels=True)
     stats['color_candidate_pixels'] = stats['selected_pixels']
     stats['selected_pixels'] = int(mask.sum())
     stats['component_selection'] = selection
@@ -169,6 +169,10 @@ def extract(image_path, output_dir, color, crop=None, hue_tolerance=20,
               **stats, 'warnings': warnings}
     out.mkdir(parents=True, exist_ok=True)
     Image.fromarray(candidates_mask.astype(np.uint8)*255).save(out/'candidates-mask.png')
+    # 24 位无损编号图：0 为背景，RGB 为编号低/中/高字节。
+    ids_rgb = np.stack([(component_labels >> shift) & 255 for shift in (0, 8, 16)], axis=-1).astype(np.uint8)
+    Image.fromarray(ids_rgb).save(out/'component-ids.png')
+    region.save(out/'source-crop.png')
     audit_image.save(out/'components-overlay.png')
     Image.fromarray(mask.astype(np.uint8)*255).save(out/'mask.png')
     Image.fromarray(overlay).save(out/'overlay.png')

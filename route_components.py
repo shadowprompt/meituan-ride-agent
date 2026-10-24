@@ -4,7 +4,7 @@ import math
 import numpy as np
 
 
-def select_components(mask, component_ids=None):
+def select_components(mask, component_ids=None, *, return_labels=False):
     """编号按面积降序、坐标破同分；显式选择可保留任意多个断裂片段。"""
     h, w = mask.shape
     labels = np.zeros(mask.shape, dtype=np.int32)
@@ -73,12 +73,19 @@ def select_components(mask, component_ids=None):
             status = 'auto_isolated_compact'
             reason = '长带跨度≥裁剪长边45%、长宽比≥5、面积占比≥85%；其余均紧凑(长宽比≤2、占框≥15%)、跨度≤长带10%，间距≥长带12%且≥估计带宽3倍。仅几何启发式，可用编号覆盖。'
     selected_mask = np.zeros(mask.shape, dtype=bool)
+    # 逐像素编号映射，不以包围框推断归属。
+    lookup = np.zeros(len(records)+1, dtype=np.int32)
     for c in records:
+        lookup[c['label']] = c['id']
         c['selected'] = c['id'] in selected
         c['decision'] = '保留候选/待确认' if status == 'ambiguous' else ('选中' if c['selected'] else '排除但保留审计')
         if c['selected']:
             selected_mask |= labels == c['label']
         del c['label']
-    return selected_mask, {'policy': 'conservative_geometry_v1', 'status': status, 'reason': reason,
+    report = {'policy': 'conservative_geometry_v1', 'status': status, 'reason': reason,
                            'requires_selection': status == 'ambiguous', 'selected_ids': selected,
                            'excluded_ids': [i for i in all_ids if i not in selected], 'candidates': records}
+
+    if return_labels:
+        return selected_mask, report, lookup[labels]
+    return selected_mask, report
