@@ -207,6 +207,7 @@ class APIPlanner:
             action = json.loads(content)
             if not isinstance(action,dict):
                 raise ValueError('Expected action object')
+            state.setdefault('execution', {'source':'api', 'api_responses':0})['api_responses'] += 1
             # 仅在传输成功且响应有效后记录真正送出的证据，失败请求不能授权复核。
             if review_version and sum(x['type'] == 'image_url' for x in feedback) >= 2:
                 state['review_presented_version'] = review_version
@@ -405,6 +406,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
     delivery_corrections = 0
     state.update(verified=False, original_gps=False)
     state['semantic_review_required'] = bool(getattr(planner, 'semantic_review', False))
+    # 记录本轮实际执行来源，任务mode只是配置，不能冒充模型已经复核。
+    state['execution'] = {'source':'api' if state['semantic_review_required'] else 'local', 'api_responses':0}
     if state.get('hole_proposal', {}).get('status') == 'pending':
         state.update(status='waiting_for_user', question='请先在网页批准或拒绝当前补孔提议；未修改像素。')
         save(state, folder)
@@ -685,6 +688,7 @@ def main():
     begin.add_argument('--demo',action='store_true')
     begin.add_argument('--goal',choices=['pixels','registration','roads'],default='pixels')
     resume = sub.add_parser('resume')
+    resume.add_argument('--review-continue', action='store_true', help='本次授权后复核当前证据，不要求新回答、不重提取或重选')
     resume.add_argument('--local-only', action='store_true', help='仅用已有证据本地继续，不上传截图，不调用模型 API')
     resume.add_argument('--fetch-map', action='store_true', help='Download roads for checked registration bounds; requires --consent-map')
     resume.add_argument('--consent-map', action='store_true', help='Allow this invocation to send route bounds to Overpass (not screenshot)')
@@ -711,6 +715,11 @@ def main():
             local_only = getattr(args,'local_only',False)
             if not demo and not args.consent_upload and not local_only:
                 raise ValueError('Real mode uploads screenshot, derived overlays, diagnostics + conversation. Explicit --consent-upload required each invocation.')
+            review_continue = getattr(args, 'review_continue', False)
+            if review_continue and (demo or local_only or not args.consent_upload):
+                raise ValueError('模型复核继续仅限API任务且须本次上传授权，不能同时仅本地')
+            if review_continue and any((args.answer, args.answer_file, args.color, args.crop, args.component_ids, args.controls_file, args.osm_file, args.fetch_map, args.reset_extraction)):
+                raise ValueError('复核继续不接受修改或文件，使用当前已保存证据')
             planner = LocalPlanner() if local_only else (DemoPlanner() if demo else ConsentedPlanner())
             state = start(args.image,args.task_dir,demo,args.goal) if args.command=='start' else load(args.task_dir)
             if args.command=='resume':
@@ -718,9 +727,9 @@ def main():
                     raise ValueError('Choose fetch-map or osm-file, not both')
                 if args.fetch_map and not args.consent_map:
                     raise ValueError('--fetch-map requires explicit --consent-map each invocation')
-                if not args.answer and not args.answer_file and not args.controls_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only:
+                if not args.answer and not args.answer_file and not args.controls_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue:
                     raise ValueError('Provide answer, answer-file, controls-file or osm-file')
-                answer = args.answer or 'User supplied local evidence file.'
+                answer = args.answer or ('用户本次明确授权上传当前任务截图、派生预览、诊断和对话，继续复核当前已保存证据；保留用户候选选择，不重新提取。' if review_continue else 'User supplied local evidence file.')
                 if args.color is not None or args.crop is not None:
                     if args.reset_extraction:
                         raise ValueError('Choose structured color/crop correction or reset-extraction')

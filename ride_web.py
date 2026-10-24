@@ -242,6 +242,19 @@ class RideServer(ThreadingHTTPServer):
             if not valid:
                 result.pop('question_evidence', None)
                 state = dict(state, question_evidence=None)
+        # 旧任务没有execution也能安全显示；只按当前证据版本认可复核，不按mode猜测。
+        import route_review
+        execution = state.get('execution', {})
+        try:
+            current_version = route_review.version(state, folder/'task')
+        except (ValueError, OSError, KeyError, TypeError):
+            current_version = None
+        review = state.get('route_review', {})
+        result['execution'] = {'source':execution.get('source', 'local' if state.get('semantic_review_required') is False else 'unknown'),
+                               'api_responses':execution.get('api_responses', 0)}
+        result['review_status'] = (review.get('result', 'not_reviewed') if current_version and review.get('version') == current_version else 'not_reviewed')
+        result['centerlined'] = bool(state.get('centerlined'))
+        result['user_components_applied'] = 'component_ids' in state.get('user_extraction_constraints', {})
         result['task_id'] = task_id
         available = []
         for name in sorted(ARTIFACTS):
@@ -332,7 +345,7 @@ class RideServer(ThreadingHTTPServer):
 
     def resume(self, task_id, data):
         allowed = {'component_ids', 'answer', 'color', 'crop', 'controls_json', 'osm_xml',
-                   'fetch_map', 'consent_map', 'consent_upload', 'local_only'}
+                   'fetch_map', 'consent_map', 'consent_upload', 'local_only', 'review_continue'}
         if data.keys() - allowed:
             raise WebError('未知继续参数（不接受文件路径）')
         folder = self.folder(task_id)
@@ -342,6 +355,12 @@ class RideServer(ThreadingHTTPServer):
             raise WebError('请先批准或拒绝当前补孔提议；不可更改参数绕过', 409)
         upload = flag(data, 'consent_upload')
         local_only = flag(data, 'local_only')
+        review_continue = flag(data, 'review_continue')
+        if review_continue:
+            if state['mode'] != 'api' or local_only:
+                raise WebError('模型复核仅用于 API 任务，不可同时选择仅本地', 409)
+            if data.keys() - {'review_continue', 'consent_upload'}:
+                raise WebError('复核使用当前已保存证据，不接受同时修改参数或选择')
         consent_map = flag(data, 'consent_map')
         fetch_map = flag(data, 'fetch_map')
         if state['mode'] == 'api' and not upload and not local_only:
@@ -353,6 +372,8 @@ class RideServer(ThreadingHTTPServer):
         args = ['resume', '--task-dir', str(folder/'task')]
         if local_only:
             args.append('--local-only')
+        if review_continue:
+            args.append('--review-continue')
         pending = {}
         if 'answer' in data:
             answer = text(data['answer'], '回答', 32000)
@@ -397,7 +418,7 @@ class RideServer(ThreadingHTTPServer):
                 raise WebError('OSM XML 为空或含禁止的 DTD/实体')
             pending['osm-upload.xml'] = osm.encode('utf-8')
             args += ['--osm-file', str(folder/'inputs'/'osm-upload.xml')]
-        if not any(k in data for k in ('component_ids', 'answer', 'color', 'crop', 'controls_json', 'osm_xml')) and not fetch_map and not local_only:
+        if not any(k in data for k in ('component_ids', 'answer', 'color', 'crop', 'controls_json', 'osm_xml')) and not fetch_map and not local_only and not review_continue:
             raise WebError('请提供回答、修正或证据文件')
         if upload:
             args.append('--consent-upload')
@@ -443,7 +464,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <label>目标 <select id="goal"><option value="pixels">提取轨迹像素</option><option value="registration">手工控制点配准</option><option value="roads">道路候选匹配</option></select></label>
 <label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
 <button id="create">创建并开始</button></fieldset>
-<fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset>
+<fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><p id="executionNotice" role="status" style="font-weight:bold;border:2px solid #b66;padding:12px"></p><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset>
 <fieldset><legend>3. 回答 / 修正 / 上传证据</legend><label>回答（Demo 首次可填 {"crop":[0,0,80,60],"color":"#00BFA5"}）<textarea id="answer"></textarea></label>
 <fieldset><legend>候选像素区域 · 可视多选</legend>
 <p>原图裁剪与精确候选像素，不是只有包围框。点击像素或“查看”高亮该候选、淡化其余，并查看局部放大。绿色保留，橙色排除；勾选立即本地预览，不请求模型、不计算中心线。选择不是路线真实性确认，不连接断点、不确定路径顺序或 GPS。</p>
@@ -452,7 +473,10 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <button id="clearFocus" type="button">查看全部候选</button>
 <h4 id="zoomTitle">局部放大（先查看某个候选）</h4><div style="overflow:auto;max-height:480px"><canvas id="componentZoom" aria-labelledby="zoomTitle" style="image-rendering:pixelated"></canvas></div>
 <div id="components"></div><button id="applyComponents" type="button" disabled>应用选择并重新生成</button>
-<p>仅本地提交选中编号并重新生成，不上传、不下载地图；不会提交回答或颜色/裁剪修改。未选区域仍保留审计，空选不可提交。</p></fieldset>
+<p>仅本地提交选中编号并重新生成，不上传、不下载地图；不会提交回答或颜色/裁剪修改。未选区域仍保留审计，空选不可提交。</p>
+<div id="reviewEntry" hidden><p>API 模式不代表每步已调用模型。继续将使用当前任务已保存的候选选择与图像证据，不重新上传文件、不需要回答或重复选择；可能提出歧义问题或待批准补孔提议。</p>
+<label class="consent"><input id="reviewConsent" type="checkbox">仅本次同意上传当前任务截图、派生预览、诊断及对话供模型复核（不继承创建授权；完成或失败后取消）</label>
+<button id="continueReview" type="button">授权模型复核并继续</button></div></fieldset>
 <fieldset><legend>逐孔人工复核 · 当前任务内纠错</legend>
 <p>先生成当前原图/掩码绑定预览，默认全部保留。每孔三联图依次为未叠加原图、精确孔洞标红、二值掩码，可点击图片打开原尺寸放大。只有明确的漏选才勾选；真实回转孔、相邻臂间隙、边界混合孔请保留。暂不支持局部画笔，不能整孔安全填时不要选择。不连接图标开放断裂，不按环数最小化自动修复。</p>
 <div id="holeProposal"></div><button id="previewHoles" type="button">生成当前任务逐孔预览</button><p id="holeNotice" role="status"></p><div id="holes"></div>
@@ -471,7 +495,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
 async function request(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:data?{'Content-Type':'application/json','X-CSRF-Token':token}:{},body:data?JSON.stringify(data):undefined});const d=await r.json();if(!r.ok)throw Error((d.error||'请求失败')+(d.error_category?' ['+d.error_category+']':'')+(d.recovery_hint?'\n'+d.recovery_hint:''));return d;}
-function render(d){$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
+function render(d){$('reviewEntry').hidden=d.mode!=='api';$('reviewConsent').checked=false;const source={local:'本地执行',api:'API复核流程',unknown:'历史执行来源未知'}[d.execution?.source]||'执行来源未知';const review={not_reviewed:'尚未模型复核',consistent:'模型已报告当前版本可见一致（非真值验证）',needs_revision:'模型发现当前版本需要修正',ambiguous:'模型报告当前版本存在歧义'}[d.review_status]||'尚未模型复核';$('executionNotice').textContent=(d.execution?.source==='local'&&d.centerlined&&d.user_components_applied?'候选已应用、本地中心线已生成，':'')+review+'。本轮来源：'+source+'；成功模型响应：'+(d.execution?.api_responses||0)+'。mode仅为任务配置；始终未验证、非原始GPS。';$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}}
 // 所有预览只读本地白名单产物；编号逐像素解码，不把重叠包围框当成候选。
 let componentView=null, componentEpoch=0;
 function selectedComponentIds(){return Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));}
@@ -562,10 +586,12 @@ $('applyHoles').onclick=()=>action(async()=>{
  render(await request(taskPath()+'/holes/apply',{review_id:holeView.review_id,fingerprint:holeView.fingerprint,fill_hole_ids:holeSelection(),confirm_source_reviewed:true}));
 });
 
-async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('applyHoles').disabled=!!$('proposalAck')||!holeView||!holeSelection().length||!$('holeAck').checked;$('previewHoles').disabled=!!$('proposalAck');const approve=document.querySelector('[data-proposal-approve]');if(approve)approve.disabled=!$('proposalAck').checked;$('uploadConsent').checked=false;$('mapConsent').checked=false;}}
+async function action(fn){$('error').textContent='处理中，请稍候（最长约 3 分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('applyHoles').disabled=!!$('proposalAck')||!holeView||!holeSelection().length||!$('holeAck').checked;$('previewHoles').disabled=!!$('proposalAck');const approve=document.querySelector('[data-proposal-approve]');if(approve)approve.disabled=!$('proposalAck').checked;$('uploadConsent').checked=false;$('reviewConsent').checked=false;$('mapConsent').checked=false;}}
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
 $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked}));});
+// 专用继续入口只提交本次授权；不读取localOnly、回答、颜色/裁剪等可能陈旧的表单。
+$('continueReview').onclick=()=>action(async()=>{if(!$('reviewConsent').checked)throw Error('请先勾选本次模型复核上传授权；尚未上传');render(await request(taskPath()+'/resume',{review_continue:true,consent_upload:true}));});
 $('refresh').onclick=()=>action(async()=>render(await request(taskPath())));
 $('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined)d.controls_json=controls;if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
 </script></html>'''
