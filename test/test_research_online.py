@@ -310,8 +310,19 @@ class OnlineTests(unittest.TestCase):
             planner = ride_agent.APIPlanner() if model_http else script
             planner.map_query_authorized = True
             state=ride_agent.run(self.state,self.folder,planner,budget=None if model_http else 14 if revise else 11 if partial_failure else 9,consent_map=True)
+            if model_http and revise:
+                # 旧测试只改写复核结论、重跑相同假说/节点/区域，不是新证据。
+                # 现在须确定性拒绝这条假收敛链，保留needs_revision而非交付。
+                self.assertEqual(opener.return_value.open.call_count,11)
+                self.assertEqual(state['status'],'paused')
+                self.assertEqual(state['research_progress']['blocked_reason'],'no_progress_limit')
+                self.assertEqual(state['research_review']['result'],'needs_revision')
+                self.assertFalse(state.get('artifacts'))
+                self.assertFalse(state['corridor_complete'])
+                self.assertEqual(get.call_count,3)
+                return
             if model_http:
-                self.assertEqual(opener.return_value.open.call_count,14 if revise else 9)
+                self.assertEqual(opener.return_value.open.call_count,9)
                 self.assertEqual(state['research_presented_version'],state['research_version'])
                 self.assertEqual([call.args[1] for call in get.call_args_list][1:], ['/api/0.6/node/1/ways.json','/api/0.6/way/5/full.json'] if node_first else ['/api/0.6/way/5/full.json','/api/0.6/node/1/ways.json'])
                 geo = next(self.folder/name for name in state['corridor_artifacts'] if name.endswith('.geojson'))

@@ -193,7 +193,23 @@ and review; build/deliver only when existing strict evidence gates pass. Otherwi
 {"action":"research_checkpoint","reason":"specific unresolved hypothesis and next local comparison"}.
 This saves structured progress, not a route export. Never label remaining network quota exhausted
 when only model/action quota ended. Unknown legs must remain unknown. Do not ask for a whole region.
-Resuming does not reset task model/category limits. No automatic continue, no network retry.
+Resuming does not reset task model/category limits. No automatic resume or network retry.
+A research_checkpoint saves intermediate progress, NOT a request for user input. To continue
+within CURRENT upload authorization, include next_local_action: a complete executable local
+observe_region/research_focus/research_hypothesis/review_research/inspect_roads/build_corridor JSON.
+System checks remaining budgets and duplicate evidence before accepting it and returns the
+accepted next action plus evidence_summary. Follow that checked task, not a contradictory next step.
+Same version/region cannot be reobserved by changing reason. Same version/ordered_roads or
+review conclusion is not new progress. Checkpoints count against existing closure=2, and
+three consecutive duplicate/checkpoint turns stop unresolved. No budget increases.
+After a continuing checkpoint use ONLY local actions, never more map requests.
+For a new region choose an actually relevant DIFFERENT image part (turnback/connecting bend),
+not a made-up location. research_focus must name concrete competing returned-road/pixel claims,
+support/exclusion/unknown and a falsifier testing direction, shared-node connectivity or relative
+landmarks. Compare the saved ordered-hypothesis evidence against cached spatial facts.
+Do not manufacture supported claims or fill nulls merely to export. If no executable local test
+remains checkpoint honestly unresolved without next_local_action. Use ask ONLY for a genuine
+specific user decision, permission or ambiguity question; never generically request road names.
 """
 
 def install_research(state, folder, manifest):
@@ -824,7 +840,8 @@ def run(state, folder, planner, budget=None, consent_map=False):
     planned_research = state.get('map_provider') == 'research' and state.get('goal') == 'corridor' and bool(getattr(planner, 'semantic_review', False))
     budget = (research_plan.MAX_MODEL_CALLS if planned_research else 12) if budget is None else budget
     if planned_research:
-        state.pop('research_progress', None)
+        research_plan.convergence(state)  # migrate old observations before any new action
+        research_plan.ledger(state).pop('checkpoint_local_only', None)  # fresh invocation still requires explicit consents
     delivery_corrections = 0
     research_schema_corrections = 0
     map_query_used = False
@@ -926,8 +943,22 @@ def run(state, folder, planner, budget=None, consent_map=False):
                     save(state, folder)
                     continue
             if planned_research:
+                plan = research_plan.ledger(state)  # save() redacts by replacing nested objects
+                if research_plan.duplicate(state, action):
+                    convergence = research_plan.convergence(state)
+                    convergence['no_progress'] += 1
+                    convergence['no_progress_total'] = convergence.get('no_progress_total', 0) + 1
+                    if convergence['no_progress'] >= 3:
+                        research_plan.checkpoint(state, 'no_progress_limit', action)
+                        save(state, folder)
+                        return state
+                    state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps({
+                        'tool':name, 'status':'no_progress', 'reason_code':'same_version_region_or_conclusion',
+                        'next_step':'No action executed. Same evidence/region or ordered hypothesis is not new progress. Compare cached directions/shared nodes with a concrete falsifiable research_focus, choose a different relevant image region, or checkpoint honestly unresolved. Never fill unknowns without evidence.'})})
+                    save(state, folder)
+                    continue
                 kind = research_plan.category(name)
-                if plan['phase'] == 'closure' and kind == 'network':
+                if (plan['phase'] == 'closure' or plan.get('checkpoint_local_only')) and kind == 'network':
                     if not research_plan.charge(state, 'correction'):
                         research_plan.checkpoint(state, 'closure_network_loop', action)
                         save(state, folder)
@@ -945,10 +976,17 @@ def run(state, folder, planner, budget=None, consent_map=False):
                     save(state, folder)
                     return state
             if name == 'research_checkpoint' and planned_research:
-                if set(action) != {'action','reason'}:
-                    raise ValueError('Research checkpoint requires specific reason only')
+                if set(action) - {'action','reason','next_local_action'} or 'reason' not in action:
+                    raise ValueError('Research checkpoint requires reason and optional concrete local action')
                 route_review.text(action['reason'], 2000)
-                research_plan.checkpoint(state, 'model_checkpoint', action)
+                progress = research_plan.checkpoint(state, 'model_checkpoint', action, allow_continue=True)
+                if progress['status'] == 'continuing_local':
+                    research_plan.ledger(state)['checkpoint_local_only'] = True
+                    state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps({
+                        'tool':name, **progress,
+                        'next_step':'Progress saved, not a user question. Execute next_local_action or fill the specified focus comparison using current evidence. Local actions ONLY for the rest of this invocation; no network, retry, new permission or budget. Preserve unknowns. If no defensible comparison remains, checkpoint with no next action to stop.'},ensure_ascii=False)})
+                    save(state, folder)
+                    continue
                 save(state, folder)
                 return state
             if name == 'ask':
@@ -986,12 +1024,20 @@ def run(state, folder, planner, budget=None, consent_map=False):
             elif name in ('observe_region', 'review_route'):
                 state['review_action_count'] = state.get('review_action_count', 0)+1
                 if state['review_action_count'] > route_review.MAX_REVIEWS:
+                    if planned_research:
+                        research_plan.checkpoint(state, 'local_review_limit', action)
+                        save(state, folder)
+                        return state
                     state.update(status='waiting_for_user', question='语义观察/复核达到有限预算，仍不能可靠判断。请明确歧义区域或重复路段顺序；未验证路线。')
                     save(state,folder)
                     return state
                 if name == 'observe_region':
                     result = route_review.observe(state, folder, action)
                     if result is None:
+                        if planned_research:
+                            research_plan.checkpoint(state, 'local_observation_limit', action)
+                            save(state, folder)
+                            return state
                         state.update(status='waiting_for_user', question='局部观察已达上限，请提供歧义区域说明；未完成语义确认。')
                         save(state,folder)
                         return state
@@ -1509,6 +1555,8 @@ def run(state, folder, planner, budget=None, consent_map=False):
                 return state
             else:
                 raise ValueError('Unknown action; only ask/inspect_colors/observe_region/review_route/extract/centerline/register/approximate/inspect_roads/build_corridor/fetch_map/match/deliver allowed')
+            if planned_research:
+                research_plan.record_progress(state, action)
             state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps(tool_result,ensure_ascii=False)})
             state['status'] = 'analyzing'
             state.pop('question',None)

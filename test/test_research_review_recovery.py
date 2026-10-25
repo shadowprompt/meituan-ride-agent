@@ -234,7 +234,7 @@ class ResearchReviewWebResumeTests(unittest.TestCase):
                 data=json.loads(body)
                 get.assert_not_called()
                 self.assertEqual(planner.calls,2)
-                self.assertEqual(data['status'],'waiting_for_user')
+                self.assertEqual(data['status'],'paused')
                 self.assertEqual(data['research_progress']['recovery']['missing_tools'],['observe_region'])
                 self.assertEqual(data['research_budget_used']['requests'],7)
                 self.assertEqual(data['research_plan']['model_calls'],17)

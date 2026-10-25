@@ -40,11 +40,12 @@ class ResearchPlanTests(unittest.TestCase):
         self.assertEqual(planner.calls,1)
         self.assertEqual(state['research_plan']['model_calls'],13)
         progress = state['research_progress']
-        self.assertEqual(progress['blocked_reason'],'model_checkpoint')
+        self.assertEqual(progress['blocked_reason'],'no_executable_local_action')
         self.assertEqual(progress['network_requests_remaining'],2)
         self.assertTrue(progress['can_resume'])
         self.assertEqual(progress['hypotheses'][0]['status'],'unknown')
-        self.assertEqual(progress['next_local_action']['region'],[0,0,40,40])
+        self.assertIsNone(progress['next_local_action'])
+        self.assertEqual(state['status'],'paused')
         self.assertFalse(state['corridor_complete'])
         self.assertFalse(state.get('artifacts'))
         self.assertNotIn('请补充',state['question'])
@@ -89,7 +90,7 @@ class ResearchPlanTests(unittest.TestCase):
         self.assertEqual(planner.calls,2)
         self.assertIn('closure_local_only',str(state['messages']))
         self.assertEqual(state['research_budget_used']['requests'],6)
-        self.assertEqual(state['research_progress']['blocked_reason'],'model_checkpoint')
+        self.assertEqual(state['research_progress']['blocked_reason'],'no_executable_local_action')
 
     def test_exhausted_observation_stage_reserves_a_local_closure_turn(self):
         plan = research_plan.ledger(self.state)
@@ -102,8 +103,8 @@ class ResearchPlanTests(unittest.TestCase):
         get.assert_not_called()
         self.assertEqual(planner.calls,2)
         self.assertEqual(plan['counts']['observe'],6)
-        self.assertEqual(plan['closure_reason'],'observe_action_limit')
-        self.assertEqual(state['research_progress']['blocked_reason'],'model_checkpoint')
+        self.assertEqual(state['research_plan']['closure_reason'],'observe_action_limit')
+        self.assertEqual(state['research_progress']['blocked_reason'],'no_executable_local_action')
 
     def test_model_attempt_error_is_charged_before_upload_and_not_reset(self):
         class Broken:
