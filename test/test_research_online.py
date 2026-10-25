@@ -309,7 +309,7 @@ class OnlineTests(unittest.TestCase):
             opener.return_value.open.side_effect = mock_model
             planner = ride_agent.APIPlanner() if model_http else script
             planner.map_query_authorized = True
-            state=ride_agent.run(self.state,self.folder,planner,budget=14 if revise else 11 if partial_failure else 9,consent_map=True)
+            state=ride_agent.run(self.state,self.folder,planner,budget=None if model_http else 14 if revise else 11 if partial_failure else 9,consent_map=True)
             if model_http:
                 self.assertEqual(opener.return_value.open.call_count,14 if revise else 9)
                 self.assertEqual(state['research_presented_version'],state['research_version'])

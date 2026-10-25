@@ -28,6 +28,7 @@ import place_review
 import map_research
 import research_online
 import research_decision
+import research_plan
 import osm_relay
 from inspect_colors import inspect_colors
 from ride_errors import TaskFailure, failure_category, api_diagnostic
@@ -137,11 +138,12 @@ for localized original-image comparison, revise and review_research before deliv
 turnback repeats and all unknown legs. Do not claim complete route when any unknown remains.
 No Overpass or local network prerequisite. No user manifest/IDs/road JSON/control points.
 Optional request failures return unavailable with specific query/ID, reason and remaining budget.
-Keep successful evidence; do not retry failed queries in this invocation or expand permissions.
+Keep successful evidence; do not retry failed queries in this task or expand permissions.
 Use returned IDs to inspect existing objects, observe_region to check uncertain image text,
 or ask a specific ambiguity question. Never silently correct a suspected place spelling.
-429, missing consent, unsafe text/extra parameters, unknown IDs, repeated queries and exhausted
-budgets stop the invocation. Only missing required fields or wrong field types/list shape may
+429, missing consent, unsafe text/extra parameters and unknown IDs stop the invocation.
+Previously successful queries/objects return cached local feedback; use it, never re-send them.
+Exhausted research stage budgets require local closure or a checkpoint, not repeated network attempts. Only missing required fields or wrong field types/list shape may
 receive at most TWO schema-correction turns within the existing model action limit; evidence
 is always required. No network is sent for rejected shapes, no extra model budget is granted.
 Failures are NOT evidence that existing objects are unavailable or that a road was verified.
@@ -165,6 +167,7 @@ facts; a failed/missing response excludes nothing. Preserve unknowns and repeate
 If text readings conflict, do not silently alternate search names: observe_region on the
 DISPUTED LABEL again (not an unrelated landmark), then record an explicit comparison:
 {"action":"research_focus","region":[left,top,right,bottom],"hypotheses":[{"claim":"candidate reading / local road-shape claim","status":"supported|excluded|unknown","evidence":"specific local pixels and public object facts, with uncertainty"}],"next_query":"specific next object/name and purpose","falsifier":"returned fact or local observation that would reject the hypothesis"}.
+Before a changed/conflicting search, FIRST observe_region then research_focus, THEN query; do not submit a query just to learn the focus gate. Mentioning a previous search alone is not a contradiction. Reuse cached searches/objects locally.
 research_focus records MODEL claims, not ground truth, and cannot resolve missing geometry.
 Then issue only the discriminating query. Use focus after local tool outcomes to revise
 supported/excluded/unknown claims. Do not spend the whole budget collecting names without
@@ -176,6 +179,19 @@ MAP_MIGRATION_NOTICE = ('地图服务切换须显式选择 --map-provider resear
                         '并重新给予本次地图查询 consent_map 和模型上传 consent_upload 双授权；'
                         '不会静默迁移、重放或上传。旧osm只可 --local-only 离线调试。')
 
+
+PROMPT += """
+Research-only bounded plan: maximum 28 model attempts per task across resumes, NOT 12 per invocation.
+Hard categories: observe 6, focus 4, network actions 8, local hypothesis/build/review 9,
+correction 2, closure 2. Network authorization remains at most 8 requests/3 searches per task;
+wall-clock limits unchanged. CURRENT_STAGE_STATE.research_plan shows exact usage.
+Last 6 model attempts are local-only closure: use already returned facts, record hypothesis
+and review; build/deliver only when existing strict evidence gates pass. Otherwise call
+{"action":"research_checkpoint","reason":"specific unresolved hypothesis and next local comparison"}.
+This saves structured progress, not a route export. Never label remaining network quota exhausted
+when only model/action quota ended. Unknown legs must remain unknown. Do not ask for a whole region.
+Resuming does not reset task model/category limits. No automatic continue, no network retry.
+"""
 
 def install_research(state, folder, manifest):
     # Root is explicit CLI working directory, never a model-selected path.
@@ -480,6 +496,8 @@ class APIPlanner:
             current['research_version'] = archive['version']
             current['research_hypothesis'] = state.get('research_hypothesis')
             current['research_spatial_evidence'] = research_decision.spatial(archive, state.get('research_discoveries', []), state.get('research_requests', []))
+            current['research_plan'] = state.get('research_plan')
+            current['research_progress'] = state.get('research_progress')
             current['research_focus'] = state.get('research_focus')
             current['research_last_outcome'] = state.get('research_last_outcome')
             current['research_review'] = state.get('research_review')
@@ -767,15 +785,20 @@ def research_failure_question(state, question):
     return question + ' 本轮局部请求失败：' + details + '。未重试；已成功证据保留，搜索候选不是已核查道路几何。'
 
 
-def run(state, folder, planner, budget=12, consent_map=False):
+def run(state, folder, planner, budget=None, consent_map=False):
     validate_map_invocation(state.get('map_provider', 'osm'),
                             local_only=not getattr(planner, 'semantic_review', False))
     if state.get('map_provider') == 'research' and state.get('goal') == 'corridor':
         research_archive(state, folder)
+    planned_research = state.get('map_provider') == 'research' and state.get('goal') == 'corridor' and bool(getattr(planner, 'semantic_review', False))
+    budget = (research_plan.MAX_MODEL_CALLS if planned_research else 12) if budget is None else budget
+    if planned_research:
+        state.pop('research_progress', None)
     delivery_corrections = 0
     research_schema_corrections = 0
     map_query_used = False
-    research_budget = {'requests':0,'searches':0}
+    research_budget = (dict(state.get('research_budget_used', {'requests':0,'searches':0}))
+                       if planned_research else {'requests':0,'searches':0})
     inspection = state.get('corridor_inspection')
     osm = Path(folder)/'map.osm'
     if inspection and (not osm.is_file() or inspection.get('osm_sha256') != hashlib.sha256(osm.read_bytes()).hexdigest()):
@@ -793,7 +816,10 @@ def run(state, folder, planner, budget=12, consent_map=False):
     state.update(verified=False, original_gps=False)
     state.pop('error_diagnostic', None)
     state.pop('research_diagnostic', None)
-    state['research_failures'] = []
+    if not planned_research:
+        state['research_failures'] = []
+    else:
+        state.setdefault('research_failures', [])
     state['research_budget_used'] = dict(research_budget)
     state['semantic_review_required'] = bool(getattr(planner, 'semantic_review', False))
     # 记录本轮实际执行来源，任务mode只是配置，不能冒充模型已经复核。
@@ -803,6 +829,13 @@ def run(state, folder, planner, budget=12, consent_map=False):
         save(state, folder)
         return state
     for _ in range(budget):
+        if planned_research:
+            plan = research_plan.ledger(state)
+            if plan['model_calls'] >= research_plan.MAX_MODEL_CALLS:
+                research_plan.checkpoint(state, 'task_model_limit')
+                save(state, folder)
+                return state
+            plan['phase'] = 'closure' if plan.get('closure_reason') or plan['model_calls'] >= research_plan.MAX_MODEL_CALLS-research_plan.CLOSURE_RESERVE else 'research'
         stage = 'planner'
         try:
             # 已知完整的用户修正直接走确定性提线，避免再让模型猜颜色或裁剪框。
@@ -841,6 +874,9 @@ def run(state, folder, planner, budget=12, consent_map=False):
                                 + '。不等于真实轨迹定位已验证，不恢复原始 GPS。')
                 action = {'action':'deliver', 'summary':summary}
             else:
+                if planned_research:
+                    plan['model_calls'] += 1  # Count attempts, including API/JSON failures; save before upload.
+                    save(state, folder)
                 action = planner.decide(state, folder)
             stage = 'action'
             if not isinstance(action,dict):
@@ -850,14 +886,46 @@ def run(state, folder, planner, budget=12, consent_map=False):
             if state.get('research_online') and consent_map is True and name in ('search_map_evidence', 'inspect_map_object'):
                 blocked = research_decision.gate(state, research_archive(state, folder), action)
                 if blocked:
+                    if planned_research and not research_plan.charge(state, 'correction'):
+                        research_plan.checkpoint(state, 'correction_limit', action)
+                        save(state, folder)
+                        return state
                     state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps({'tool':name, **blocked, 'verified':False})})
                     save(state, folder)
                     continue
+            if planned_research:
+                kind = research_plan.category(name)
+                if plan['phase'] == 'closure' and kind == 'network':
+                    if not research_plan.charge(state, 'correction'):
+                        research_plan.checkpoint(state, 'closure_network_loop', action)
+                        save(state, folder)
+                        return state
+                    state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps({'tool':name,'status':'closure_local_only','next_step':'No more network actions in this task phase. Use existing evidence for research_hypothesis/review_research/inspect_roads/build_corridor, or research_checkpoint; preserve unknowns.'})})
+                    save(state, folder)
+                    continue
+                if not research_plan.charge(state, kind):
+                    plan['closure_reason'] = kind+'_action_limit'
+                    if kind != 'closure' and research_plan.charge(state, 'correction'):
+                        state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps({'tool':name,'status':'stage_action_limit','blocked_reason':plan['closure_reason'],'next_step':'No action executed. Close locally using remaining categories or research_checkpoint; never retry exhausted category.'})})
+                        save(state, folder)
+                        continue
+                    research_plan.checkpoint(state, kind+'_action_limit', action)
+                    save(state, folder)
+                    return state
+            if name == 'research_checkpoint' and planned_research:
+                if set(action) != {'action','reason'}:
+                    raise ValueError('Research checkpoint requires specific reason only')
+                route_review.text(action['reason'], 2000)
+                research_plan.checkpoint(state, 'model_checkpoint', action)
+                save(state, folder)
+                return state
             if name == 'ask':
                 question = action.get('question')
                 if not isinstance(question,str) or not question.strip() or len(question)>2000:
                     raise ValueError('Invalid question')
                 candidate_review.question_evidence(state, folder, action)
+                if planned_research:
+                    research_plan.checkpoint(state, 'specific_user_question', action)
                 state.update(status='waiting_for_user', question=research_failure_question(state, question))
                 save(state,folder)
                 return state
@@ -998,6 +1066,10 @@ def run(state, folder, planner, budget=12, consent_map=False):
                             repairable = (isinstance(exc, research_online.ModelShapeError)
                                           and research_schema_corrections < research_online.MAX_SCHEMA_CORRECTIONS
                                           and research_budget['requests'] < research_online.MAX_REQUESTS)
+                            if isinstance(exc, research_online.ModelShapeError) and planned_research:
+                                plan['counts']['network'] -= 1
+                            if repairable and planned_research:
+                                repairable = research_plan.charge(state, 'correction')
                             if repairable:
                                 research_schema_corrections += 1
                             terminal = not repairable and (exc.code not in ('timeout','network_error','http_error','response_invalid','redirect_refused')
@@ -1014,7 +1086,7 @@ def run(state, folder, planner, budget=12, consent_map=False):
                                     schema=research_online.TOOL_SCHEMA,
                                     corrections_used=research_schema_corrections,
                                     corrections_limit=research_online.MAX_SCHEMA_CORRECTIONS,
-                                    next_step='Correct only the tool JSON shape using this schema; evidence is required. No request was sent. Do not expand permissions, budgets, or repeat a sent query. This correction consumes a normal model action turn; no extra model budget is granted.')
+                                    next_step='Correct only the tool JSON shape using this schema; evidence is required. No request was sent. Do not expand permissions, budgets, or repeat a sent query. This correction consumes one bounded model call; no extra model budget is granted.')
                             state['research_last_outcome'] = research_decision.outcome(archive, action, tool_result)
                             tool_result['hypothesis_outcome'] = state['research_last_outcome']
                             state['research_diagnostic'] = tool_result
@@ -1408,7 +1480,10 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 state['error_diagnostic'] = diagnostic
             save(state,folder)
             return state
-    state.update(status='waiting_for_user' if state.get('semantic_review_required') else 'paused',question=research_failure_question(state, '工具循环达到本轮上限。尚未确认的区域/顺序请补充必要说明；未验证路线。'))
+    if planned_research:
+        research_plan.checkpoint(state, 'task_model_limit' if plan['model_calls'] >= research_plan.MAX_MODEL_CALLS else 'invocation_action_limit')
+    else:
+        state.update(status='waiting_for_user' if state.get('semantic_review_required') else 'paused',question=research_failure_question(state, '工具循环达到本轮上限。尚未确认的区域/顺序请补充必要说明；未验证路线。'))
     save(state,folder)
     return state
 

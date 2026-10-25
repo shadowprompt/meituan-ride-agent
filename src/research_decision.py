@@ -63,7 +63,7 @@ def conflict(state, action):
     evidence = action.get('evidence', '')
     if not isinstance(evidence, str):
         return False
-    if re.search(r'此前|先前|判读有误|判作|读错|contradict|misread|previous.*wrong', evidence, re.I):
+    if re.search(r'判读有误|判作|读错|contradict|misread|previous.*wrong', evidence, re.I):
         return True
     names = action.get('names', [])
     if not isinstance(names, list):
@@ -84,6 +84,15 @@ def gate(state, archive, action):
         return None
     if name == 'inspect_map_object' and (not isinstance(action.get('object_type'),str) or type(action.get('object_id')) is not int):
         return None
+    if name == 'search_map_evidence' and isinstance(action.get('names'), list) and len(action['names']) == 1 and isinstance(action['names'][0], str) and ('region' not in action or isinstance(action['region'], str)):
+        from research_online import search_query, _successful_query
+        from map_fetch import MapFetchError
+        try:
+            query = search_query(action).casefold()
+        except MapFetchError:
+            return None  # strict executor owns security validation
+        if any(r.get('tool') == name and r.get('outcome') == 'succeeded' and _successful_query(r).casefold() == query for r in state.get('research_requests', [])):
+            return {'status':'cached_search', 'next_step':'Already searched this normalized query; use existing discovery IDs and local spatial evidence. Do not repeat search or change region without new focus/evidence.'}
     if action.get('action') == 'search_map_evidence' and conflict(state, action):
         focus = state.get('research_focus', {})
         observation = state.get('review_region', {})
