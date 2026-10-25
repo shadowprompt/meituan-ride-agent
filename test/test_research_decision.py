@@ -119,6 +119,67 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(facts['ways'][0]['connections'],[])
         self.assertNotIn('projection',facts['ways'][0])
 
+    def test_mock_http_conflict_parcel_branch_to_ordered_coordinates(self):
+        # 合成已成功地标/道路发现前缀；14步测试预算不是生产预算调整。
+        self.discover()
+        parcel = {'type':'way','id':7,'nodes':[11,12,11],'tags':{'landuse':'commercial','name':'Mock mall'}}
+        parcel_nodes = [{'type':'node','id':11,'lon':10,'lat':20.01},{'type':'node','id':12,'lon':10.01,'lat':20.01}]
+        self.state['research_seen_ids'].append(['way',7])
+        self.call({'action':'inspect_map_object','object_type':'way','object_id':7,'evidence':'Mock landmark bounds'}, {'elements':[parcel]+parcel_nodes})
+        self.state['research_seen_ids'].append(['node',11])
+        self.state['research_requests'][0]['request']['names'] = ['长风路']
+        branch = {'type':'way','id':9,'nodes':[2,3],'tags':{'name':'Mock branch','highway':'residential'}}
+        third = {'type':'node','id':3,'lon':10.002,'lat':20.002}
+        plan = {'schema_version':1,'coordinate_system':'WGS84','source':{'kind':'model','evidence':'Mock local turn and repeated traversal'},'legs':[
+            {'road':{'name':'Fixture Road'},'via':[{'node_id':1},{'node_id':2}]},
+            {'road':{'name':'Mock branch'},'via':[{'node_id':2},{'node_id':3}]},
+            {'road':{'name':'Mock branch'},'via':[{'node_id':3},{'node_id':2}]},
+            {'road':{'name':'Fixture Road'},'via':[{'node_id':2},{'node_id':1}]}]}
+        payloads = []
+        def model(request, **kwargs):
+            payload = json.loads(request.data)
+            payloads.append(payload)
+            state = self.state
+            step = len(payloads)
+            current = json.loads(payload['messages'][-1]['content'][0]['text'].removeprefix('CURRENT_STAGE_STATE ').split('. Earlier tool reports')[0])
+            if step == 8:
+                suggestion = next(a for a in current['research_spatial_evidence']['suggested_queries'] if a['object_type']=='way' and a['object_id']==9)
+                self.assertIn('way/full',suggestion['evidence'])
+                action = suggestion
+            else:
+                action = {
+                    1:{'action':'search_map_evidence','names':['长宁路'],'evidence':'此前读错，Mock alternative text'},
+                    2:{'action':'observe_region','region':[0,0,60,60],'hypothesis':'uncertain','reason':'Mock disputed text and turn'},
+                    3:{'action':'research_focus','region':[0,0,60,60],'hypotheses':[{'claim':'Alternative label and northeast turn','status':'unknown','evidence':'Mock local screenshot hypothesis only'}],'next_query':'Compare returned road and branch bounds','falsifier':'Shared-node direction disagrees with screenshot turn'},
+                    4:{'action':'search_map_evidence','names':['长宁路'],'evidence':'此前读错，Mock test alternative shape'},
+                    5:{'action':'inspect_map_object','object_type':'node','object_id':11,'evidence':'Mock parcel branch attempt'},
+                    6:{'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Mock returned road ID'},
+                    7:{'action':'inspect_map_object','object_type':'node','object_id':2,'evidence':'Mock test connecting branch at turn'},
+                    9:{'action':'research_hypothesis','version':state['research_version'],'ordered_roads':['Fixture Road','Mock branch','Mock branch','Fixture Road'],'evidence':'Mock ordered outward and turnback legs','limitations':'No real screenshot validation'},
+                    10:{'action':'inspect_roads','names':['Fixture Road','Mock branch']},
+                    11:{'action':'build_corridor','hypothesis':plan},
+                    12:{'action':'observe_region','region':[0,0,60,60],'hypothesis':'repeated_order','reason':'Mock final local comparison'},
+                    13:{'action':'review_research','version':state['research_version'],'result':'consistent','evidence':'Mock crop comparison only','limitations':'Unverified synthetic route'},
+                    14:{'action':'deliver','summary':'Mock unverified WGS84 candidate, not original GPS'}
+                }[step]
+            response = unittest.mock.MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps({'choices':[{'message':{'content':json.dumps(action)}}]}).encode()
+            return response
+        bodies = [[{'osm_type':'way','osm_id':5,'display_name':'Mock road'}],
+                  {'elements':[self.way]+self.nodes}, {'elements':[self.way,branch]}, {'elements':[branch,self.nodes[1],third]}]
+        with patch.object(live,'_get',side_effect=[json.dumps(b).encode() for b in bodies]) as get, patch.dict('os.environ',{'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-only'}), patch('ride_agent.urllib.request.build_opener') as opener:
+            opener.return_value.open.side_effect = model
+            state = ride_agent.run(self.state,self.folder,ride_agent.APIPlanner(),budget=14,consent_map=True)
+        self.assertEqual(get.call_count,4)
+        self.assertEqual(state['status'],'needs_confirmation')
+        self.assertFalse(state['verified'])
+        self.assertEqual(state['research_hypothesis']['ordered_roads'],['Fixture Road','Mock branch','Mock branch','Fixture Road'])
+        geo = next(self.folder / f for f in state['corridor_artifacts'] if f.endswith('.geojson'))
+        coords = json.loads(geo.read_text())['features'][0]['geometry']['coordinates']
+        self.assertEqual(coords,[[10,20],[10.001,20.001],[10.002,20.002],[10.001,20.001],[10,20]])
+        self.assertTrue(any(f.endswith('.png') for f in state['corridor_artifacts']))
+        self.assertTrue((self.folder/'research-audit.json').exists())
+
     def test_failed_tool_outcome_never_excludes_road_or_claims_route(self):
         report = decision.outcome({'objects':{}},{'evidence':'Mock hypothesis test'},{'status':'unavailable'})
         self.assertEqual(report['excluded'],[])

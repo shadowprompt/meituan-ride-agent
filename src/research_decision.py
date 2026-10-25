@@ -2,7 +2,7 @@
 import re
 
 
-def spatial(archive, discoveries=()):
+def spatial(archive, discoveries=(), requests=()):
     objects = archive['objects']
     ways = [v['object'] for (kind, _), v in objects.items() if kind == 'way']
     result = []
@@ -37,7 +37,23 @@ def spatial(archive, discoveries=()):
             relations.append({'from_way': a['id'], 'to_way': b['id'],
                               'bbox_center_direction': ('north' if dy > 0 else 'south' if dy < 0 else '') + ('east' if dx > 0 else 'west' if dx < 0 else ''),
                               'screenshot_correspondence': 'unknown'})
-    return {'ways': result, 'relative_positions': relations, 'discovery_bounds': list(discoveries)[-15:],
+    # 只给已有返回ID的可执行建议，不自动执行或强制模型走唯一分支。
+    suggestions = []
+    for item in result:
+        if item['kind'] != 'road':
+            continue
+        if not item['coordinates_complete']:
+            suggestions.append({'action':'inspect_map_object','object_type':'way','object_id':item['id'],
+                'evidence':'Returned road lacks member coordinates; test local turn/relative-position hypothesis with way/full.'})
+        else:
+            connected = {n for c in item['connections'] for n in c['shared_node_ids']}
+            for node in dict.fromkeys([item['node_ids'][0], item['node_ids'][-1]] if item['node_ids'] else []):
+                if node not in connected:
+                    suggestions.append({'action':'inspect_map_object','object_type':'node','object_id':node,
+                        'evidence':'Returned road endpoint: test shared-node road continuation, not proximity. Select only if relevant to local screenshot turn.'})
+    completed = {(r.get('request',{}).get('object_type'), r.get('request',{}).get('object_id')) for r in requests if r.get('outcome') == 'succeeded'}
+    suggestions = [a for a in suggestions if (a['object_type'],a['object_id']) not in completed]
+    return {'ways': result, 'relative_positions': relations, 'suggested_queries': suggestions[:16], 'discovery_bounds': list(discoveries)[-15:],
             'limitations': 'WGS84 object facts only. Partial bbox is not full extent. Direction follows stored node order, not travel. No screen projection/registration; north-up screenshot orientation must be checked. Proximity never proves screenshot identity or connectivity.'}
 
 

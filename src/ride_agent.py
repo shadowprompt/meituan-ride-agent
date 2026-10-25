@@ -479,7 +479,7 @@ class APIPlanner:
             archive = research_archive(state, folder)
             current['research_version'] = archive['version']
             current['research_hypothesis'] = state.get('research_hypothesis')
-            current['research_spatial_evidence'] = research_decision.spatial(archive, state.get('research_discoveries', []))
+            current['research_spatial_evidence'] = research_decision.spatial(archive, state.get('research_discoveries', []), state.get('research_requests', []))
             current['research_focus'] = state.get('research_focus')
             current['research_last_outcome'] = state.get('research_last_outcome')
             current['research_review'] = state.get('research_review')
@@ -1059,7 +1059,7 @@ def run(state, folder, planner, budget=12, consent_map=False):
                             state['research_discoveries'] = (state.get('research_discoveries', []) + tool_result.get('discovery_bounds', []))[-15:]
                         state['research_last_outcome'] = research_decision.outcome(archive, action, tool_result)
                         tool_result['hypothesis_outcome'] = state['research_last_outcome']
-                        tool_result['spatial_evidence'] = research_decision.spatial(archive, state.get('research_discoveries', []))
+                        tool_result['spatial_evidence'] = research_decision.spatial(archive, state.get('research_discoveries', []), state.get('research_requests', []))
                     state['research_observed_version'] = archive['version']
                 else:
                     if state.get('research_observed_version') != archive['version']:
