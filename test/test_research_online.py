@@ -407,14 +407,16 @@ class OnlineTests(unittest.TestCase):
             def decide(inner,state,folder):
                 inner.index+=1
                 if inner.index==1: return self.search
-                return {'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Returned search ID; mock budget test'}
-        responses=[json.dumps([{'osm_type':'way','osm_id':5}]).encode()]+[json.dumps({'elements':[self.way]+self.nodes}).encode()]*6+[MapFetchError('secret',code='timeout')]
+                return {'action':'inspect_map_object','object_type':'way','object_id':inner.index+3,'evidence':'Returned search ID; mock budget test'}
+        # 七个不同返回ID，不能用重复已成功endpoint人为耗尽预算。
+        self.state['research_seen_ids'] = [['way',i] for i in range(5,12)]
+        responses=[json.dumps([{'osm_type':'way','osm_id':5}]).encode()]+[json.dumps({'elements':[{**self.way,'id':i}]+self.nodes}).encode() for i in range(5,11)]+[MapFetchError('secret',code='timeout')]
         with patch.object(live,'_get',side_effect=responses) as get:
             state=ride_agent.run(self.state,self.folder,Planner(),budget=12,consent_map=True)
         self.assertEqual(get.call_count,8)
         self.assertEqual(state['research_budget_used']['requests'],8)
         self.assertTrue(state['research_diagnostic']['terminal'])
-        self.assertEqual(state['research_object_count'],3)
+        self.assertEqual(state['research_object_count'],8)
         self.assertFalse(state.get('corridor_complete'))
         self.assertEqual(state['status'],'waiting_for_user')
 

@@ -2,6 +2,7 @@
 import hashlib
 import http.client
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -290,12 +291,22 @@ def execute(state, folder, action, budget, consent):
             if not isinstance(body,list) or len(body)>5:
                 fail('response_invalid')
             hits = []
+            discovery_bounds = []
             for item in body:
                 if not isinstance(item,dict) or item.get('osm_type') not in ('node','way','relation') or type(item.get('osm_id')) is not int or not 1 <= item['osm_id'] <= 999999999999999:
                     fail('response_invalid')
                 label = item.get('display_name','')
                 if not isinstance(label,str) or len(label)>4096:
                     fail('response_invalid')
+                # Nominatim bbox为南北西东；仅保留有效真实响应范围，不把中心点当路节点。
+                try:
+                    box = [float(v) for v in item.get('boundingbox', [])]
+                except (ValueError, TypeError, OverflowError):
+                    box = []
+                if (len(box) == 4 and all(math.isfinite(v) for v in box)
+                        and -85 <= box[0] <= box[1] <= 85 and -180 <= box[2] <= box[3] <= 180):
+                    discovery_bounds.append({'type':item['osm_type'],'id':item['osm_id'],
+                        'bbox_wgs84':[box[2],box[0],box[3],box[1]],'discovery_only':True})
                 hits.append({'object':{'type':item['osm_type'],'id':item['osm_id'],'tags':{'name':label}},'sources':[source], 'discovery_only':True})
             # 原始搜索响应仅本地留证；不把地点中心当作道路节点坐标。
             target = Path(folder)/'research'/('search-'+hashlib.sha256((source['url'] + source['sha256']).encode()).hexdigest()+'.json')
@@ -324,7 +335,7 @@ def execute(state, folder, action, budget, consent):
             else:
                 hits = [data['objects'][requested]] + [data['objects'][('node',n)] for n in data['objects'][requested]['object']['nodes'] if ('node',n) in data['objects']]
         record.update(outcome='succeeded', source=source, object_count=len(hits))
-        return {'tool':name,'status':'found' if hits else 'no_results','objects':hits,'version':state['research_version'], 'coordinate_system':'WGS84','verified':False,'original_gps':False,'source':source,'budget':dict(budget), 'notice':'Live public evidence. Search is discovery only; relations cannot be inspected. Missing coordinates require way/full. Screenshot identity/traversal remains unverified. © OpenStreetMap contributors https://www.openstreetmap.org/copyright'}
+        return {'tool':name,'status':'found' if hits else 'no_results','objects':hits,'discovery_bounds':discovery_bounds if name == 'search_map_evidence' else [],'version':state['research_version'], 'coordinate_system':'WGS84','verified':False,'original_gps':False,'source':source,'budget':dict(budget), 'notice':'Live public evidence. Search is discovery only; relations cannot be inspected. Missing coordinates require way/full. Screenshot identity/traversal remains unverified. © OpenStreetMap contributors https://www.openstreetmap.org/copyright'}
     except MapFetchError as exc:
         record.update(outcome='failed',reason_code=exc.code)
         if name == 'search_map_evidence':
