@@ -72,16 +72,16 @@ class CheckpointContinueTests(recovery.ResearchReviewRecoveryTests):
         self.assertIsNone(state['research_progress']['next_local_action'])
         self.assertEqual(state['status'],'paused')
 
-    def test_repeated_checkpoints_consume_original_closure_limit(self):
+    def test_repeated_checkpoints_stop_on_no_progress_not_save_count(self):
         self.prefix()
         with patch.object(live,'_get') as get:
             state,payloads = self.model_run(lambda n:self.checkpoint_action(),consent=True)
         get.assert_not_called()
-        self.assertEqual(len(payloads),2)
-        self.assertEqual(state['research_progress']['checkpoints'],2)
-        self.assertEqual(state['research_progress']['no_progress_total'],2)
-        self.assertEqual(state['research_progress']['blocked_reason'],'checkpoint_limit')
-        self.assertEqual(state['research_plan']['counts']['closure'],2)
+        self.assertEqual(len(payloads),3)
+        self.assertEqual(state['research_progress']['checkpoints'],3)
+        self.assertEqual(state['research_progress']['no_progress_total'],3)
+        self.assertEqual(state['research_progress']['blocked_reason'],'no_progress_limit')
+        self.assertEqual(state['research_plan']['counts']['closure'],0)
         self.assertFalse(state.get('artifacts'))
 
     def test_repeated_observations_and_hypotheses_have_finite_no_progress_stop(self):
@@ -106,7 +106,7 @@ class CheckpointContinueTests(recovery.ResearchReviewRecoveryTests):
             state,_=self.model_run(decide,consent=False)
         get.assert_not_called()
         self.assertEqual(state['research_review']['result'],'ambiguous')
-        self.assertEqual(state['research_progress']['blocked_reason'],'checkpoint_limit')
+        self.assertEqual(state['research_progress']['blocked_reason'],'no_executable_local_action')
         self.assertIn(None,state['research_hypothesis']['ordered_roads'])
         self.assertFalse(state.get('artifacts'))
         self.assertEqual(state['research_budget_used'],{'requests':7,'searches':3})
@@ -125,7 +125,7 @@ class CheckpointContinueTests(recovery.ResearchReviewRecoveryTests):
         self.assertNotIn('closure_local_only',str(state['messages']))
         self.assertEqual(state['research_budget_used'],{'requests':8,'searches':3})
         self.assertEqual(state['research_plan']['counts']['network'],8)
-        self.assertEqual(state['research_plan']['counts']['closure'],2)
+        self.assertEqual(state['research_plan']['counts']['closure'],0)
         self.assertTrue(state['research_progress']['resume_requires_fresh_upload_consent'])
 
     def test_rephrased_identical_ordered_hypothesis_not_progress(self):
@@ -159,9 +159,9 @@ class CheckpointContinueTests(recovery.ResearchReviewRecoveryTests):
         with patch.object(live,'_get') as get:
             state,payloads=self.model_run(decide,consent=False)
         get.assert_not_called()
-        self.assertEqual(len(payloads),3)
-        self.assertEqual(state['research_plan']['model_calls'],14)
-        self.assertEqual(state['research_progress']['checkpoints'],2)
-        self.assertEqual(state['research_progress']['blocked_reason'],'checkpoint_limit')
+        self.assertEqual(len(payloads),4)
+        self.assertEqual(state['research_plan']['model_calls'],15)
+        self.assertEqual(state['research_progress']['checkpoints'],3)
+        self.assertEqual(state['research_progress']['blocked_reason'],'no_executable_local_action')
         self.assertEqual(state['research_plan']['counts']['focus'],1)
         self.assertEqual(state['research_budget_used'],{'requests':7,'searches':3})

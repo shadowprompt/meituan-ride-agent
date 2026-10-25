@@ -789,7 +789,7 @@ function schedulePoll(d){
 function lockRunning(){if(executionBusy)for(const b of document.querySelectorAll('button'))if(b.id!=='refresh')b.disabled=true;}
 // 用当前服务端事实概括缺口；缺地图时不向普通用户堆叠 JSON 操作要求。
 function resultSummary(d){if(d.map_provider==='research'&&d.research_online===false)return '此任务为CLI离线快照回放，未执行实时搜索。请新建自主调研任务；原档保留审计。';if(d.research_diagnostic&&d.status!=='needs_confirmation')return (d.question||('局部调研请求失败：'+JSON.stringify(d.research_diagnostic.request)+' ['+d.research_diagnostic.reason_code+']；已成功证据保留，搜索候选不是道路几何；未重试，目标尚未完成。'))+(!d.research_object_count&&d.research_seen_ids?.length?' 已保留 '+d.research_seen_ids.length+' 个搜索候选 ID；尚未核查对象几何，归档数为0属于正常搜索阶段，不是额外错误。':'');
- if(d.research_progress&&['waiting_for_user','paused'].includes(d.status))return (d.question||'调研进度已保存；未导出完整路线。')+' '+(d.research_progress.can_resume&&!d.research_progress.no_resume?'仅在有新证据或具体待执行动作时人工重新授权；不会自动续跑，不要求追加地图授权。':'本任务模型或收尾动作达到硬上限；继续按钮不会重置或自动重试。');
+ if(d.research_progress&&['waiting_for_user','paused'].includes(d.status))return (d.question||'调研进度已保存；未导出完整路线。')+' '+(d.research_progress.can_resume&&!d.research_progress.no_resume?'仅在有新证据或具体待执行动作时人工重新授权；不会自动续跑，不要求追加地图授权。':'本任务模型调用达到硬上限；继续按钮不会重置或自动重试。');
  if(d.places)return d.question||d.places.notice;
  if(d.map_provider==='osm')return '旧OSM任务仅只读恢复，联网已停用。若需继续，请显式选择自主调研、OSM中转或高德兼容：重新勾选本次地图查询与模型上传授权后点击“授权后继续识路 / 查询地图”。不会自动迁移、重放或上传；旧道路产物保留审计；中转支持WGS84候选，高德仅GCJ-02位置线索。';
  if(['queued','running'].includes(d.execution_state))return '正在识别，请稍候；只刷新状态，不会重复上传或重跑任务。本轮仅在明确地图查询授权下联网，不保证输出经纬度。';

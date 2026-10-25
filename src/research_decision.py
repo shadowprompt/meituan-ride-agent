@@ -126,6 +126,51 @@ def planning_evidence(state, archive, consent=False):
             'notice':'Candidate evidence only. Map-relative positions are not screenshot positions without independent registration. Local comparison and network plans are separate; real seen IDs, fresh separate consent, deduplication and all existing gates still apply.'}
 
 
+def node_geometry(way, objects, requests, connections):
+    """Consumable real coordinates in stored order, not inferred junctions or projection."""
+    import math
+    refs = way['nodes']
+    available = [objects[('node', n)]['object'] for n in refs if ('node', n) in objects]
+    if not available:
+        return {'nodes':[], 'node_summary_truncated':False}
+    west, south = min(p['lon'] for p in available), min(p['lat'] for p in available)
+    east, north = max(p['lon'] for p in available), max(p['lat'] for p in available)
+    cx, cy = (west+east)/2, (south+north)/2
+    scale_x, scale_y = 111320*math.cos(math.radians(cy)), 111320
+    checked = {r.get('request',{}).get('object_id') for r in requests
+               if r.get('tool') == 'inspect_map_object' and r.get('outcome') == 'succeeded'
+               and r.get('request',{}).get('object_type') == 'node'}
+    nodes = []
+    for i, ident in enumerate(refs[:256]):
+        p = objects.get(('node',ident),{}).get('object')
+        if not p:
+            nodes.append({'id':ident,'index':i,'coordinates':'missing'})
+            continue
+        turn = None
+        if 0 < i < len(refs)-1:
+            a = objects.get(('node',refs[i-1]),{}).get('object')
+            b = objects.get(('node',refs[i+1]),{}).get('object')
+            if a and b:
+                u = ((p['lon']-a['lon'])*scale_x,(p['lat']-a['lat'])*scale_y)
+                v = ((b['lon']-p['lon'])*scale_x,(b['lat']-p['lat'])*scale_y)
+                if math.hypot(*u) and math.hypot(*v):
+                    turn = round(math.degrees(math.atan2(u[0]*v[1]-u[1]*v[0],u[0]*v[0]+u[1]*v[1])),1)
+        nodes.append({'id':ident,'index':i,'wgs84':[p['lon'],p['lat']],
+            'offset_from_way_bbox_center_m':[round((p['lon']-cx)*scale_x,1),round((p['lat']-cy)*scale_y,1)],
+            'role_in_returned_way':'endpoint' if i in (0,len(refs)-1) else 'interior',
+            'bend_degrees':turn, 'tags':p.get('tags',{}),
+            'known_connected_way_ids':[c['way_id'] for c in connections if ident in c['shared_node_ids']],
+            'parent_membership':'queried' if ident in checked else 'unknown_not_queried',
+            'junction_status':'shared_node_proven' if any(ident in c['shared_node_ids'] for c in connections) else 'unknown',
+            'query_selection':'not_recommended_by_default; require independent locality and specific image turn/relative-position rationale'})
+    return {'nodes':nodes,'node_summary_truncated':len(refs)>256,
+        'node_count':len(refs),'offset_rule':'[east,north] meters from returned way bbox center; map-internal only',
+        'connection_test':{'question':'At a spatially justified returned node, does node/ways reveal a distinct connecting road compatible with the separately observed transverse/turning image leg?',
+            'required_rationale':'Explain why this node location or bend discriminates competing screenshot structures after independent locality comparison; endpoint or crossing tag alone is insufficient. Reject remote/incompatible nodes without querying.',
+            'falsifier':'No distinct road parent, or its full geometry has incompatible direction/relative position: reject this connection hypothesis, not all nearby roads.',
+            'limits':'node/ways proves membership only; connecting way/full is needed for missing coordinates. A tagged crossing is not proof of a junction. No automatic query or screenshot registration.'}}
+
+
 def spatial(archive, discoveries=(), requests=()):
     objects = archive['objects']
     ways = [v['object'] for (kind, _), v in objects.items() if kind == 'way']
@@ -150,6 +195,13 @@ def spatial(archive, discoveries=(), requests=()):
                 if other['id'] != way['id'] and other.get('tags', {}).get('highway') and other.get('tags', {}).get('area') != 'yes' and shared:
                     item['connections'].append({'way_id': other['id'], 'name': other.get('tags', {}).get('name'),
                                                 'shared_node_ids': shared, 'needs_full': any(('node', n) not in objects for n in other['nodes'])})
+        if road:
+            item.update(node_geometry(way, objects, requests, item['connections']))
+        if item['bbox_wgs84']:
+            # Independent search bounds compared to actual road extent, never pixels.
+            bounds = {'type':'way','id':way['id'],'query':'returned road geometry',
+                      'bbox_wgs84':item['bbox_wgs84']}
+            item['discovery_relations'] = discovery_comparisons([bounds]+list(discoveries))[:len(discoveries)]
         result.append(item)
     # 仅比较真实 bbox 中心的地理方位，不虚构屏幕投影、距离或道路相接。
     relations = []
@@ -161,24 +213,17 @@ def spatial(archive, discoveries=(), requests=()):
             relations.append({'from_way': a['id'], 'to_way': b['id'],
                               'bbox_center_direction': ('north' if dy > 0 else 'south' if dy < 0 else '') + ('east' if dx > 0 else 'west' if dx < 0 else ''),
                               'screenshot_correspondence': 'unknown'})
-    # 只给已有返回ID的可执行建议，不自动执行或强制模型走唯一分支。
+    # Nodes are selectable evidence, NOT default endpoint-crawl recommendations.
+    # A model must supply the independently supported spatial/turn discriminator.
     suggestions = []
     for item in result:
-        if item['kind'] != 'road':
-            continue
-        if not item['coordinates_complete']:
+        if item['kind'] == 'road' and not item['coordinates_complete']:
             suggestions.append({'action':'inspect_map_object','object_type':'way','object_id':item['id'],
                 'evidence':'Returned road lacks member coordinates; test local turn/relative-position hypothesis with way/full.'})
-        else:
-            connected = {n for c in item['connections'] for n in c['shared_node_ids']}
-            for node in dict.fromkeys([item['node_ids'][0], item['node_ids'][-1]] if item['node_ids'] else []):
-                if node not in connected:
-                    suggestions.append({'action':'inspect_map_object','object_type':'node','object_id':node,
-                        'evidence':'Returned road endpoint: test shared-node road continuation, not proximity. Select only if relevant to local screenshot turn.'})
     completed = {(r.get('request',{}).get('object_type'), r.get('request',{}).get('object_id')) for r in requests if r.get('outcome') == 'succeeded'}
     suggestions = [a for a in suggestions if (a['object_type'],a['object_id']) not in completed]
     return {'ways': result, 'relative_positions': relations, 'suggested_queries': suggestions[:16], 'discovery_bounds': list(discoveries)[-15:],
-            'limitations': 'WGS84 object facts only. Partial bbox is not full extent. Direction follows stored node order, not travel. No screen projection/registration; north-up screenshot orientation must be checked. Proximity never proves screenshot identity or connectivity.'}
+            'limitations': 'WGS84 object facts only. Partial bbox is not full extent. Direction follows stored node order, not travel. No screen projection/registration; north-up screenshot orientation must be checked. Proximity never proves screenshot identity or connectivity. A rejected ridden road can remain a location reference, not an automatic node-query seed.'}
 
 
 def conflict(state, action):
@@ -269,7 +314,16 @@ def gate(state, archive, action):
 def outcome(archive, action, result):
     ways = [v['object'] for v in result.get('objects', []) if v['object'].get('type') == 'way' and not v.get('discovery_only')]
     roads = [w['id'] for w in ways if w.get('tags', {}).get('highway') and w.get('tags', {}).get('area') != 'yes']
-    return {'query_purpose': action.get('evidence'),
+    hits = result.get('objects', [])
+    discovery = [v for v in hits if v.get('discovery_only')]
+    road_hits = [v['object']['id'] for v in discovery if v.get('candidate_kind') == 'road_candidate']
+    search_feedback = None
+    if action.get('action') == 'search_map_evidence':
+        search_feedback = {'status':'road_candidates' if road_hits else 'no_road_candidates_returned',
+            'road_candidate_ids':road_hits,'returned_count':len(hits),
+            'name_reading':'unconfirmed', 'road_existence':'not_excluded',
+            'next_test':'Use returned non-road bounds only as locality clues. Recheck ambiguous image text or a distinct independent anchor; do not fetch parcel nodes. If searches are exhausted, a spatially justified seen road connection may be tested; otherwise stop with this evidence gap. No fuzzy-name road lookup or area/intersection search tool exists.'}
+    return {'query_purpose': action.get('evidence'), 'search_feedback':search_feedback,
             'supported': {'returned_road_ids': roads, 'object_facts_only': True},
             'excluded': ['non-road objects cannot establish a road intersection'] if ways and not roads else [],
             'unknown': ['screenshot identity', 'ordered traversal including turnbacks', 'unreturned roads'],

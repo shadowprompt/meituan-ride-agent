@@ -181,7 +181,12 @@ Location notes are versioned model claims: stale notes are history, not current 
 located truth. Consult current requests and returned geometry; never promote status automatically.
 Before selecting way/full explain why that particular candidate tests the independently
 localized area and route structure. Before node/ways explain the relevant junction, not
-just an arbitrary endpoint. Map requests are scarce: reserve them for route-bearing ways,
+just an arbitrary endpoint. Read known_geometry.nodes: actual coordinates, bbox-center offsets,
+bends, tags and unqueried parent membership. Excluding a north-south road as the ridden
+transverse leg does NOT exclude it as a location reference or connection-test seed.
+Select a node only when independently supported locality AND a specific relative-position/
+turn hypothesis justify it; state which connecting direction would support or falsify it.
+Reject incompatible nodes without querying. Endpoint/crossing tags alone prove no junction. Map requests are scarce: reserve them for route-bearing ways,
 not multiple remote segments of a background road. A miss, wrong anchor or distant candidate
 means switch to another visible independent clue, not crawl the wrong road or require user IDs.
 A search-only relation can still help locate through its bounds; it is not inspectable.
@@ -209,7 +214,8 @@ MAP_MIGRATION_NOTICE = ('地图服务切换须显式选择 --map-provider resear
 PROMPT += """
 Research-only bounded plan: maximum 28 model attempts per task across resumes, NOT 12 per invocation.
 Hard categories: observe 6, focus 4, network actions 8, local hypothesis/build/review 9,
-correction 2, closure 2. Network authorization remains at most 8 requests/3 searches per task;
+correction 2, terminal ask/deliver closure 2. Checkpoint saves consume model attempts and
+no-progress accounting, not terminal closure slots. Network authorization remains at most 8 requests/3 searches per task;
 wall-clock limits unchanged. CURRENT_STAGE_STATE.research_plan shows exact usage.
 Last 6 model attempts are local-only closure: use already returned facts, record hypothesis
 and review; build/deliver only when existing strict evidence gates pass. Otherwise call
@@ -223,17 +229,20 @@ observe_region/research_focus/research_hypothesis/review_research/inspect_roads/
 System checks remaining budgets and duplicate evidence before accepting it and returns the
 accepted next action plus evidence_summary. Follow that checked task, not a contradictory next step.
 Same version/region cannot be reobserved by changing reason. Same version/ordered_roads or
-review conclusion is not new progress. Checkpoints count against existing closure=2, and
-three consecutive duplicate/checkpoint turns stop unresolved. No budget increases.
+review conclusion is not new progress. Three consecutive duplicate/checkpoint turns without progress stop unresolved.
+Saving twice is not a model limit; no budgets are reset. No budget increases.
 A checkpoint never revokes CURRENT fresh map consent. With request capacity and a real returned
 road seed, necessary nonduplicate way/full or road node/ways remain available before closure.
-A reason-only checkpoint can receive ONE planner_repair from actionable current evidence,
+A reason-only checkpoint can receive one planner_repair per distinct evidence state,
 not an invented focus or permission. Read its structured planning_evidence and next_planner_task:
 choose a concrete different relevant local region/comparison OR inspect an actually returned
 uninspected candidate way/full or known road node/ways if network_allowed_this_invocation=true.
 Search exhaustion does not exhaust inspect quota. Fresh independent map consent, real seen IDs,
 request/category budgets, deduplication, fixed endpoints and local-only closure remain mandatory.
-Never replay authorization or requests. A second no-information checkpoint stops within closure=2.
+Never replay authorization or requests. Repeated no-information checkpoints stop; distinct executable
+work with current consent can continue within the unchanged model/category/request limits.
+Optionally supply next_action as a complete inspect_map_object JSON plus specific spatial
+hypothesis and falsifier in evidence; this does not authorize or automatically execute it.
 Protect the three searches: prefer independent discriminating visible clues, not same-name
 region changes. If a region retry is necessary, explain its independent visible evidence.
 No mandatory extra focus or duplicate crop for an already documented comparison.
@@ -1009,7 +1018,7 @@ def run(state, folder, planner, budget=None, consent_map=False):
                     state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps({'tool':name,'status':'closure_local_only','next_step':'No more network actions in this task phase. Use existing evidence for research_hypothesis/review_research/inspect_roads/build_corridor, or research_checkpoint; preserve unknowns.'})})
                     save(state, folder)
                     continue
-                if not research_plan.charge(state, kind):
+                if name != 'research_checkpoint' and not research_plan.charge(state, kind):
                     plan['closure_reason'] = kind+'_action_limit'
                     if kind != 'closure' and research_plan.charge(state, 'correction'):
                         state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps({'tool':name,'status':'stage_action_limit','blocked_reason':plan['closure_reason'],'next_step':'No action executed. Close locally using remaining categories or research_checkpoint; never retry exhausted category.'})})
@@ -1019,8 +1028,8 @@ def run(state, folder, planner, budget=None, consent_map=False):
                     save(state, folder)
                     return state
             if name == 'research_checkpoint' and planned_research:
-                if set(action) - {'action','reason','next_local_action'} or 'reason' not in action:
-                    raise ValueError('Research checkpoint requires reason and optional concrete local action')
+                if set(action) - {'action','reason','next_local_action','next_action'} or 'reason' not in action:
+                    raise ValueError('Research checkpoint requires reason and optional concrete next action')
                 route_review.text(action['reason'], 2000)
                 progress = research_plan.checkpoint(state, 'model_checkpoint', action, allow_continue=True,
                     planning=research_decision.planning_evidence(state, research_archive(state, folder), consent_map))

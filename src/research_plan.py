@@ -15,14 +15,29 @@ def ledger(state):
             calls += 1
             try:
                 action = json.loads(message['content'])
-                counts[category(action.get('action'))] += 1
+                if action.get('action') != 'research_checkpoint':
+                    counts[category(action.get('action'))] += 1
             except (ValueError, KeyError, TypeError):
                 counts['correction'] += 1
         if 'research_budget_used' in state:
             counts['network'] = state['research_budget_used'].get('requests', 0)
         state['research_plan'] = {'model_calls': calls, 'counts': counts,
-            'limits':dict(LIMITS), 'model_limit':MAX_MODEL_CALLS, 'phase':'research'}
-    return state['research_plan']
+            'limits':dict(LIMITS), 'model_limit':MAX_MODEL_CALLS, 'phase':'research',
+            'checkpoint_save_accounting':True}
+    plan = state['research_plan']
+    if not plan.get('checkpoint_save_accounting'):
+        # One-time historical reclassification, not a reset of terminal attempts.
+        import json
+        saves = 0
+        for message in state.get('messages',[]):
+            if message.get('role') == 'assistant':
+                try:
+                    saves += json.loads(message.get('content','')).get('action') == 'research_checkpoint'
+                except (ValueError, TypeError, AttributeError):
+                    pass
+        plan['counts']['closure'] = max(0, plan['counts']['closure']-saves)
+        plan['checkpoint_save_accounting'] = True
+    return plan
 
 
 def category(name):
@@ -196,6 +211,34 @@ def local_next(state, proposed=None):
     return None
 
 
+def network_next(state, proposed, planning):
+    """Validate a proposed next action, never execute it or confer consent."""
+    if not planning or not planning.get('network_allowed_this_invocation') or not isinstance(proposed,dict):
+        return None
+    if proposed.get('action') != 'inspect_map_object' or set(proposed) != {'action','object_type','object_id','evidence'}:
+        return None
+    if proposed['object_type'] not in ('node','way') or type(proposed['object_id']) is not int:
+        return None
+    if [proposed['object_type'],proposed['object_id']] not in state.get('research_seen_ids',[]):
+        return None
+    if not isinstance(proposed['evidence'],str) or not 1 <= len(proposed['evidence'].strip()) <= 2000:
+        return None
+    if any(r.get('tool') == 'inspect_map_object' and r.get('request') ==
+           {'object_type':proposed['object_type'],'object_id':proposed['object_id']}
+           for r in state.get('research_requests',[])):
+        return None
+    if proposed['object_type'] == 'way' and any(
+            d.get('type') == 'way' and d.get('id') == proposed['object_id']
+            and d.get('candidate_kind') == 'non_road' for d in state.get('research_discoveries',[])):
+        return None
+    geometry = planning.get('known_geometry',[])
+    if proposed['object_type'] == 'node' and not any(
+            w.get('kind') == 'road' and proposed['object_id'] in w.get('node_ids',[]) for w in geometry):
+        return None
+    # Actual executor rechecks provenance, road parent, schema, consent and budgets.
+    return proposed
+
+
 def checkpoint(state, reason, action=None, allow_continue=False, planning=None):
     """保存与停止分离；仅当前调用授权内继续，不触发resume或网络动作。"""
     plan = ledger(state)
@@ -204,30 +247,36 @@ def checkpoint(state, reason, action=None, allow_continue=False, planning=None):
         c['checkpoints'] += 1
         c['no_progress_total'] = c.get('no_progress_total', 0) + 1
         c['no_progress'] += 1  # checkpoint itself is never evidence/progress
-    proposed = action.get('next_local_action') if action else None
+    proposed = (action.get('next_action') or action.get('next_local_action')) if action else None
     next_action = local_next(state, proposed) if reason == 'model_checkpoint' else None
-    # 已有focus并不代表所有候选已核查。reason-only旧协议给一次真实证据规划修复，
+    if reason == 'model_checkpoint':
+        next_action = next_action or network_next(state, proposed, planning)
+    # 已有focus并不代表所有候选已核查。reason-only协议按不同证据给一次规划修复，
     # 不生成focus/区域/配准，也不占用额外closure或扩大任何预算。
+    evidence_key = [state.get('research_version'), len(c['observations']), len(c['decisions']),
+                    len(state.get('research_requests',[]))]
+    fresh_repair = evidence_key not in plan.get('planner_repair_evidence',[])
     repair = (reason == 'model_checkpoint' and not proposed and next_action is None
               and bool(state.get('research_focus')) and planning is not None
-              and plan.get('planner_repairs', 0) < 1 and plan['model_calls'] < MAX_MODEL_CALLS
+              and fresh_repair and plan['model_calls'] < MAX_MODEL_CALLS
               and (planning.get('uninspected_candidates') or planning.get('known_geometry')))
     # 有当前授权及真实可执行对象时，保存进度不能把阶段永久降成local-only。
     network_repair = (reason == 'model_checkpoint' and not proposed and next_action is None
                       and not state.get('research_review')
                       and planning and planning.get('network_allowed_this_invocation')
-                      and planning.get('network_suggestions') and plan.get('planner_repairs',0) < 1)
+                      and planning.get('network_suggestions') and fresh_repair)
     repair = repair or network_repair
     if planning and planning.get('road_seed_plan',{}).get('stop_without_road_seed'):
         next_action, repair = None, False
     continuing = (allow_continue and (next_action is not None or repair) and c['no_progress'] < 3
-                  and plan['counts']['closure'] < LIMITS['closure'])
+                  and plan['model_calls'] < MAX_MODEL_CALLS)
     if continuing and repair:
         plan['planner_repairs'] = plan.get('planner_repairs', 0) + 1
+        plan.setdefault('planner_repair_evidence',[]).append(evidence_key)
     blocked = None if continuing else reason
     if reason == 'model_checkpoint' and not continuing:
         blocked = ('no_progress_limit' if c['no_progress'] >= 3 else
-                   'checkpoint_limit' if plan['counts']['closure'] >= LIMITS['closure'] else
+                   'task_model_limit' if plan['model_calls'] >= MAX_MODEL_CALLS else
                    'no_executable_local_action')
     focus = state.get('research_focus', {})
     progress = {'blocked_reason': blocked, 'checkpoint_reason': reason, 'blocked_action': action,
@@ -240,15 +289,16 @@ def checkpoint(state, reason, action=None, allow_continue=False, planning=None):
         'review':state.get('research_review'), 'recovery':state.get('research_recovery'),
         'last_outcome':state.get('research_last_outcome'), 'failures':state.get('research_failures', []),
         'unresolved':['screenshot correspondence', 'ordered traversal', 'unknown legs'],
-        'next_local_action':next_action if continuing else None,
+        'next_action':next_action if continuing else None,
+        'next_local_action':next_action if continuing else None,  # backward-compatible result field
         'planner_repair':bool(continuing and repair),
         'continuation_scope':('bounded_planning_with_current_consent' if planning and planning.get('network_allowed_this_invocation') else 'local_only') if continuing else None,
         'planning_evidence':planning if continuing else None,
         'next_planner_task':('Choose one concrete nonduplicate action using the structured evidence. '
             'An existing focus is not a completed investigation. Inspect an actually seen candidate way/full or known road node/ways only if network_allowed_this_invocation; otherwise compare cached geometry or choose a DIFFERENT relevant screenshot region. '
-            'Do not invent focus, coordinates, screenshot positions or fill unknown legs. No new evidence means stop at the next checkpoint.') if continuing and repair else None,
-        'can_resume':plan['model_calls'] < MAX_MODEL_CALLS and plan['counts']['closure'] < LIMITS['closure'],
-        'no_resume':plan['model_calls'] >= MAX_MODEL_CALLS or plan['counts']['closure'] >= LIMITS['closure'],
+            'Do not invent focus, coordinates, screenshot positions or fill unknown legs. No new evidence means stop at the next checkpoint; a save count is not a model limit.') if continuing and repair else None,
+        'can_resume':plan['model_calls'] < MAX_MODEL_CALLS,
+        'no_resume':plan['model_calls'] >= MAX_MODEL_CALLS,
         'resume_requires_fresh_upload_consent':True, 'verified':False, 'original_gps':False,
         'evidence_summary':{'observed_regions':c['observations'], 'focus':state.get('research_focus'),
                             'ordered_hypothesis':state.get('research_hypothesis'),
@@ -262,7 +312,7 @@ def checkpoint(state, reason, action=None, allow_continue=False, planning=None):
         # 没有真正的用户决策问题，不假装等待用户填写道路；paused是显式未收敛。
         state.update(status='waiting_for_user' if reason == 'specific_user_question' else 'paused',
             verified=False, original_gps=False,
-            question=f"调研未收敛，进度已保存；停止原因：{blocked}（保留动作/模型硬上限）。地图请求 {8-progress['network_requests_remaining']}/8（{'请求额度已用尽' if progress['network_requests_remaining'] == 0 else '请求仍有余量，非请求耗尽'}；搜索 {state.get('research_budget_used', {}).get('searches', 0)}/3）。未知路段保留，未导出完整路线；不会自动续授权或重放任务。")
+            question=f"调研未收敛，进度已保存；停止原因：{blocked}（{'模型硬上限已耗尽' if plan['model_calls'] >= MAX_MODEL_CALLS else '未耗尽模型硬上限；无可执行进展或相应动作受限'}）。地图请求 {8-progress['network_requests_remaining']}/8（{'请求额度已用尽' if progress['network_requests_remaining'] == 0 else '请求仍有余量，非请求耗尽'}；搜索 {state.get('research_budget_used', {}).get('searches', 0)}/3）。未知路段保留，未导出完整路线；不会自动续授权或重放任务。")
     if not continuing and state.get('research_failures'):
         import json
         state['question'] += ' 局部失败记录：' + json.dumps([

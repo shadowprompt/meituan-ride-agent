@@ -43,10 +43,10 @@ class PlannerRepairTests(recovery.ResearchReviewRecoveryTests):
             state,payloads = self.model_run(decide,consent=True)
         self.assertEqual(get.call_count,1)
         self.assertIn('/way/9/full.json',get.call_args.args[1])
-        self.assertEqual(len(payloads),3)
+        self.assertEqual(len(payloads),4)
         self.assertEqual(state['research_budget_used'],{'requests':5,'searches':3})
-        self.assertEqual(state['research_progress']['blocked_reason'],'checkpoint_limit')
-        self.assertEqual(state['research_plan']['planner_repairs'],1)
+        self.assertEqual(state['research_progress']['blocked_reason'],'no_executable_local_action')
+        self.assertEqual(state['research_plan']['planner_repairs'],2)
         self.assertFalse(state.get('artifacts'))
         self.assertFalse(state['verified'])
 
@@ -61,7 +61,7 @@ class PlannerRepairTests(recovery.ResearchReviewRecoveryTests):
         with patch.object(live,'_get') as get:
             state,payloads = self.model_run(decide,consent=False)
         get.assert_not_called()
-        self.assertEqual(len(payloads),3)
+        self.assertEqual(len(payloads),4)
         self.assertEqual(state['research_plan']['counts']['observe'],4)
         self.assertIn(None,state['research_hypothesis']['ordered_roads'])
         self.assertFalse(state.get('artifacts'))
@@ -73,10 +73,10 @@ class PlannerRepairTests(recovery.ResearchReviewRecoveryTests):
             state,payloads = self.model_run(lambda n:self.checkpoint(),consent=True)
         get.assert_not_called()
         self.assertEqual(len(payloads),2)
-        self.assertEqual(state['research_plan']['counts']['closure'],2)
+        self.assertEqual(state['research_plan']['counts']['closure'],0)
         self.assertEqual(state['research_plan']['planner_repairs'],1)
         self.assertEqual(state['research_focus'],old)
-        self.assertEqual(state['research_progress']['blocked_reason'],'checkpoint_limit')
+        self.assertEqual(state['research_progress']['blocked_reason'],'no_executable_local_action')
 
     def test_repair_cannot_execute_network_without_consent_or_over_request_limit(self):
         for consent, used in ((False,4),(True,8)):

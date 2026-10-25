@@ -167,6 +167,10 @@ class LocalizationTests(recovery.ResearchReviewRecoveryTests):
             state={'messages':[],'research_budget_used':{'requests':requests,'searches':2}}
             research_plan.ledger(state)['counts']['closure']=2
             progress=research_plan.checkpoint(state,'model_checkpoint')
+            self.assertFalse(progress['no_resume']);self.assertTrue(progress['can_resume'])
+            self.assertNotIn('模型硬上限已耗尽',state['question'])
+            research_plan.ledger(state)['model_calls']=28
+            progress=research_plan.checkpoint(state,'task_model_limit')
             self.assertTrue(progress['no_resume']);self.assertFalse(progress['can_resume'])
             self.assertIn('请求额度已用尽' if requests==8 else '请求仍有余量',state['question'])
             self.assertIn('搜索 2/3',state['question'])

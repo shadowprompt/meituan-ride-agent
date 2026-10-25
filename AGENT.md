@@ -180,3 +180,11 @@ API 可在当前中心线生成后调用 `observe_holes`，读取稳定孔编号
 ### 近似定位（与严格配准隔离）
 
 `start --goal approximate` 或 `resume --local-only --approximate-anchors-file anchors.json` 选择带来源和不确定度的近似定位。锚点格式、真实输入要求和网页步骤见 README；至少3个不共线的 WGS84/local_mask 对应点。模型不能传入或创建锚点，来源 URL 仅记录不访问。产物为 `approximation/{approximation.json,approximate-segments.geojson}`；所有层级明确 approximate=true、verified=false、original_gps=false、navigable=false，保留误差、声明不确定度及凸包外推统计。绝不置位严格配准/道路匹配准入；严格3+2/35米门槛及原同意步骤不变。无真实证据只能请求锚点，禁止拿合成测试数冒充真实定位。
+
+## 节点连接证据与保存语义（8d470d38 修复）
+
+调研失败的真实上下文核查、节点几何摘要及回归边界见
+[`docs/RESEARCH_GEOMETRY_CONTEXT.md`](docs/RESEARCH_GEOMETRY_CONTEXT.md)。
+`research_checkpoint` 是保存，不是终止槽计数；仍受原 28 模型尝试、连续无进展与全部网络/观察限制。
+可以用 `next_action` 提出当前授权内的具体已见对象核查，必须说明独立定位与转折/相对位置的可证伪理由；不会自动执行或续授权。
+南北背景道路不能直接填进横向骑行序列，但有依据时可作定位/连接检验参照；没有依据不能默认沿端点爬图。
