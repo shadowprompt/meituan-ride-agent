@@ -166,7 +166,7 @@ python src/ride_agent.py resume --task-dir outputs/agent-demo --answer-file exam
 ```
 
 此 demo 是固定流程编排，不是视觉模型识别。真实模式支持 OpenAI 兼容视觉 API，必须配置模型并逐次明确同意上传截图/对话；真实供应商尚未联调。详见 [AGENT.md](AGENT.md)。
-当前 Agent 只集成提色与中心线工具，尚未集成配准、地图搜索或道路匹配，不是完整自动路线识别产品。
+当前 Agent 已集成提色、中心线、用户控制点配准与受控道路候选匹配，但不自动地理定位，不是完整自动路线识别产品。已有像素任务（包括模型复核报错的 API 任务）可通过 `resume --local-only --controls-file ...` 确定性导出未排序 WGS84 分段，无需模型复核；详见 [本地经纬度交付](DELIVERY.md#无需模型已有像素任务的本地经纬度交付)。
 全量测试 33 项（本地/离线）；不代表模型识别准确率。
 
 ### Agent 人工配准闭环

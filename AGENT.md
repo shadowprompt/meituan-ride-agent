@@ -95,7 +95,7 @@ python src/ride_agent.py resume --task-dir outputs/registration-agent --answer-f
 python src/ride_agent.py resume --task-dir outputs/registration-agent --controls-file examples/synthetic-controls.json
 ```
 
-第二步应暂停请求控制点，第三步自动配准并交付额外的 `registration/registration.json` 与 `registration/registered-segments.geojson`。控制点必须由用户通过文件提供；模型动作不能提交或捏造控制点。文件内容仍需人工确认，系统不能验证地标真实性。真实模式每一步仍需 `--consent-upload`；本地报告误差可进入模型上下文。
+第二步应暂停请求控制点，第三步自动配准并交付额外的 `registration/registration.json` 与 `registration/registered-segments.geojson`。控制点必须由用户通过文件提供；模型动作不能提交或捏造控制点。文件内容仍需人工确认，系统不能验证地标真实性。调用真实模型的步骤仍需 `--consent-upload`；已有像素证据的本地配准可用 `--local-only`，无需模型或上传同意。详见 [本地经纬度交付步骤](DELIVERY.md#无需模型已有像素任务的本地经纬度交付)。本地误差报告可在以后授权的模型请求中进入上下文。
 
 `--controls-file` 也可把已有像素任务推进到配准目标。它会保留有效的提取、中心线，只使配准失效。改变裁剪框后，旧控制点局部像素坐标可能不再适用，务必提供新文件。
 

@@ -249,6 +249,19 @@ class LocalPlanner:
     local_pipeline = True
 
     def decide(self, state, folder):
+        if state.get('centerlined') and state.get('goal') in ('registration', 'roads'):
+            if not controls_current(state, folder):
+                return {'action':'ask', 'question':'请用 resume --local-only --controls-file 提供当前裁剪对应的真实 WGS84 控制点；不能从像素猜测坐标。'}
+            if state.get('goal') == 'roads' and state.get('registered'):
+                if not state.get('registration_gate_passed'):
+                    return {'action':'ask', 'question':'独立配准误差门槛未通过，请修正控制点及独立检查点；已有经纬度分段仅为未验证候选，不自动下载地图。'}
+                if not state.get('match_attempted'):
+                    if (Path(folder)/'map.osm').exists():
+                        return {'action':'match'}
+                    if state.get('map_download_requested'):
+                        return {'action':'fetch_map'}
+                    return {'action':'ask', 'question':'请提供 --osm-file，或另行用 --fetch-map --consent-map 明确授权本次地图下载；不会自动下载。'}
+                return {'action':'deliver', 'summary':'已尝试本地道路候选匹配；请查看匹配报告，不代表真实路线已确认，不可导航。'}
         return {'action':'ask', 'question':'本地执行需要已知颜色和裁剪，或当前有效掩码；请提供修正。需要视觉判断时另行明确同意 API 上传。'}
 
 
@@ -442,10 +455,22 @@ def run(state, folder, planner, budget=12, consent_map=False):
             elif (getattr(planner, 'local_pipeline', False) and state.get('extracted') and not state.get('centerlined')
                   and not state.get('component_selection', {}).get('requires_selection')):
                 action = {'action':'centerline'}
-            elif (getattr(planner, 'local_pipeline', False) and state.get('goal','pixels') == 'pixels'
+            elif (getattr(planner, 'local_pipeline', False) and state.get('centerlined')
+                  and state.get('goal') in ('registration', 'roads')
+                  and controls_current(state, folder) and not state.get('registered')):
+                # 仅使用用户已绑定当前裁剪的控制点；不依赖模型复核或生成坐标。
+                action = {'action':'register'}
+            elif (getattr(planner, 'local_pipeline', False)
                   and state.get('extracted') and state.get('centerlined')
-                  and not state['semantic_review_required']):
-                action = {'action':'deliver', 'summary':'本地提线及中心线候选已生成，尚未验证完整路线、真实起终点或行进顺序。请检查原图、掩码与骨架；不可导航。'}
+                  and not state['semantic_review_required']
+                  and (state.get('goal','pixels') == 'pixels'
+                       or (state.get('goal') == 'registration' and state.get('registered')))):
+                summary = '本地提线及中心线候选已生成，尚未验证完整路线、真实起终点或行进顺序。请检查原图、掩码与骨架；不可导航。'
+                if state.get('goal') == 'registration':
+                    summary += ('已按用户控制点导出 WGS84 未排序分段经纬度候选；独立误差门槛'
+                                + ('通过' if state.get('registration_gate_passed') else '未通过')
+                                + '。不等于真实轨迹定位已验证，不恢复原始 GPS。')
+                action = {'action':'deliver', 'summary':summary}
             else:
                 action = planner.decide(state, folder)
             stage = 'action'
