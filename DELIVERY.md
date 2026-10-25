@@ -1,3 +1,5 @@
+> **普通网页实时自主调研已接入**：地图服务选择“自主调研”，无需manifest/对象ID/道路JSON；固定Nominatim文字检索与官方OSM way/full、node/ways核查，独立授权、限频限预算。仅Mock与本地回归，未执行真实原图/公网/付费模型E2E。见 [RESEARCH_ONLINE.md](docs/RESEARCH_ONLINE.md)。
+
 # 本地试用交付说明
 
 > **输出图片怎么看：**见 [输出图片说明与人工核对指南](IMAGE_OUTPUTS.md)，包含候选着色、掩码、中心线、端点/分叉标记的含义、检查目的与验证边界。

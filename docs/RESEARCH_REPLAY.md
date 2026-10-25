@@ -20,7 +20,7 @@
 6. `review_research(version,result,evidence,limitations)` 比较截图结构、顺序假说和对象事实。needs_revision/ambiguous 禁交付；修正重建后重新复核。consistent 只是模型未发现矛盾的自报，不是像素配准、真实轨迹验证或原图叠图成功。
 7. 实际走廊成功且当前复核 consistent 才能交付，附 `research-audit.json` 中原图SHA、证据版本、来源URL/响应SHA、假说、复核及未验证标记。
 
-模型不需要用户填写地名、经纬度、控制点或行政区层级；缺档说明缺哪个对象/搜索和具体授权，不要求用户代做调研。原默认 osm_relay/amap 行为未被静默切换；`research` 当前为 **CLI 显式入口**，网页选择器尚未接此入口。没有新增在线地图工具、服务或配置。
+模型不需要用户填写地名、经纬度、控制点或行政区层级；缺档说明缺哪个对象/搜索和具体授权，不要求用户代做调研。原默认 osm_relay/amap 行为未被静默切换；此文档描述带manifest的 **CLI离线回放入口**；普通网页现另有实时 research 入口，见 [RESEARCH_ONLINE.md](RESEARCH_ONLINE.md)。两者不混同，实时入口仍未做真实原图E2E。
 
 ## 命令与授权边界
 

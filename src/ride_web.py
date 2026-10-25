@@ -35,7 +35,7 @@ MAX_IMAGE = 20_000_000
 MAX_BODY = 44_000_000  # 30 MB OSM XML plus JSON overhead
 ARTIFACTS = frozenset((
     'input.png',
-    'corridor-inspection.json', 'map-query.json', 'map-query-diagnostic.json', 'amap-location-clues.json',
+    'corridor-inspection.json', 'research-audit.json', 'map-query.json', 'map-query-diagnostic.json', 'amap-location-clues.json',
     'inspection/colors.json', 'inspection/color-preview.png',
     'extraction/question-source.png', 'extraction/question-overlay.png',
     'extraction/mask.png', 'extraction/overlay.png', 'extraction/extraction.json',
@@ -72,6 +72,8 @@ def artifact_current(state, name):
     prefix = name.split('/')[0]
     if prefix == 'corridors':
         return state.get('goal') == 'corridor' and bool(state.get('corridor_complete')) and name in state.get('corridor_artifacts', [])
+    if name == 'research-audit.json':
+        return state.get('map_provider') == 'research' and bool(state.get('corridor_complete'))
     if name == 'amap-location-clues.json':
         return state.get('map_provider') == 'amap' and bool(state.get('location_clues'))
     if name == 'map-query-diagnostic.json':
@@ -383,7 +385,7 @@ class RideServer(ThreadingHTTPServer):
                 state.pop('map_query', None)
                 state.pop('summary', None)
                 state.pop('artifacts', None)
-        fields = ('places', 'place_stage', 'place_review', 'place_diagnostic', 'map_provider', 'location_clues', 'map_query_diagnostic', 'candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
+        fields = ('places', 'place_stage', 'place_review', 'place_diagnostic', 'map_provider', 'research_online', 'research_requests', 'research_diagnostic', 'research_hypothesis', 'research_review', 'location_clues', 'map_query_diagnostic', 'candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
                   'registration_notice', 'corridor_complete', 'approximate_complete', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
@@ -420,7 +422,8 @@ class RideServer(ThreadingHTTPServer):
                                'api_responses':execution.get('api_responses', 0)}
         result['review_status'] = (review.get('result', 'not_reviewed') if current_version and review.get('version') == current_version else 'not_reviewed')
         # 只公开是否具备当前本地地图，不公开路径，也不触发下载。
-        result['map_available'] = (state.get('map_provider', 'osm') in ('osm', 'osm_relay')
+        result['map_available'] = (state.get('map_provider', 'osm') in ('osm', 'osm_relay', 'research')
+                                   and (state.get('map_provider') != 'research' or bool(state.get('research_object_count') or not state.get('research_online')))
                                    and (folder/'task'/'map.osm').is_file()
                                    and (state.get('map_provider') != 'osm_relay' or bool(state.get('map_query'))))
         result['map_provider'] = state.get('map_provider', 'osm')
@@ -494,7 +497,7 @@ class RideServer(ThreadingHTTPServer):
         if mode not in ('demo', 'api') or goal not in ('pixels', 'registration', 'roads', 'approximate', 'corridor'):
             raise WebError('模式或目标无效')
         provider = data.get('map_provider', 'osm_relay')
-        if provider not in ('amap', 'osm_relay'):
+        if provider not in ('amap', 'osm_relay', 'research'):
             raise WebError('旧OSM直连已停用；请显式选择osm_relay或amap，并给予本次双授权；不会静默迁移或重放', 409)
         consent_map = flag(data, 'consent_map')
         consent = flag(data, 'consent_upload')
@@ -574,7 +577,7 @@ class RideServer(ThreadingHTTPServer):
             if data.keys() - {'review_continue', 'consent_upload', 'consent_map'}:
                 raise WebError('复核使用当前已保存证据，不接受同时修改参数或选择')
         provider = data.get('map_provider', state.get('map_provider', 'osm'))
-        if provider not in ('amap', 'osm_relay'):
+        if provider not in ('amap', 'osm_relay', 'research'):
             raise WebError('旧OSM直连已停用；请显式选择osm_relay或amap，并给予本次双授权；不会静默迁移或重放', 409)
         from ride_agent import validate_map_invocation
         try:
@@ -585,6 +588,8 @@ class RideServer(ThreadingHTTPServer):
             raise WebError(str(exc), 409) from None
         if 'osm_xml' in data:
             raise WebError('网页不提供OSM入口；离线文件仅用CLI --local-only --map-provider osm 调试')
+        if provider == 'research' and state.get('map_provider') == 'research' and not state.get('research_online'):
+            raise WebError('此任务为CLI离线快照回放，不是实时搜索。请在普通页面新建自主调研任务，旧档保留审计。', 409)
         consent_map = flag(data, 'consent_map')
         fetch_map = flag(data, 'fetch_map')
         if state['mode'] == 'api' and not upload and not local_only:
@@ -722,17 +727,17 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <style>body{max-width:950px;margin:2em auto;padding:0 1em;font-family:system-ui;line-height:1.6}fieldset{margin:1em 0}label{display:block;margin:.5em 0}textarea{width:95%;height:6em}button{padding:.5em 1em}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1em}img{max-width:100%;max-height:420px}input[type=text]{width:70%}details{margin:1em 0;border:1px solid #ccc;padding:.6em}summary{cursor:pointer;font-weight:bold}.result{border:2px solid #397b68;padding:1em;background:#f3faf7}.consent{border:2px solid #855400;background:#fff4cf;padding:1em;font-weight:bold}</style>
 <h1>上传骑行截图，识别道路线索</h1>
 <p>上传截图 → 本次授权 → 开始识别 → 查看结果或具体缺口。所有坐标只是未验证候选，非原始 GPS，不可导航。</p>
-<p id="capabilityNotice">模型可读取原图地名与道路线索；默认OSM受控中转，可查WGS84道路节点与连接并构建未验证走廊；本地OSM/Overpass直连禁止。高德仅为GCJ-02线索兼容项。文字或地域不清会询问，不保证识别成功。不会静默下载地图或上传图片；无需为尝试识别先填道路名、控制点或技术文件。</p>
+<p id="capabilityNotice">模型可读取原图地名与道路线索；默认OSM受控中转，可查WGS84道路节点与连接并构建未验证走廊；本地OSM/Overpass直连禁止（自主调研例外：仅固定官方具体对象入口，不作范围下载）。可选自主调研实时搜索，不要求行政区层级。高德仅为GCJ-02线索兼容项。文字或地域不清会询问，不保证识别成功。不会静默下载地图或上传图片；无需为尝试识别先填道路名、控制点或技术文件。</p>
 <fieldset><legend>1. 上传截图并授权</legend><label>截图（PNG/JPEG/WebP，≤20 MB、≤400万像素） <input id="image" type="file" accept="image/png,image/jpeg,image/webp"></label>
 <details id="startAdvanced"><summary>高级选项：运行模式与手动目标</summary><p>默认使用真实视觉 API 识别道路线索；需要管理员预先配置模型服务。离线 Demo 是固定演示，并非自动识路。道路查询仅限本次授权的具体对象，不下载大范围路网。</p>
 <label>模式 <select id="mode"><option value="api">真实视觉 API（需要本次授权）</option><option value="demo">离线 Demo（固定演示）</option></select></label>
 <label>手动目标 <select id="goal"><option value="corridor">读图识路 → OSM中转道路候选（默认）</option><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">严格配准后道路匹配</option></select></label></details>
 <label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（含所选服务地图查询结果，不含完整地图文件；创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
-<label>地图服务 <select id="mapProvider"><option value="osm_relay">OSM受控中转（WGS84道路节点与连接）</option><option value="amap">高德（仅GCJ-02定位线索，不支持道路走廊）</option></select></label>
+<label>地图服务 <select id="mapProvider"><option value="osm_relay">OSM受控中转（WGS84道路节点与连接）</option><option value="research">自主调研：实时文字检索与具体对象核查（WGS84）</option><option value="amap">高德（仅GCJ-02定位线索，不支持道路走廊）</option></select></label>
 <p id="mapPreflight" role="status">提交前先本地检查所选服务配置，不发送测试请求、不消耗模型调用。</p>
 <p id="providerNotice">默认OSM受控中转，无本地OSM/Overpass直连，无失败回退。旧任务须显式选择迁移与本次双授权。</p>
 <p>高德 Key 仅由管理员通过服务器 AMAP_API_KEY 配置，不在网页输入。曾在群聊公开的 Key 请立即撤销并轮换；勿再次粘贴。高德查询不调用骑行规划、不访问OSM、不恢复历史轨迹。</p>
-<label class="consent"><input id="queryMapConsent" type="checkbox">仅本次同意向上方所选地图服务发送模型从原图识别的行政区及道路/地点文字（OSM中转：一次动作、25秒、4MB；高德：最多三次地理编码、各512KB、30秒；均不重试、不发截图）。与模型上传授权独立，创建/继续后自动取消。</label>
+<label class="consent"><input id="queryMapConsent" type="checkbox">仅本次同意向上方所选地图服务发送模型从原图识别的行政区及道路/地点文字（OSM中转：一次动作、25秒、4MB；高德：最多三次地理编码、各512KB、30秒；自主调研：文字发往公开 Nominatim、返回ID发往官方OSM对象接口，每轮最多3次搜索/8次请求，各25秒/4MB，全局每1.1秒至多一次，不重试、不发截图；返回的公开证据将随之后模型请求上传）。与模型上传授权独立，创建/继续后自动取消。</label>
 <button id="create">开始识别</button><button id="continueMap">授权后继续识路 / 查询地图</button></fieldset>
 <section id="placeCards" hidden><h2>地标候选（高德，GCJ-02，未验证）</h2><p>仅本地展示；未确认第三方模型处理及衍生下载许可，不生成配准锚点或轨迹。请对照下方原始截图；坐标中心不等于入口。</p><div id="placeList"></div></section><section class="result" aria-labelledby="resultTitle"><h2 id="resultTitle">2. 结果 / 具体缺口</h2><p id="resultSummary" role="status" aria-live="polite">尚未开始。请选择截图，确认本次上传授权后点击“开始识别”。</p><div id="locationPreview" hidden><h3>高德定位线索点预览（GCJ-02，未验证）</h3><p>仅在本地绘制独立候选点，无底图、不连接点；位置相对示意，不代表道路、轨迹、距离或经过顺序。编号仅用于对照列表。</p><canvas id="locationCanvas" width="760" height="320" style="max-width:100%;height:auto" aria-label="GCJ-02独立位置候选点，无连线、非路线"></canvas><ol id="locationList"></ol></div></section>
 <details id="taskRecovery"><summary>恢复已有任务（只读取，不自动重跑）</summary><fieldset><legend>任务恢复与执行详情</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><p id="executionNotice" role="status" style="font-weight:bold;border:2px solid #b66;padding:12px"></p><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset></details>
@@ -780,7 +785,7 @@ function schedulePoll(d){
 }
 function lockRunning(){if(executionBusy)for(const b of document.querySelectorAll('button'))if(b.id!=='refresh')b.disabled=true;}
 // 用当前服务端事实概括缺口；缺地图时不向普通用户堆叠 JSON 操作要求。
-function resultSummary(d){
+function resultSummary(d){if(d.map_provider==='research'&&d.research_online===false)return '此任务为CLI离线快照回放，未执行实时搜索。请新建自主调研任务；原档保留审计。';if(d.research_diagnostic)return d.question||('实时调研不可用：'+d.research_diagnostic.reason_code+'；未重试，未完成路线候选。');
  if(d.places)return d.question||d.places.notice;
  if(d.map_provider==='osm')return '旧OSM任务仅只读恢复，联网已停用。若需继续，请显式选择OSM中转或高德兼容：重新勾选本次地图查询与模型上传授权后点击“授权后继续识路 / 查询地图”。不会自动迁移、重放或上传；旧道路产物保留审计；中转支持WGS84候选，高德仅GCJ-02位置线索。';
  if(['queued','running'].includes(d.execution_state))return '正在识别，请稍候；只刷新状态，不会重复上传或重跑任务。本轮仅在明确地图查询授权下联网，不保证输出经纬度。';
@@ -913,7 +918,7 @@ async function action(fn){$('error').textContent='处理中，请稍候（提交
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
 let mapConfigurations={};
-function providerNotice(){const provider=$('mapProvider').value,configured=mapConfigurations[provider]==='configured_not_verified';$('mapPreflight').textContent=configured?'所选服务配置已存在（仅本地格式预检，非网络/配额验证）':'所选服务配置未就绪：请管理员私下配置 '+(provider==='osm_relay'?'OSM_SERVICE_URL / OSM_SERVICE_TOKEN':'AMAP_API_KEY')+'；不在网页输入。提交仍会预检，不调用模型。';$('providerNotice').textContent=provider==='osm_relay'?'OSM受控中转：仅固定named-roads/way路由，25秒/4MB，一次动作；国家level2到市区level>=6需有依据，不能只凭城市猜国家。只发文字/way ID，不发截图；不直连OSM、不重试、不回退。© OpenStreetMap contributors。':'高德显式兼容：GCJ-02定位线索/地标，不构建道路走廊；无OSM回退。';}
+function providerNotice(){const provider=$('mapProvider').value;if(provider==='research'){$('mapPreflight').textContent='固定公开HTTPS入口，无需中转配置；本地入口就绪，不表示已验证公网可用。';$('providerNotice').textContent='实时自主调研：Nominatim仅人工发起的单任务文字搜索（不自动补全/批量），OSM官方way/full与node/ways核查；不依赖Overpass。单轮最多3次搜索、8次请求；全局串行间隔≥1.1秒，各25秒/4MB，不重试/不回退。仅发文字或返回的ID，非截图；地图证据会进入后续已授权模型请求。© OpenStreetMap contributors https://www.openstreetmap.org/copyright';return;}const configured=mapConfigurations[provider]==='configured_not_verified';$('mapPreflight').textContent=configured?'所选服务配置已存在（仅本地格式预检，非网络/配额验证）':'所选服务配置未就绪：请管理员私下配置 '+(provider==='osm_relay'?'OSM_SERVICE_URL / OSM_SERVICE_TOKEN':'AMAP_API_KEY')+'；不在网页输入。提交仍会预检，不调用模型。';$('providerNotice').textContent=provider==='osm_relay'?'OSM受控中转：仅固定named-roads/way路由，25秒/4MB，一次动作；国家level2到市区level>=6需有依据，不能只凭城市猜国家。只发文字/way ID，不发截图；不直连OSM、不重试、不回退。© OpenStreetMap contributors。':'高德显式兼容：GCJ-02定位线索/地标，不构建道路走廊；无OSM回退。';}
 request('/api/config').then(c=>{for(const [key,value] of Object.entries(c.map_providers||{}))mapConfigurations[key]=value.configuration_status;providerNotice();}).catch(()=>{$('mapPreflight').textContent='配置预检读取失败；提交时仍先预检，不自动联网测试。';});
 $('mapProvider').onchange=()=>{$('queryMapConsent').checked=false;$('mapConsent').checked=false;renderLocationClues({});providerNotice();};
 $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,map_provider:$('mapProvider').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked,...($('queryMapConsent').checked?{consent_map:true}:{})}));});
@@ -983,7 +988,7 @@ class Handler(BaseHTTPRequestHandler):
                 from osm_relay import configuration_status as relay_status
                 self.send_json(200, {'csrf_token': self.server.token,
                                      'default_map_provider': 'osm_relay',
-                                     'map_providers': {'osm_relay': {'configuration_status': relay_status(), 'supports_corridor':True, 'coordinate_system':'WGS84'}, 'amap': {'configuration_status': configuration_status(),
+                                     'map_providers': {'research': {'configuration_status':'configured_not_verified', 'supports_corridor':True, 'coordinate_system':'WGS84'}, 'osm_relay': {'configuration_status': relay_status(), 'supports_corridor':True, 'coordinate_system':'WGS84'}, 'amap': {'configuration_status': configuration_status(),
                                                                'supports_corridor': False, 'coordinate_system': 'GCJ02'}}})
                 return
             with self.server.change_lock:

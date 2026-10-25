@@ -55,7 +55,7 @@ class SimplePageTests(unittest.TestCase):
         for identity in ('uploadConsent', 'reviewConsent', 'mapConsent'):
             self.assertNotIn('checked', page.attrs[identity])
         self.assertEqual(page.parents['queryMapConsent'], ())
-        self.assertEqual(page.options['mapProvider'], ['osm_relay','amap'])
+        self.assertEqual(page.options['mapProvider'], ['osm_relay','research','amap'])
         self.assertIn('本地OSM/Overpass直连禁止', PAGE)
         self.assertIn('具体对象', PAGE)
 

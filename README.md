@@ -1,4 +1,6 @@
-> **原调研方法离线接入**：新增显式 CLI `--map-provider research --research-manifest …`，将已保存的公共单对象响应接入现有 Agent 的读图假说→地名检索→对象/邻接核查→修正→候选→复核循环；不要求先下载路网、用户填写地名或控制点。现仅离线证据回放，未执行真实图付费模型/联网E2E，网页尚未接该入口。原始证据、复现命令及授权缺口见 [RESEARCH_REPLAY.md](docs/RESEARCH_REPLAY.md)。
+> **普通网页实时自主调研已接入**：地图服务选择“自主调研”，无需manifest/对象ID/道路JSON；固定Nominatim文字检索与官方OSM way/full、node/ways核查，独立授权、限频限预算。仅Mock与本地回归，未执行真实原图/公网/付费模型E2E。见 [RESEARCH_ONLINE.md](docs/RESEARCH_ONLINE.md)。
+
+> **原调研方法离线接入**：新增显式 CLI `--map-provider research --research-manifest …`，将已保存的公共单对象响应接入现有 Agent 的读图假说→地名检索→对象/邻接核查→修正→候选→复核循环；不要求先下载路网、用户填写地名或控制点。该manifest方式仍为离线回放；普通网页另有实时自主调研入口。未执行真实图付费模型/联网E2E。原始证据、复现命令及授权缺口见 [RESEARCH_REPLAY.md](docs/RESEARCH_REPLAY.md)。
 
 # 美团骑行轨迹识别 Agent
 

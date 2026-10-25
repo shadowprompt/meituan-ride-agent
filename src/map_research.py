@@ -22,13 +22,13 @@ def _read(path):
     return raw, hashlib.sha256(raw).hexdigest()
 
 
-def load(manifest, root):
+def load(manifest, root, allow_empty=False):
     """Validate saved responses, not documentary claims that an endpoint worked."""
     root = Path(root).resolve()
     path = Path(manifest).resolve()
     raw, digest = _read(path)
     sources = json.loads(raw)['sources']
-    if not isinstance(sources, list) or not 1 <= len(sources) <= 32:
+    if not isinstance(sources, list) or not (0 if allow_empty else 1) <= len(sources) <= (128 if allow_empty else 32):
         raise ValueError('Research manifest requires 1..32 snapshots')
     objects, provenance = {}, []
     for source in sources:
@@ -40,7 +40,7 @@ def load(manifest, root):
         if actual != source['sha256']:
             raise ValueError('Research snapshot hash mismatch')
         elements = json.loads(body)['elements']
-        if not isinstance(elements, list) or len(elements) > 10000:
+        if not isinstance(elements, list) or len(elements) > 10000 or any(not isinstance(e,dict) for e in elements):
             raise ValueError('Research object budget exceeded')
         requested = (match[1], int(match[2]))
         if (match[3] == 'full' and match[1] != 'way') or (match[3] == 'ways' and match[1] != 'node'):
@@ -49,6 +49,13 @@ def load(manifest, root):
             raise ValueError('Membership response does not prove requested node membership')
         if match[3] != 'ways' and not any((e.get('type'), e.get('id')) == requested for e in elements):
             raise ValueError('Research response does not contain requested object')
+        if match[3] == 'full':
+            ways = [e for e in elements if e.get('type') == 'way']
+            if len(ways) != 1 or ways[0].get('id') != requested[1]:
+                raise ValueError('Full response must contain only requested way')
+            refs = ways[0].get('nodes', [])
+            if any(e.get('type') != 'way' and (e.get('type') != 'node' or e.get('id') not in refs) for e in elements):
+                raise ValueError('Unrelated objects in full response')
         provenance.append({'url':source['url'], 'sha256':actual})
         for element in elements:
             kind, key = element.get('type'), element.get('id')
