@@ -93,6 +93,8 @@ assert(resultSummary({goal:'corridor',map_available:false}).includes('地图证�
 assert(!resultSummary({goal:'corridor',map_available:false}).includes('JSON'));
 assert(resultSummary({goal:'corridor',map_available:true}).includes('已有本地地图'));
 assert(resultSummary({corridor_complete:true}).includes('不可导航'));
+assert(resultSummary({goal:'corridor',map_provider:'research',research_online:true,research_object_count:0,research_seen_ids:[['way',1],['way',2],['way',3],['way',4]]}).includes('4 个搜索候选'));
+assert(resultSummary({goal:'corridor',map_provider:'research',research_online:true,research_object_count:0,research_seen_ids:[['way',1]]}).includes('正常搜索阶段'));
 const partial={map_provider:'research',research_online:true,research_diagnostic:{reason_code:'timeout',request:{names:['Uncertain landmark']}},map_available:true};
 assert(resultSummary(partial).includes('Uncertain landmark'));
 assert(resultSummary(partial).includes('已成功证据保留'));

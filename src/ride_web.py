@@ -385,7 +385,7 @@ class RideServer(ThreadingHTTPServer):
                 state.pop('map_query', None)
                 state.pop('summary', None)
                 state.pop('artifacts', None)
-        fields = ('places', 'place_stage', 'place_review', 'place_diagnostic', 'map_provider', 'research_online', 'research_requests', 'research_failures', 'research_budget_used', 'research_object_count', 'research_diagnostic', 'research_hypothesis', 'research_review', 'location_clues', 'map_query_diagnostic', 'candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
+        fields = ('places', 'place_stage', 'place_review', 'place_diagnostic', 'map_provider', 'research_online', 'research_requests', 'research_failures', 'research_budget_used', 'research_object_count', 'research_seen_ids', 'research_diagnostic', 'research_hypothesis', 'research_review', 'location_clues', 'map_query_diagnostic', 'candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
                   'registration_notice', 'corridor_complete', 'approximate_complete', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
@@ -785,16 +785,18 @@ function schedulePoll(d){
 }
 function lockRunning(){if(executionBusy)for(const b of document.querySelectorAll('button'))if(b.id!=='refresh')b.disabled=true;}
 // 用当前服务端事实概括缺口；缺地图时不向普通用户堆叠 JSON 操作要求。
-function resultSummary(d){if(d.map_provider==='research'&&d.research_online===false)return '此任务为CLI离线快照回放，未执行实时搜索。请新建自主调研任务；原档保留审计。';if(d.research_diagnostic&&d.status!=='needs_confirmation')return d.question||('局部调研请求失败：'+JSON.stringify(d.research_diagnostic.request)+' ['+d.research_diagnostic.reason_code+']；已成功证据保留，搜索候选不是道路几何；未重试，目标尚未完成。');
+function resultSummary(d){if(d.map_provider==='research'&&d.research_online===false)return '此任务为CLI离线快照回放，未执行实时搜索。请新建自主调研任务；原档保留审计。';if(d.research_diagnostic&&d.status!=='needs_confirmation')return (d.question||('局部调研请求失败：'+JSON.stringify(d.research_diagnostic.request)+' ['+d.research_diagnostic.reason_code+']；已成功证据保留，搜索候选不是道路几何；未重试，目标尚未完成。'))+(!d.research_object_count&&d.research_seen_ids?.length?' 已保留 '+d.research_seen_ids.length+' 个搜索候选 ID；尚未核查对象几何，归档数为0属于正常搜索阶段，不是额外错误。':'');
  if(d.places)return d.question||d.places.notice;
  if(d.map_provider==='osm')return '旧OSM任务仅只读恢复，联网已停用。若需继续，请显式选择自主调研、OSM中转或高德兼容：重新勾选本次地图查询与模型上传授权后点击“授权后继续识路 / 查询地图”。不会自动迁移、重放或上传；旧道路产物保留审计；中转支持WGS84候选，高德仅GCJ-02位置线索。';
  if(['queued','running'].includes(d.execution_state))return '正在识别，请稍候；只刷新状态，不会重复上传或重跑任务。本轮仅在明确地图查询授权下联网，不保证输出经纬度。';
  const q=d.map_query_diagnostic;
  if(d.map_provider==='amap'&&d.location_clues&&(!q||q.outcome==='succeeded'))return (d.question||d.location_clues.warning)+' 定位线索：'+d.location_clues.clues.map(c=>c.query_name+'：'+(c.candidates.map(p=>p.location.join(',')+'（GCJ-02，未验证）').join(' / ')||'无结果')).join('；')+'。不是道路几何，不是WGS84轨迹，不可导航。';
  if(d.goal==='corridor'&&!d.corridor_complete&&!d.error_category&&d.execution_state!=='failed'&&q&&['failed','started'].includes(q.outcome))return '本轮尚未交付经纬度。'+(q.outcome==='failed'?'地图查询失败 ['+q.reason_code+']：'+q.message:'上次地图查询未记录最终结果；不能断言是否发送成功。')+' 查询行政区：'+(q.request?.area_name||'（非法或缺失）')+'；道路：'+(q.request?.names||[]).join('、')+'。'+(q.area_resolution?' 实际查询层级：'+q.area_resolution.query_levels.join(' → ')+'；'+(q.area_resolution.status==='unavailable'||(!q.area_resolution.candidates?.length&&['timeout','network_error','server_timeout'].includes(q.reason_code))?'候选尚未取得，不能判断无候选或层级成功':'候选：'+JSON.stringify(q.area_resolution.candidates))+'。':'')+(q.transport?' 查询阶段：'+q.transport.query_stage+' / '+q.transport.phase+'；耗时：'+q.transport.elapsed_seconds+'秒；收到响应：'+(q.transport.response_received?'是':'否')+'。':'')+(q.retry_advice||'请先核对任务状态，不要盲目重复授权。')+' 后台本轮结束不等于业务完成；未自动重试。';
+ if(d.map_provider==='research'&&d.research_online===true&&!d.research_object_count&&d.research_seen_ids?.length&&!d.error_category&&d.execution_state!=='failed')return '已找到 '+d.research_seen_ids.length+' 个搜索候选 ID；尚未 inspect_map_object 获取道路几何，对象归档数为0属于正常搜索阶段，不代表地图错误或没有道路。'+(d.question||'后续需核查已返回对象；刷新不会自动重跑或上传。')+' 尚未完成路线，未验证、不可导航。';
  if(d.status==='waiting_for_user'&&typeof d.question==='string')return '等待用户确认：'+d.question+' 本轮未完成经纬度交付；刷新不会重跑。';
  if(d.execution_state==='failed'||d.error_category)return '本轮未完成。'+(d.recovery_hint||d.web_execution?.recovery_hint||'请查看任务详情中的安全提示；不会自动重试上传。')+(d.goal==='corridor'&&!d.map_available?' 本任务尚无地图证据；可核对问题后重新授权具体对象查询，未交付经纬度。':'');
  if(d.corridor_complete)return '已生成道路走廊经纬度候选，请在下方查看产物。尚未确认起终点、经过顺序及完整性，非原始 GPS，不可导航。';
+
  if(d.goal==='corridor'&&!d.map_available)return '尚缺地图证据：请查看具体问题；如需查询，勾选本次模型上传与地图查询授权后点击“授权后继续识路 / 查询地图”。模型自行读取地名并查询具体对象，普通用户无需填写路名、OSM或假设。本轮未完成经纬度交付。';
  if(d.goal==='corridor')return '已有本地地图，但尚未形成有依据的完整道路候选。请查看任务详情中的识别线索或具体问题；不会猜测坐标，也不会自动继续上传。';
  if(d.approximate_complete)return '已生成近似定位候选，请查看下方产物；未验证、非原始 GPS，不可导航。';

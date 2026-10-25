@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import time
+import unicodedata
 import socket
 import threading
 from contextlib import contextmanager
@@ -22,6 +23,54 @@ RATE_FILE = Path(__file__).resolve().parents[1] / 'outputs' / '.research-public-
 
 def fail(code):
     raise MapFetchError('Public research request failed; remote content withheld', code=code)
+
+
+# Only local schema omissions/type errors may be repaired. Unsafe text, extra parameters,
+# provenance failures and exhausted budgets retain terminal invalid_input semantics.
+MAX_SCHEMA_CORRECTIONS = 2
+TOOL_SCHEMA = {
+    'search_map_evidence': {'required': ['action', 'names', 'evidence'],
+        'optional': ['region'], 'names': 'exactly one public place-name string, 1..100 characters',
+        'region': 'optional public place-name string, 1..100 characters; evidenced, not invented',
+        'evidence': 'required nonblank image/object rationale, 1..2000 characters',
+        'query': 'one q = region + space + names[0], or names[0]; no URLs or extra parameters'},
+    'inspect_map_object': {'required': ['action', 'object_type', 'object_id', 'evidence'],
+        'object_type': 'node|way', 'object_id': 'integer ID from returned evidence',
+        'evidence': 'required nonblank rationale, 1..2000 characters'},
+}
+
+
+class ModelShapeError(MapFetchError):
+    def __init__(self):
+        super().__init__('Model tool shape does not match schema', code='invalid_input')
+
+
+def _place_text(value):
+    if not isinstance(value, str):
+        raise ModelShapeError()
+    # Conservative public-name alphabet: no URL, query syntax, controls or format chars.
+    if not 1 <= len(value.strip()) <= 100 or any(
+            not (unicodedata.category(c)[0] in 'LMN' or c in " -'’.,·()（）") for c in value):
+        fail('invalid_input')
+    return ' '.join(value.split())
+
+
+def search_query(action):
+    name = _place_text(action['names'][0])
+    return (_place_text(action['region']) + ' ' + name) if 'region' in action else name
+
+
+def _successful_query(record):
+    request = record.get('request', {})
+    # Old audits have names only. New audits retain the exact q used on the wire.
+    if isinstance(request.get('q'), str):
+        return request['q']
+    # Historical local audits may contain punctuation no longer accepted for new input.
+    # Normalize for comparison only; never re-send or revalidate old successful searches.
+    names = request.get('names', [])
+    name = names[0] if isinstance(names, list) and names and isinstance(names[0], str) else ''
+    region = request.get('region', '')
+    return ' '.join(((region + ' ') if isinstance(region, str) and region else '').split() + name.split())
 
 
 def _remaining(deadline):
@@ -169,34 +218,61 @@ def execute(state, folder, action, budget, consent):
     name = action.get('action')
     if consent is not True:
         fail('consent_required')
-    evidence = action.get('evidence')
-    if not isinstance(evidence, str) or not 1 <= len(evidence.strip()) <= 2000:
-        fail('invalid_input')
     if budget['requests'] >= MAX_REQUESTS:
         fail('response_limit')
+    required = ({'action', 'names', 'evidence'} if name == 'search_map_evidence'
+                else {'action', 'object_type', 'object_id', 'evidence'})
+    allowed = required | ({'region'} if name == 'search_map_evidence' else set())
+    if name not in TOOL_SCHEMA or set(action) - allowed:
+        fail('invalid_input')
+    # Security/provenance checks precede shape recovery even when evidence is missing.
     if name == 'search_map_evidence':
-        if set(action) != {'action','names','evidence'} or not isinstance(action['names'],list) or len(action['names']) != 1:
+        if budget['searches'] >= MAX_SEARCHES:
             fail('invalid_input')
-        query = action['names'][0]
-        if not isinstance(query,str) or not 1 <= len(query.strip()) <= 100 or any(ord(c)<32 for c in query):
+        if 'region' in action and isinstance(action['region'], str):
+            _place_text(action['region'])
+        if isinstance(action.get('names'), str):
+            _place_text(action['names'])
+        if isinstance(action.get('names'), list):
+            for value in action['names']:
+                if isinstance(value, str):
+                    _place_text(value)
+            if (len(action['names']) == 1 and isinstance(action['names'][0], str)
+                    and ('region' not in action or isinstance(action['region'], str))):
+                candidate = search_query(action).casefold()
+                previous = ([_successful_query(item).casefold() for item in state['research_requests']
+                             if item.get('tool') == 'search_map_evidence' and item.get('outcome') == 'succeeded']
+                            if 'research_requests' in state else state.get('research_search_queries', []))
+                if candidate in previous or candidate in budget.get('failed_queries', []):
+                    fail('invalid_input')
+    elif isinstance(action.get('object_type'), str) and type(action.get('object_id')) is int:
+        identity = [action['object_type'], action['object_id']]
+        if identity not in state.get('research_seen_ids', []) or identity in budget.get('failed_objects', []):
             fail('invalid_input')
-        query = query.strip()
+    if not required <= set(action):
+        raise ModelShapeError()
+    evidence = action['evidence']
+    if not isinstance(evidence, str) or not 1 <= len(evidence.strip()) <= 2000:
+        raise ModelShapeError()
+    if name == 'search_map_evidence':
+        if not isinstance(action['names'], list) or len(action['names']) != 1:
+            raise ModelShapeError()
+        query = search_query(action)
         # 兼容旧任务：旧版可能把失败尝试写进此列表，按成功审计重建。
         if 'research_requests' in state:
             state['research_search_queries'] = list(dict.fromkeys(
-                name.casefold() for item in state['research_requests']
-                if item.get('tool') == 'search_map_evidence' and item.get('outcome') == 'succeeded'
-                for name in item.get('request',{}).get('names',[]) if isinstance(name,str)))
+                _successful_query(item).casefold() for item in state['research_requests']
+                if item.get('tool') == 'search_map_evidence' and item.get('outcome') == 'succeeded'))
         if budget['searches'] >= MAX_SEARCHES or query.casefold() in state.get('research_search_queries',[]) or query.casefold() in budget.get('failed_queries',[]):
             fail('invalid_input')
         budget['searches'] += 1
         host = 'nominatim.openstreetmap.org'
         path = '/search?' + urlencode({'q':query,'format':'jsonv2','limit':5,'addressdetails':0})
     elif name == 'inspect_map_object':
-        if set(action) != {'action','object_type','object_id','evidence'}:
-            fail('invalid_input')
         kind, ident = action['object_type'], action['object_id']
-        if [kind,ident] in budget.get('failed_objects',[]) or kind not in ('node','way') or type(ident) is not int or not 1 <= ident <= 999999999999999 or [kind,ident] not in state.get('research_seen_ids',[]):
+        if not isinstance(kind, str) or type(ident) is not int:
+            raise ModelShapeError()
+        if [kind,ident] in budget.get('failed_objects',[]) or kind not in ('node','way') or not 1 <= ident <= 999999999999999 or [kind,ident] not in state.get('research_seen_ids',[]):
             fail('invalid_input')
         host = 'api.openstreetmap.org'
         # 节点直接核查父 ways；坐标来自已返回 way/full 中的原始节点，不能伪造。
@@ -204,7 +280,7 @@ def execute(state, folder, action, budget, consent):
     else:
         fail('invalid_input')
     budget['requests'] += 1
-    record = {'tool':name, 'request':{'names':action['names']} if name == 'search_map_evidence' else {'object_type':kind,'object_id':ident}, 'outcome':'attempted', 'request_index':budget['requests'], 'request_limit':MAX_REQUESTS}
+    record = {'tool':name, 'request':{**{k:action[k] for k in ('names','region') if k in action},'q':query} if name == 'search_map_evidence' else {'object_type':kind,'object_id':ident}, 'outcome':'attempted', 'request_index':budget['requests'], 'request_limit':MAX_REQUESTS}
     state.setdefault('research_requests',[]).append(record)
     try:
         raw = _get(host, path)
@@ -222,7 +298,7 @@ def execute(state, folder, action, budget, consent):
                     fail('response_invalid')
                 hits.append({'object':{'type':item['osm_type'],'id':item['osm_id'],'tags':{'name':label}},'sources':[source], 'discovery_only':True})
             # 原始搜索响应仅本地留证；不把地点中心当作道路节点坐标。
-            target = Path(folder)/'research'/('search-'+source['sha256']+'.json')
+            target = Path(folder)/'research'/('search-'+hashlib.sha256((source['url'] + source['sha256']).encode()).hexdigest()+'.json')
             target.write_bytes(raw)
             state.setdefault('research_search_queries',[]).append(query.casefold())
         else:

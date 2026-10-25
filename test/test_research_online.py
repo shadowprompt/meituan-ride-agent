@@ -35,6 +35,133 @@ class OnlineTests(unittest.TestCase):
         self.call(self.search,[{'osm_type':'way','osm_id':5,'display_name':'Fixture Road'}])
         self.state['research_seen_ids'] = [['way',5]]
 
+    def test_region_is_single_actual_query_with_distinct_audit_cache_and_archive(self):
+        from urllib.parse import urlsplit, parse_qs
+        body = [{'osm_type':'way','osm_id':5,'display_name':'Mock only'}]
+        first, _ = self.call({**self.search,'names':['长风路']}, body)
+        second, get = self.call({**self.search,'names':['长风路'],'region':'上海'}, body)
+        params = parse_qs(urlsplit(get.call_args.args[1]).query)
+        self.assertEqual(params, {'q':['上海 长风路'],'format':['jsonv2'],'limit':['5'],'addressdetails':['0']})
+        self.assertEqual(self.budget, {'requests':2,'searches':2})
+        self.assertEqual(self.state['research_search_queries'], ['长风路','上海 长风路'])
+        self.assertNotEqual(first['source']['url'], second['source']['url'])
+        self.assertEqual(first['source']['sha256'], second['source']['sha256'])
+        self.assertEqual(len(list((self.folder/'research').glob('search-*.json'))), 2)
+        self.assertEqual(self.state['research_requests'][1]['request'], {'names':['长风路'],'region':'上海','q':'上海 长风路'})
+        # Equivalent q via names alone (including whitespace/case normalization) is duplicate.
+        with self.assertRaises(MapFetchError):
+            self.call({**self.search,'names':[' 上海   长风路 ']}, [])
+        self.assertEqual(self.budget['requests'], 2)
+
+    def test_region_and_names_reject_url_controls_query_syntax_and_extra_parameters(self):
+        for field in ('region','names'):
+            for text in ('https://evil.example','Shanghai&limit=99','//evil.example','x\nY','x\x7fY','x\u202eY','x\u200bY','x%26format=json','x?key=value','', 'x'*101):
+                action = {**self.search, field: [text] if field == 'names' else text}
+                with self.subTest(field=field,text=repr(text)), patch.object(live,'_get') as get:
+                    with self.assertRaises(MapFetchError) as caught:
+                        live.execute(self.state,self.folder,action,self.budget,True)
+                    self.assertNotIsInstance(caught.exception,live.ModelShapeError)
+                    get.assert_not_called()
+        for key in ('url','limit','format','countrycodes','viewbox','timeout'):
+            with patch.object(live,'_get') as get, self.assertRaises(MapFetchError) as caught:
+                live.execute(self.state,self.folder,{**self.search,key:'arbitrary'},self.budget,True)
+            self.assertNotIsInstance(caught.exception,live.ModelShapeError)
+            get.assert_not_called()
+        self.assertEqual(self.budget, {'requests':0,'searches':0})
+
+    def test_real_report_shape_mock_http_search_region_repair_inspect_continue(self):
+        from urllib.parse import urlsplit, parse_qs
+        actions = [
+            {**self.search,'names':['长风路']},
+            {'action':'search_map_evidence','names':['长风路'],'region':'上海'},
+            {**self.search,'names':['长风路'],'region':'上海'},
+            {'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Returned search ID'},
+            {'action':'ask','question':'Mock geometry gathered; correspondence remains uncertain'},
+        ]
+        payloads = []
+        def model(request, **kwargs):
+            payloads.append(json.loads(request.data))
+            if len(payloads) == 3:
+                result = json.loads(self.state['messages'][-1]['content'].removeprefix('LOCAL_TOOL_RESULT '))
+                self.assertFalse(result['terminal'])
+                self.assertEqual(result['status'], 'invalid_model_shape')
+                self.assertIn('evidence', result['schema']['search_map_evidence']['required'])
+                self.assertEqual(result['budget'], {'requests':1,'searches':1})
+                self.assertEqual(len(result['available_evidence']['discovery_ids']),4)
+                self.assertEqual(result['available_evidence']['object_count'],0)
+            if len(payloads) == 5:
+                self.assertEqual(self.state['research_object_count'],3)
+            response = unittest.mock.MagicMock()
+            response.__enter__.return_value.read.return_value = json.dumps({'choices':[{'message':{'content':json.dumps(actions[len(payloads)-1])}}]}).encode()
+            return response
+        hits = [{'osm_type':'way','osm_id':i,'display_name':'Mock only'} for i in (5,6,7,8)]
+        responses = [json.dumps(hits).encode(),json.dumps(hits).encode(),json.dumps({'elements':[self.way]+self.nodes}).encode()]
+        with patch.object(live,'_get',side_effect=responses) as get, patch.dict('os.environ',{'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-only'}), patch('ride_agent.urllib.request.build_opener') as opener:
+            opener.return_value.open.side_effect = model
+            state = ride_agent.run(self.state,self.folder,ride_agent.APIPlanner(),budget=5,consent_map=True)
+        self.assertEqual(len(payloads),5)
+        self.assertEqual(get.call_count,3)
+        self.assertEqual(parse_qs(urlsplit(get.call_args_list[1].args[1]).query)['q'],['上海 长风路'])
+        self.assertEqual(state['research_budget_used'], {'requests':3,'searches':2})
+        self.assertEqual(state['research_failures'][0]['corrections_used'],1)
+        self.assertTrue(state['research_failures'][0]['resolved'])
+        self.assertNotIn('research_diagnostic',state)
+        self.assertNotIn('invalid_input',state['question'])
+        self.assertEqual(state['status'],'waiting_for_user')
+        self.assertFalse(state.get('corridor_complete'))
+
+    def test_shape_correction_has_two_turn_limit_no_network_or_extra_model_budget(self):
+        class Planner:
+            semantic_review = True
+            calls = 0
+            def decide(inner, state, folder):
+                inner.calls += 1
+                return {'action':'search_map_evidence','names':['Mock Road']}  # missing evidence
+        planner = Planner()
+        with patch.object(live,'_get') as get:
+            state = ride_agent.run(self.state,self.folder,planner,budget=12,consent_map=True)
+        self.assertEqual(planner.calls,3)
+        self.assertTrue(state['research_diagnostic']['terminal'])
+        self.assertEqual([x.get('corrections_used') for x in state['research_failures']], [1,2,None])
+        self.assertEqual(state['research_budget_used'], {'requests':0,'searches':0})
+        get.assert_not_called()
+        planner = Planner()
+        with patch.object(live,'_get') as get:
+            ride_agent.run(self.state,self.folder,planner,budget=1,consent_map=True)
+        self.assertEqual(planner.calls,1)
+        get.assert_not_called()
+
+    def test_schema_correction_does_not_soften_auth_unknown_id_or_extra_keys(self):
+        for action, consent in (({'action':'search_map_evidence','names':['Mock']},False),
+                ({**self.search,'url':'https://evil.example'},True),
+                ({**self.search,'region':'https://evil.example'},True),
+                ({'action':'search_map_evidence','names':['https://evil.example']},True),
+                ({'action':'search_map_evidence','names':'https://evil.example'},True),
+                ({'action':'inspect_map_object','object_type':'way','object_id':999},True),
+                ({'action':'inspect_map_object','object_type':'way','object_id':999,'evidence':'Invented'},True)):
+            class Planner:
+                semantic_review = True
+                calls = 0
+                def decide(inner,state,folder):
+                    inner.calls += 1
+                    return action
+            planner = Planner()
+            with patch.object(live,'_get') as get:
+                state = ride_agent.run(self.state,self.folder,planner,budget=12,consent_map=consent)
+            self.assertEqual(planner.calls,1)
+            self.assertTrue(state['research_diagnostic']['terminal'])
+            get.assert_not_called()
+
+    def test_missing_evidence_does_not_reopen_duplicate_or_search_budget(self):
+        self.discover()
+        for action, budget in (({'action':'search_map_evidence','names':self.search['names']}, self.budget),
+                ({'action':'search_map_evidence','names':['New Mock Road']}, {'requests':3,'searches':3}),
+                ({'action':'search_map_evidence','names':['New Mock Road']}, {'requests':8,'searches':1})):
+            with patch.object(live,'_get') as get, self.assertRaises(MapFetchError) as caught:
+                live.execute(self.state,self.folder,action,budget,True)
+            self.assertNotIsInstance(caught.exception,live.ModelShapeError)
+            get.assert_not_called()
+
     def test_live_search_and_strict_membership(self):
         self.discover()
         inspect = {'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Actual search ID'}

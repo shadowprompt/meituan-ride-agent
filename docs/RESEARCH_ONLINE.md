@@ -86,3 +86,32 @@ Node 执行普通页面完整脚本及新增局部失败摘要断言通过（不
 新增Mock模型HTTP完整主链回归，实际经过APIPlanner解析、原图/局部图请求载荷与成功呈现标记，
 搜索→way/full→node/ways→有序重复假说→inspect/build→局部图→review→deliver。
 这只验证代码编排与几何来源，不证明模型自主推理质量；原图路线没有硬编码。
+
+### 在线搜索 schema 与有限结构修正
+
+在线 `search_map_evidence` 严格接受 `action`、`names`、`evidence`，以及可选
+`region`。`names` 必须为恰好一个公共地名，`region` 只能来自图像/已有证据，
+两者各 1–100 字；`evidence` 为必需的非空依据（最多2000字）。示意：
+
+```json
+{"action":"search_map_evidence","names":["候选道路"],"region":"有依据的地域","evidence":"可见文字及不确定性"}
+```
+
+`region` 不会被忽略或展开多次查询：实际唯一 `q` 为 `region + 空格 + names[0]`；
+未传 region 时仅用名称。一次动作仍只消耗一次搜索/一次请求，保持每轮3次搜索、
+8次公开请求上限。审计保留 names/region/实际 q，source URL 与响应原始 SHA256
+绑定实际请求；搜索存档文件名同时绑定 URL 与正文 hash，避免相同正文覆盖不同查询。
+成功查询缓存和本轮失败去重按规范化实际 q 比较，兼容旧 names-only 审计。
+禁止 URL、控制/格式字符、查询参数语法及额外键；不能传 endpoint、limit 或其他参数。
+
+缺少必需字段、字段类型/列表形状错误可反馈工具 schema，在原模型动作预算内至多
+修正2回合；不追加模型调用预算、不自动修改模型答案、不发送被拒请求。
+安全检查优先：未授权、未知对象ID、重复请求、预算耗尽、危险文本/额外参数仍终止，
+不会因同时缺 evidence 而放宽。HTTP429等终止边界保持不变。
+
+搜索只得到 discovery IDs，尚未 `inspect_map_object` 获取原始几何时归档对象数为0
+是正常状态，不代表无道路或地图故障；网页明确区分两种证据。
+
+本变更仅使用真实报告形状的 Mock HTTP 回归（成功搜索→含 region 且缺 evidence
+的动作→schema修正→限定地域搜索→inspect对象→模型继续），没有重放原任务、
+调用真实模型或公开地图服务，也没有上传用户图像。
