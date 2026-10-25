@@ -119,6 +119,26 @@ class RelayTests(unittest.TestCase):
         self.assertNotIn(TOKEN,json.dumps(evidence))
         with self.assertRaises(MapFetchError):relay._pairs([('a',1),('a',2)])
 
+    def test_combined_source_requires_complete_bound_admin_chain(self):
+        combined = result()
+        combined['sources'] = combined['sources'][:1]
+        with self.assertRaises(MapFetchError):
+            relay.to_osm(combined, combined['request'])
+        parent = None
+        combined['admin_chain'] = []
+        for entry in HIERARCHY:
+            ident = 100 + entry['admin_level']
+            combined['admin_chain'].append({'object':{'type':'relation','id':ident,
+                'tags':{'name':entry['name'],'admin_level':str(entry['admin_level']),'boundary':'administrative'}},
+                'parent_relation_id':parent,'membership':'global_exact' if parent is None else 'overpass_parent_area',
+                'source_index':0})
+            parent = ident
+        self.assertIn(b'<osm',relay.to_osm(combined,combined['request']))
+        for change in ({'parent_relation_id':999},{'source_index':1},{'membership':'guessed'}):
+            bad=copy.deepcopy(combined);bad['admin_chain'][1].update(change)
+            with self.assertRaises(MapFetchError):
+                relay.to_osm(bad,bad['request'])
+
     def test_closed_connection_response_keeps_read_deadline(self):
         from unittest.mock import Mock
         connection = Mock()
@@ -198,9 +218,13 @@ class LoopbackIntegration(unittest.TestCase):
                 q=parse_qs(body.decode())['data'][0]
                 if 'rel' in q:
                     import re
-                    name=re.search(r'\["name"="([^"]+)"\]',q)[1]
-                    level=re.search(r'\["admin_level"="([^"]+)"\]',q)[1]
-                    objects=[{'type':'relation','id':100+int(level),'tags':{'name':name,'admin_level':level,'boundary':'administrative'}}]
+                    # Service now emits one guarded combined hierarchy+roads program.
+                    # Return every requested admin and the road in the same response,
+                    # rather than simulating the retired three-upstream-call protocol.
+                    names=re.findall(r'\["name"="([^"]+)"\]',q)
+                    levels=re.findall(r'\["admin_level"="([^"]+)"\]',q)
+                    objects=[{'type':'relation','id':100+int(level),'tags':{'name':name,'admin_level':level,'boundary':'administrative'}}
+                             for name,level in zip(names,levels)] + [copy.deepcopy(WAY)]
                 else:objects=[copy.deepcopy(WAY)]
             return objects,{'url':url,'response_sha256':hashlib.sha256(json.dumps(objects).encode()).hexdigest(), 'request_sha256':hashlib.sha256(body or url.encode()).hexdigest(),'fetched_at':'2026-01-01T00:00:00Z','source_timestamp':None}
         self.server=module.Server(('127.0.0.1',0),TOKEN,module.Evidence(fetch=upstream))
@@ -222,7 +246,7 @@ class LoopbackIntegration(unittest.TestCase):
             with patch('map_fetch._download',side_effect=AssertionError('direct OSM forbidden')),patch('amap_fetch._request',side_effect=AssertionError('fallback forbidden')):
                 state=agent.run(state,folder,Planner(),consent_map=True)
             self.assertEqual(state['status'],'needs_confirmation',state.get('error'))
-            self.assertTrue(state['corridor_complete']);self.assertEqual(len(self.calls),3)
+            self.assertTrue(state['corridor_complete']);self.assertEqual(len(self.calls),1)
             self.assertEqual(state['map_query']['coordinate_system'],'WGS84')
             self.assertFalse(state['verified']);self.assertFalse(state['original_gps'])
             self.assertNotIn(TOKEN,(folder/'task.json').read_text())
@@ -246,7 +270,7 @@ class LoopbackIntegration(unittest.TestCase):
                     def decide(self,*args):return ACTION
                 before=len(self.calls)
                 state=agent.run(state,folder,Planner(),consent_map=consent)
-                self.assertEqual(len(self.calls)-before,3 if consent else 0)
+                self.assertEqual(len(self.calls)-before,1 if consent else 0)
                 self.assertEqual(state['status'],'waiting_for_user')
 
 

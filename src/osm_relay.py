@@ -194,8 +194,32 @@ def to_osm(result, request):
         fail()
     sources = result.get('sources')
     expected = len(request['admin_hierarchy']) + 1 if 'admin_hierarchy' in request else 1
-    if not isinstance(sources, list) or len(sources) != expected:
+    if not isinstance(sources, list) or len(sources) not in (1, expected):
         fail()
+    if 'admin_hierarchy' in request and len(sources) == 1:
+        # Current service uses a single guarded combined hierarchy/road query.
+        # Accept it only with a complete explicit chain tied to that response;
+        # retain strict legacy source-count validation for older responses.
+        chain = result.get('admin_chain')
+        if not isinstance(chain,list) or len(chain) != len(request['admin_hierarchy']):
+            fail()
+        parent = None
+        seen_admins = set()
+        for entry, step in zip(request['admin_hierarchy'],chain):
+            if not isinstance(step,dict):
+                fail()
+            obj = step.get('object',{})
+            if not isinstance(obj,dict) or not isinstance(obj.get('tags'),dict):
+                fail()
+            tags = obj['tags']
+            if (obj.get('type') != 'relation' or not _id(obj.get('id'))
+                    or obj['id'] in seen_admins or tags.get('name') != entry['name'] or tags.get('admin_level') != str(entry['admin_level'])
+                    or tags.get('boundary') != 'administrative' or step.get('parent_relation_id') != parent
+                    or step.get('source_index') != 0
+                    or step.get('membership') != ('global_exact' if parent is None else 'overpass_parent_area')):
+                fail()
+            seen_admins.add(obj['id'])
+            parent = obj['id']
     for source in sources:
         expected_url = ('https://overpass-api.de/api/interpreter' if 'admin_hierarchy' in request
                         else f"https://api.openstreetmap.org/api/0.6/way/{request['way_id']}/full.json")
@@ -275,6 +299,10 @@ def query(*, admin_hierarchy=None, road_names=None, way_id=None, consent_downloa
     xml = to_osm(result, request)
     # Project only public contract fields; never persist arbitrary server extras.
     evidence = {k: result[k] for k in ('request', 'sources', 'coordinate_system', 'status', 'verified')}
+    if result.get('admin_chain') is not None:
+        evidence['admin_chain'] = [{'object':{'type':'relation','id':step['object']['id'],
+            'tags':{k:step['object']['tags'][k] for k in ('name','admin_level','boundary')}},
+            **{k:step[k] for k in ('parent_relation_id','membership','source_index')}} for step in result['admin_chain']] if len(result['sources']) == 1 else []
     evidence['sources'] = [{k: source.get(k) for k in ('url', 'response_sha256', 'request_sha256', 'fetched_at', 'source_timestamp')} for source in result['sources']]
     evidence.update(provider='osm_relay', original_gps=False, osm_sha256=hashlib.sha256(xml).hexdigest(),
                     attribution='© OpenStreetMap contributors https://www.openstreetmap.org/copyright')

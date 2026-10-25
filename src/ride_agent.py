@@ -25,6 +25,7 @@ from road_match import match, _load_segments
 from map_fetch import fetch_roads, fetch_named_roads, MapFetchError
 from amap_fetch import fetch_location_clues, fetch_places
 import place_review
+import map_research
 import osm_relay
 from inspect_colors import inspect_colors
 from ride_errors import TaskFailure, failure_category, api_diagnostic
@@ -82,14 +83,74 @@ No automatic Amap migration or fallback. Offline provider=osm is CLI local-only 
 """
 
 
+PROMPT += """
+When CURRENT_STAGE_STATE.map_provider=research, use the original research method instead
+of the relay hierarchy/Overpass workflow above. This is an explicitly selected OFFLINE
+snapshot archive, not a live map provider. No map consent or network is used. Never ask
+for country/admin hierarchy, user road names, controls or a local road-network download
+as a prerequisite. First inspect the screenshot (observe_region if useful), then propose
+visible road/landmark hypotheses with uncertainty, and search the saved public objects:
+{"action":"search_map_evidence","names":["visible name hypothesis"],"evidence":"image text/shape and uncertainty"}
+{"action":"inspect_map_object","object_type":"node","object_id":123,"evidence":"ID provenance from actual returned object"}
+Only use IDs in observed results, not these examples. Search misses mean not in archive,
+not nonexistent in the world. Inspect membership/coordinates, compare screenshot geometry,
+then revise names; no hardcoded city. Record ordered roads with repeated turnback legs
+and null for unknown names (never splice surrounding landmarks into ridden sequence):
+{"action":"research_hypothesis","version":"CURRENT research_version","ordered_roads":["candidate",null,"candidate"],"evidence":"observed image and object evidence, hypothesis only","limitations":"unknown legs and correspondence"}
+Use existing inspect_roads/build_corridor for supported connected geometry from real
+object nodes. An archive may lack member nodes; do not fabricate coordinates or bridge
+missing roads. After candidate build, compare the original screenshot and hypothesis
+with actual object facts, not an imaginary registered overlay; record:
+{"action":"review_research","version":"CURRENT research_version","result":"consistent|needs_revision|ambiguous","evidence":"specific screenshot/object comparison","limitations":"remaining unconfirmed correspondences, order and error"}
+needs_revision must lead to revised hypothesis and rebuilding, not delivery. consistent
+is an unverified model self-report, not ground truth. Delivery still requires an actual
+build_corridor result and current review. If insufficient archive evidence, explain the
+specific objects/searches needed and seek narrowly scoped future network/model authorization;
+do not make the user research city, road names or control points. No live lookup has
+been performed and no Overpass or AMap success may be inferred from saved OSM objects.
+"""
+
+
 MAP_MIGRATION_NOTICE = ('地图服务切换须显式选择 --map-provider osm_relay/amap，'
                         '并重新给予本次地图查询 consent_map 和模型上传 consent_upload 双授权；'
                         '不会静默迁移、重放或上传。旧osm只可 --local-only 离线调试。')
 
 
+def install_research(state, folder, manifest):
+    # Root is explicit CLI working directory, never a model-selected path.
+    archive = map_research.load(manifest, Path.cwd())
+    target = Path(folder)/'research'
+    target.mkdir(exist_ok=True)
+    sources = json.loads(Path(manifest).read_bytes())['sources']
+    copied = []
+    for index, source in enumerate(sources):
+        name = 'research/object-'+str(index)+'.json'
+        shutil.copyfile(Path.cwd()/source['saved_as'], Path(folder)/name)
+        copied.append({**source,'saved_as':name})
+    (Path(folder)/'research-manifest.json').write_text(json.dumps({'sources':copied}),encoding='utf-8')
+    archive = map_research.load(Path(folder)/'research-manifest.json',folder)
+    map_research.export_osm(archive,Path(folder)/'map.osm')
+    state['research_version'] = archive['version']
+    state['research_osm_sha256'] = hashlib.sha256((Path(folder)/'map.osm').read_bytes()).hexdigest()
+    for key in ('research_hypothesis','research_review','research_observed_version','research_seen_ids','artifacts','summary'):
+        state.pop(key,None)
+    invalidate_corridor(state)
+    save(state,folder)
+
+
+def research_archive(state, folder):
+    if state.get('map_provider') != 'research' or state.get('goal') != 'corridor':
+        raise ValueError('Explicit offline research corridor required')
+    archive = map_research.load(Path(folder)/'research-manifest.json',folder)
+    digest = hashlib.sha256((Path(folder)/'map.osm').read_bytes()).hexdigest()
+    if archive['version'] != state.get('research_version') or digest != state.get('research_osm_sha256'):
+        raise ValueError('Research evidence changed; explicit manifest import required')
+    return archive
+
+
 def validate_map_invocation(provider, *, local_only=False, previous=None,
                             consent_map=False, consent_upload=False, fetch_map=False):
-    if provider not in ('amap', 'osm', 'osm_relay'):
+    if provider not in ('amap', 'osm', 'osm_relay', 'research'):
         raise ValueError('Invalid map provider')
     if fetch_map:
         raise ValueError(MAP_MIGRATION_NOTICE + ' 旧 fetch_map 范围下载已停用。')
@@ -100,7 +161,7 @@ def validate_map_invocation(provider, *, local_only=False, previous=None,
 
 
 def select_map_provider(state, folder, provider):
-    if provider not in ('osm', 'amap', 'osm_relay'):
+    if provider not in ('osm', 'amap', 'osm_relay', 'research'):
         raise ValueError('Invalid map provider')
     if provider != state.get('map_provider', 'osm'):
         # Preserve old evidence as audit files, never let a provider switch adopt it.
@@ -130,6 +191,8 @@ def invalidate_corridor(state):
 
 
 def corridor_local_action(state, folder):
+    if state.get('map_provider') == 'research':
+        return {'action':'ask', 'question':'已保留离线公共单对象证据；本轮未调用视觉模型。继续自动看图、检索和修正需要本次模型上传授权，不需要用户填写道路名、控制点或下载路网。'}
     if state.get('map_provider', 'osm') == 'amap':
         return {'action':'ask', 'question':'高德仅支持 GCJ-02 定位线索，不支持道路走廊。若需读图查询，请明确本次模型上传与高德查询授权；不需要道路JSON。'}
     if not (Path(folder)/'map.osm').is_file():
@@ -344,6 +407,15 @@ class APIPlanner:
             current['corridor_complete'] = bool(state.get('corridor_complete'))
             current['corridor_inspection'] = state.get('corridor_inspection')
             current['map_query_diagnostic'] = state.get('map_query_diagnostic')
+        if state.get('map_provider') == 'research':
+            archive = research_archive(state, folder)
+            current['research_version'] = archive['version']
+            current['research_hypothesis'] = state.get('research_hypothesis')
+            current['research_review'] = state.get('research_review')
+            current['map_query_authorized'] = False
+            current['supports_corridor'] = True
+        if state.get('map_provider') == 'research':
+            current['map_provider'] = 'research'
         current['review_version'] = review_version
         current['extraction_config'] = state.get('extraction_config')
         current['route_review'] = state.get('route_review')
@@ -566,6 +638,12 @@ def delivery_requirements(state, folder):
         if state.get('map_provider', 'osm') == 'amap':
             return {'tool':'deliver', 'status':'rejected', 'reason':'amap_location_clues_only',
                     'missing_tools':[], 'next_step':'高德仅GCJ-02定位线索，不支持道路走廊；请说明限制并ask，不得声称交付WGS84轨迹。', 'verified':False}
+        if state.get('map_provider') == 'research':
+            archive = research_archive(state, folder)
+            review = state.get('research_review',{})
+            if review.get('version') != archive['version'] or review.get('result') != 'consistent':
+                return {'tool':'deliver','status':'rejected','missing_tools':['review_research'],
+                        'next_step':'Compare current screenshot and ordered hypothesis against saved objects; revise or explain ambiguity. No user controls required.', 'verified':False}
         if state.get('corridor_complete'):
             return None
         return {'tool':'deliver', 'status':'rejected', 'missing_tools':['build_corridor'], 'next_step':'inspect authorized local OSM then build an evidenced hypothesis', 'verified':False}
@@ -602,6 +680,8 @@ def delivery_requirements(state, folder):
 def run(state, folder, planner, budget=12, consent_map=False):
     validate_map_invocation(state.get('map_provider', 'osm'),
                             local_only=not getattr(planner, 'semantic_review', False))
+    if state.get('map_provider') == 'research':
+        research_archive(state, folder)
     delivery_corrections = 0
     map_query_used = False
     inspection = state.get('corridor_inspection')
@@ -632,7 +712,7 @@ def run(state, folder, planner, budget=12, consent_map=False):
         try:
             # 已知完整的用户修正直接走确定性提线，避免再让模型猜颜色或裁剪框。
             config = state.get('user_extraction_constraints',{})
-            if state.get('goal') == 'corridor' and (state.get('corridor_names') or not state['semantic_review_required'] or state.get('corridor_complete') or state.get('corridor_hypothesis')):
+            if state.get('goal') == 'corridor' and (state.get('corridor_names') or not state['semantic_review_required'] or (state.get('map_provider') != 'research' and (state.get('corridor_complete') or state.get('corridor_hypothesis')))):
                 action = corridor_local_action(state, folder)
             elif state.get('component_selection', {}).get('requires_selection') and not state['semantic_review_required']:
                 action = {'action':'ask', 'question':'存在多个歧义颜色分量，已保留全部候选但暂停中心线。请查看 components-overlay.png 编号，在网页勾选路线片段（可多个），或 resume --component-ids 编号；不要仅提高面积阈值。'}
@@ -782,6 +862,46 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 tool_result = {'tool':'centerline', **{k:result[k] for k in ('status','component_count','cycle_rank','skeleton_pixels','warnings')},
                                'endpoint_count':len(result['endpoints_xy']), 'junction_pixel_count':len(result['junction_pixels_xy']),
                                'has_geometric_order':result['ordered_path_xy'] is not None}
+            elif name in ('search_map_evidence', 'inspect_map_object', 'research_hypothesis', 'review_research'):
+                stage = name
+                archive = research_archive(state, folder)
+                if name in ('search_map_evidence', 'inspect_map_object'):
+                    if name == 'inspect_map_object' and [action.get('object_type'),action.get('object_id')] not in state.get('research_seen_ids',[]):
+                        raise ValueError('Inspect IDs only from returned search/object evidence')
+                    tool_result = map_research.execute(archive, action)
+                    seen = state.setdefault('research_seen_ids',[])
+                    for item in tool_result['objects']:
+                        identity = [item['object']['type'],item['object']['id']]
+                        if identity not in seen:
+                            seen.append(identity)
+                        for node_id in item['object'].get('nodes',[]):
+                            if ['node',node_id] not in seen:
+                                seen.append(['node',node_id])
+                    state['research_observed_version'] = archive['version']
+                else:
+                    if state.get('research_observed_version') != archive['version']:
+                        raise ValueError('Inspect actual archive evidence before hypothesis/review')
+                    if name == 'research_hypothesis':
+                        if set(action) != {'action','version','ordered_roads','evidence','limitations'} or action['version'] != archive['version']:
+                            raise ValueError('Current research version required')
+                        roads = action['ordered_roads']
+                        if not isinstance(roads,list) or not 1<=len(roads)<=64 or any(n is not None and (not isinstance(n,str) or not 1<=len(n)<=100) for n in roads):
+                            raise ValueError('Ordered hypotheses must retain repeats and null unknowns')
+                        route_review.text(action['evidence'],2000)
+                        route_review.text(action['limitations'],2000)
+                        state['research_hypothesis'] = action
+                        state.pop('research_review',None)
+                        invalidate_corridor(state)
+                    else:
+                        if (set(action) != {'action','version','result','evidence','limitations'} or action['version'] != archive['version']
+                                or action['result'] not in ('consistent','needs_revision','ambiguous') or not state.get('research_hypothesis')):
+                            raise ValueError('Current hypothesis and explicit uncertainty review required')
+                        route_review.text(action['evidence'],2000)
+                        route_review.text(action['limitations'],2000)
+                        state['research_review'] = action
+                        if action['result'] != 'consistent':
+                            invalidate_corridor(state)
+                    tool_result = {'tool':name,'status':'recorded','verified':False,'original_gps':False}
             elif name == 'search_places':
                 stage = name
                 if state.get('map_provider') != 'amap' or state.get('goal') != 'corridor':
@@ -916,9 +1036,11 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 if state.get('goal') != 'corridor':
                     raise ValueError('Explicit corridor goal required')
                 stage = name
-                if state.get('map_provider', 'osm') not in ('osm', 'osm_relay'):
+                if state.get('map_provider', 'osm') not in ('osm', 'osm_relay', 'research'):
                     raise ValueError('AMap location clues cannot construct or inspect OSM roads')
                 osm = Path(folder)/'map.osm'
+                if state.get('map_provider') == 'research':
+                    research_archive(state, folder)
                 if state.get('map_provider') == 'osm_relay' and not osm_relay.evidence_current(folder, state.get('map_query', {})):
                     invalidate_corridor(state)
                     raise ValueError('Current hash-bound relay evidence required; query again with fresh consent')
@@ -935,6 +1057,13 @@ def run(state, folder, planner, budget=12, consent_map=False):
                         raise ValueError('Only an evidenced hypothesis accepted')
                     hypothesis = action['hypothesis']
                     road_corridor._validate(hypothesis)
+                    if state.get('map_provider') == 'research':
+                        ordered = state.get('research_hypothesis',{}).get('ordered_roads')
+                        if ordered != [leg['road'].get('name') for leg in hypothesis['legs']] or not ordered or None in ordered:
+                            raise ValueError('Resolve unknown legs with observed evidence; preserve hypothesis order and repeats')
+                        if hypothesis['source']['kind'] != 'model':
+                            raise ValueError('Research candidate is a model hypothesis, never user confirmation')
+                        state.pop('research_review',None)
                     if state['semantic_review_required'] and hypothesis != state.get('corridor_hypothesis') and hypothesis['source']['kind'] != 'model':
                         raise ValueError('Model must not impersonate user evidence')
                     # 模型引用的节点必须可追溯到当前地图查询，而不是模型自行猜ID。
@@ -1060,6 +1189,12 @@ def run(state, folder, planner, budget=12, consent_map=False):
                         state['artifacts'].append('corridor-inspection.json')
                     if state.get('map_query'):
                         state['artifacts'].append('map-query.json')
+                    if state.get('map_provider') == 'research':
+                        audit = {k:state.get(k) for k in ('source_sha256','research_version','research_osm_sha256','research_hypothesis','research_review')}
+                        audit['sources'] = json.loads((Path(folder)/'research-manifest.json').read_text())['sources']
+                        audit.update(verified=False,original_gps=False,network_used=False)
+                        (Path(folder)/'research-audit.json').write_text(json.dumps(audit,ensure_ascii=False),encoding='utf-8')
+                        state['artifacts'].append('research-audit.json')
                     state['road_notice'] = '未确认道路走廊；非截图配准、非原始GPS、不可导航。'
                 state['question'] = None
                 save(state,folder)
@@ -1132,6 +1267,8 @@ def main():
     resume.add_argument('--review-continue', action='store_true', help='本次授权后复核当前证据，不要求新回答、不重提取或重选')
     resume.add_argument('--local-only', action='store_true', help='仅用已有证据本地继续，不上传截图，不调用模型 API')
     resume.add_argument('--fetch-map', action='store_true', help='Download roads for checked registration bounds; requires --consent-map')
+    begin.add_argument('--research-manifest', help='Explicit offline public single-object manifest; --map-provider research; never downloads')
+    resume.add_argument('--research-manifest', help='Explicit offline public single-object manifest; old evidence invalidated')
     begin.add_argument('--consent-map', action='store_true', help='仅本次允许向高德查询原图行政区和道路地点文字')
     resume.add_argument('--consent-map', action='store_true', help='仅本次同意向高德发送行政区/道路文字，不发送截图，不授权旧范围下载')
     resume.add_argument('--road-corridor', action='store_true', help='明确选择独立道路假设候选，不要求严格像素配准')
@@ -1150,7 +1287,7 @@ def main():
     sub.add_parser('status')
     for command in sub.choices.values():
         if command in (begin, resume):
-            command.add_argument('--map-provider', choices=['osm_relay', 'osm', 'amap'], default=None, help='默认osm_relay；仅环境配置中转，无本地OSM直连。amap显式兼容；旧任务切换需本次双授权')
+            command.add_argument('--map-provider', choices=['osm_relay', 'osm', 'amap', 'research'], default=None, help='默认osm_relay；仅环境配置中转，无本地OSM直连。amap显式兼容；旧任务切换需本次双授权')
         command.add_argument('--task-dir',required=True)
         command.add_argument('--consent-upload',action='store_true')
     args = parser.parse_args()
@@ -1189,6 +1326,12 @@ def main():
             if provider != 'osm' and (getattr(args, 'fetch_map', False) or getattr(args, 'osm_file', None)):
                 raise ValueError('高德仅GCJ-02定位线索；本地OSM调试须 --local-only --map-provider osm，不可联网')
             select_map_provider(state, args.task_dir, provider)
+            if args.research_manifest:
+                if provider != 'research' or state.get('goal') != 'corridor':
+                    raise ValueError('Research manifest requires explicit research provider and corridor goal')
+                install_research(state, args.task_dir, args.research_manifest)
+            if provider == 'research':
+                research_archive(state, args.task_dir)
             if args.command=='resume':
                 if args.road_corridor:
                     if args.fetch_map or args.controls_file or args.approximate_anchors_file:
@@ -1202,7 +1345,7 @@ def main():
                     raise ValueError('Choose fetch-map or osm-file, not both')
                 if args.fetch_map and not args.consent_map:
                     raise ValueError('--fetch-map requires explicit --consent-map each invocation')
-                if not args.answer and not args.answer_file and not args.controls_file and not args.approximate_anchors_file and not args.osm_file and not args.road_names and not args.road_hypothesis_file and not args.road_corridor and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue and not args.consent_map and not args.map_provider:
+                if not args.answer and not args.answer_file and not args.controls_file and not args.approximate_anchors_file and not args.osm_file and not args.road_names and not args.road_hypothesis_file and not args.road_corridor and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue and not args.consent_map and not args.map_provider and not args.research_manifest:
                     raise ValueError('Provide answer, answer-file, controls-file or osm-file')
                 answer = args.answer or ('用户本次明确授权上传当前任务截图、派生预览、诊断和对话，继续复核当前已保存证据；保留用户候选选择，不重新提取。' if review_continue else ('用户本次明确授权向所选地图服务查询原图可见行政区与道路定位线索；请依据原图自行识别，缺少地域或文字时提出具体问题。' if args.consent_map else 'User supplied local evidence file.'))
                 if args.color is not None or args.crop is not None:
