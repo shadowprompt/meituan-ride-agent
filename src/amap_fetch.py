@@ -119,6 +119,22 @@ def _candidates(raw):
         raise MapFetchError('Invalid AMap response', code='response_invalid') from None
 
 
+def configuration_status():
+    """Local-only preflight; never contacts AMap or returns credential values."""
+    key = os.environ.get('AMAP_API_KEY', '').strip()
+    if not key:
+        return 'amap_key_missing'
+    if len(key) > 256 or any(ord(c) < 33 or ord(c) > 126 for c in key):
+        return 'amap_credentials_rejected'
+    return 'configured_not_verified'
+
+
+def require_configuration():
+    status = configuration_status()
+    if status != 'configured_not_verified':
+        raise MapFetchError('Server AMap configuration unavailable', code=status)
+
+
 def fetch_location_clues(area_name, names, *, consent_download=False, area_hierarchy=None):
     """At most 3 geocodes, shared 30s budget; no fallback/search expansion/retry.
 
@@ -137,11 +153,8 @@ def fetch_location_clues(area_name, names, *, consent_download=False, area_hiera
         if (not isinstance(area_hierarchy, list) or not 2 <= len(area_hierarchy) <= 3
                 or ''.join(_exact_text(n) for n in area_hierarchy) != area_name):
             raise MapFetchError('Invalid hierarchy', code='invalid_input')
-    key = os.environ.get('AMAP_API_KEY', '').strip()
-    if not key:
-        raise MapFetchError('Server AMap key missing', code='amap_key_missing')
-    if len(key) > 256 or any(ord(c) < 33 or ord(c) > 126 for c in key):
-        raise MapFetchError('Server AMap key invalid', code='amap_credentials_rejected')
+    require_configuration()
+    key = os.environ['AMAP_API_KEY'].strip()
     deadline = time.monotonic() + TIMEOUT_SECONDS
     clues, response_bytes = [], 0
     for name in names:

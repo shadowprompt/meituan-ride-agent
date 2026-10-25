@@ -1092,6 +1092,14 @@ def main():
                 raise ValueError('模型复核继续仅限API任务且须本次上传授权，不能同时仅本地')
             if review_continue and any((args.answer, args.answer_file, args.color, args.crop, args.component_ids, args.controls_file, args.approximate_anchors_file, args.osm_file, args.fetch_map, args.reset_extraction, args.road_corridor, args.road_names, args.road_hypothesis_file)):
                 raise ValueError('复核继续不接受修改或文件，使用当前已保存证据')
+            provider = args.map_provider or ('osm' if args.command == 'start' else load(args.task_dir).get('map_provider', 'osm'))
+            if provider == 'amap' and not local_only:
+                from amap_fetch import require_configuration
+                try:
+                    require_configuration()  # Before planner creation, upload, or task mutation.
+                except MapFetchError as exc:
+                    print(json.dumps({'error_category': exc.code}), file=sys.stderr)
+                    raise SystemExit(2) from None
             planner = LocalPlanner() if local_only else (DemoPlanner() if demo else ConsentedPlanner())
             state = start(args.image,args.task_dir,demo,args.goal) if args.command=='start' else load(args.task_dir)
             provider = args.map_provider or state.get('map_provider', 'osm')

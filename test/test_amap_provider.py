@@ -83,6 +83,19 @@ class AMapTests(unittest.TestCase):
                 self.assertNotIn(KEY, str(error.exception)+str(error.exception.diagnostic()))
                 self.assertEqual(net.call_count,1)
 
+    def test_cli_preflight_blocks_before_planner_or_task_creation(self):
+        import contextlib
+        import sys
+        target=Path(self.temp.name)/'never-created'
+        argv=['ride_agent.py','start','--image',str(Path(self.temp.name)/'synthetic.png'),'--task-dir',str(target),'--goal','corridor','--map-provider','amap','--consent-upload','--consent-map']
+        stderr=io.StringIO()
+        with patch.dict('os.environ',{'AMAP_API_KEY':''}), patch.object(sys,'argv',argv), patch('ride_agent.ConsentedPlanner') as planner, contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as error: agent.main()
+            self.assertEqual(error.exception.code,2)
+            self.assertEqual(json.loads(stderr.getvalue())['error_category'],'amap_key_missing')
+            planner.assert_not_called()
+            self.assertFalse(target.exists())
+
     def test_input_response_and_call_budgets(self):
         with patch.dict('os.environ', {'AMAP_API_KEY':KEY}), patch('amap_fetch._request', return_value=raw()) as net:
             for area,names in [('', ['路']), ('区',['a']*2), ('区',['a','b','c','d']), ('区',['x\n'])]:
@@ -207,6 +220,79 @@ class AMapWebTests(unittest.TestCase):
             self.assertEqual(code,200)
             self.assertNotIn(KEY,body.decode())
             self.assertNotIn('unknown-secret',body.decode())
+
+    def test_missing_key_preflight_before_create_resume_or_model_cost(self):
+        with patch.dict('os.environ', {'AMAP_API_KEY':''}), patch('ride_web.subprocess.run') as cli, patch('ride_agent.APIPlanner') as planner:
+            code,_,body=self.request('/api/tasks',{'mode':'api','map_provider':'amap','consent_upload':True,'consent_map':True,'image_base64':'AA=='})
+            self.assertEqual(code,422,body)
+            self.assertEqual(json.loads(body)['error_category'],'amap_key_missing')
+            self.assertEqual(list(self.root.iterdir()),[])
+            task=self.state(mode='api',map_provider='amap')
+            path=self.root/task/'task'/'task.json'
+            before=path.read_bytes()
+            code,_,body=self.request('/api/tasks/'+task+'/resume',{'consent_upload':True,'consent_map':True,'answer':'must not save'})
+            self.assertEqual(code,422,body)
+            self.assertEqual(path.read_bytes(),before)
+            self.assertFalse((self.root/task/'inputs'/'answer.txt').exists())
+            cli.assert_not_called();planner.assert_not_called()
+            config=json.loads(self.request('/api/config')[2])
+            self.assertEqual(config['map_providers']['amap']['configuration_status'],'amap_key_missing')
+
+    def test_http_create_authorize_resume_restore_download_with_mock_boundaries(self):
+        # Real loopback HTTP/background worker/CLI main/state/artifacts; only
+        # external planner and AMap transport replaced, no real model or key.
+        import base64
+        import sys
+        buffer=io.BytesIO();Image.new('RGB',(30,20),'white').save(buffer,format='PNG')
+        def cli(args):
+            with patch.object(sys,'argv',['ride_agent.py',*args]), patch('ride_agent.ConsentedPlanner',side_effect=lambda:Planner()):
+                agent.main()
+        with patch.dict('os.environ',{'AMAP_API_KEY':KEY}), patch.object(self.server,'run_cli',side_effect=cli), patch('amap_fetch._request',return_value=raw(('1,2','3,4'))) as net:
+            code,_,body=self.request('/api/tasks',{'mode':'api','goal':'corridor','map_provider':'amap','consent_upload':True,'image_base64':base64.b64encode(buffer.getvalue()).decode()})
+            self.assertEqual(code,201,body)
+            task=json.loads(body)['task_id']
+            net.assert_not_called()  # model authorization != map authorization
+            code,_,body=self.request('/api/tasks/'+task+'/resume',{'consent_upload':True,'consent_map':True,'map_provider':'amap'})
+            self.assertEqual(code,200,body)
+            data=json.loads(body)
+            self.assertEqual(net.call_count,1)
+            self.assertEqual(data['location_clues']['clues'][0]['status'],'ambiguous')
+            self.assertFalse(data['corridor_complete'])
+            before=len(net.call_args_list)
+            restored=json.loads(self.request('/api/tasks/'+task)[2])
+            self.assertEqual(restored['location_clues'],data['location_clues'])
+            self.assertEqual(len(net.call_args_list),before)
+            artifact=next(a for a in data['artifacts'] if a['name']=='amap-location-clues.json')
+            code,_,body=self.request(artifact['url'])
+            self.assertEqual(code,200)
+            self.assertEqual(json.loads(body)['coordinate_system'],'GCJ02')
+            self.assertNotIn(KEY,body.decode())
+            # Switching to OSM loses current point evidence; returning to AMap
+            # does not restore old points without another authorized query.
+            for provider in ('osm','amap'):
+                code,_,body=self.request('/api/tasks/'+task+'/resume',{'consent_upload':True,'map_provider':provider})
+                self.assertEqual(code,200,body)
+                current=json.loads(body)
+                self.assertNotIn('location_clues',current)
+                self.assertFalse(next(a for a in current['artifacts'] if a['name']=='amap-location-clues.json')['current'])
+            self.assertEqual(net.call_count,1)
+
+    def test_point_preview_js_uses_only_local_independent_points_and_safe_text(self):
+        start=web.PAGE.index('function renderLocationClues(')
+        end=web.PAGE.index('\nfunction render(',start)
+        script=web.PAGE[start:end]
+        # Execute preview against a minimal DOM/canvas; deliberately no lineTo,
+        # fetch or innerHTML implementation, so unsafe/network/route drawing fails.
+        harness="""
+const texts=[],dots=[];
+const ctx={clearRect(){},fillRect(){},fillText(){},beginPath(){},arc(...p){dots.push(p);},fill(){}};
+const elements={locationPreview:{hidden:true},locationCanvas:{width:760,height:320,getContext(){return ctx;}},locationList:{replaceChildren(){texts.length=0;},append(li){texts.push(li.textContent);}}};
+const $=id=>elements[id];const document={createElement(){return {};}};
+"""
+        data={'map_provider':'amap','location_clues':{'clues':[{'query_name':'<img onerror=evil()>','candidates':[{'location':[1,2]},{'location':[1,2]},{'location':[3,4]}]}]}}
+        run=harness+script+'\nrenderLocationClues('+json.dumps(data)+');\n'
+        run+="if(elements.locationPreview.hidden||dots.length!==3||texts.length!==3||!texts[0].includes('<img'))throw Error('preview failed');renderLocationClues({map_provider:'osm'});if(!elements.locationPreview.hidden||texts.length)throw Error('stale preview');"
+        subprocess.run(['node','-e',run],capture_output=True,text=True,check=True)
 
     def test_page_explicit_provider_independent_consent_and_rotation_notice(self):
         self.assertIn('id="mapProvider"',web.PAGE)
