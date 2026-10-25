@@ -2,6 +2,47 @@
 import re
 
 
+def location_note(action):
+    """Bounded model note; never promotes a claim into map truth or permission."""
+    from route_review import text
+    if set(action) != {'action','anchors','query_plan','map_comparison','image_comparison','status','next_step'}:
+        raise ValueError('Location note schema required')
+    if action['status'] not in ('unlocated','candidate','ambiguous'):
+        raise ValueError('Unknown location status')
+    anchors = action['anchors']
+    if not isinstance(anchors,list) or not 2 <= len(anchors) <= 8:
+        raise ValueError('Multiple bounded anchors required')
+    for anchor in anchors:
+        if not isinstance(anchor,dict) or set(anchor) != {'label','kind','image_evidence'} or anchor['kind'] not in ('road','landmark','structure'):
+            raise ValueError('Independent image anchor schema required')
+        text(anchor['label'],100)
+        text(anchor['image_evidence'],1000)
+    if not isinstance(action['query_plan'],list) or not 1 <= len(action['query_plan']) <= 3:
+        raise ValueError('Limited discriminating query plan required')
+    for query in action['query_plan']: text(query,100)
+    for field in ('map_comparison','image_comparison','next_step'): text(action[field],2000)
+    return {**action,'verified':False}
+
+
+def discovery_comparisons(discoveries):
+    """Compare actual search extents across distinct queries, NOT screen projections."""
+    import math
+    pairs = []
+    for i,a in enumerate(discoveries):
+        for b in discoveries[i+1:]:
+            if not a.get('query') or not b.get('query') or a['query'] == b['query']:
+                continue
+            aa,bb = a['bbox_wgs84'],b['bbox_wgs84']
+            x,y = (aa[0]+aa[2])/2,(aa[1]+aa[3])/2
+            xx,yy = (bb[0]+bb[2])/2,(bb[1]+bb[3])/2
+            distance = 6371*2*math.asin(min(1,math.sqrt(math.sin(math.radians(yy-y)/2)**2 + math.cos(math.radians(y))*math.cos(math.radians(yy))*math.sin(math.radians(xx-x)/2)**2)))
+            pairs.append({'from':[a['type'],a['id']], 'to':[b['type'],b['id']],
+                'queries':[a['query'],b['query']], 'bbox_center_distance_km':round(distance,3),
+                'map_center_direction':('north' if yy>y else 'south' if yy<y else '')+('east' if xx>x else 'west' if xx<x else ''),
+                'screenshot_match':'unknown', 'notice':'Search extents only; long road centers can mislead. Compare extent and image structure, not distance alone.'})
+    return pairs[:64]
+
+
 def planning_evidence(state, archive, consent=False):
     """规划输入仅来自真实已返回对象；建议不是授权，也不是截图对应结论。"""
     import research_plan
@@ -20,7 +61,21 @@ def planning_evidence(state, archive, consent=False):
     network_allowed = (consent is True and state.get('research_online') is True
                        and plan['phase'] != 'closure' and not plan.get('checkpoint_local_only')
                        and used.get('requests', 0) < 8 and plan['counts']['network'] < 8)
-    return {'uninspected_candidates':candidates[:32], 'known_geometry':facts['ways'],
+    comparisons = discovery_comparisons(state.get('research_discoveries', []))
+    searched = [r.get('request',{}).get('names',[]) for r in state.get('research_requests',[]) if r.get('tool') == 'search_map_evidence']
+    note = state.get('research_location') or {}
+    localized = note.get('status') == 'candidate'
+    # Before a candidate locality exists, generic endpoint expansion is a bad default.
+    # Keep all real candidates accessible, but stop actively recommending blind crawling.
+    if not localized and used.get('searches',0) < 3:
+        suggestions = [a for a in suggestions if a['object_type'] == 'way']
+    return {'localization':{'status':note.get('status','unlocated'), 'model_claim_only':True,
+                'searched_names':searched, 'anchors':note.get('anchors',[]),
+                'priority':('Test the route-bearing geometry and alternatives in the candidate locality.' if localized else
+                    'Read the full original for an independent landmark near the route; compare distinct search bounds before endpoint crawling. A background road is not localization.'),
+                'geometry_warning':'Do not spend remaining requests on serial background-road segments; retain unknown branches.'},
+            'discovery_comparisons':comparisons,
+            'uninspected_candidates':candidates[:32], 'known_geometry':facts['ways'],
             'network_suggestions':suggestions[:32], 'network_allowed_this_invocation':network_allowed,
             'remaining':{'model':max(0, research_plan.MAX_MODEL_CALLS-plan['model_calls']),
                          'requests':max(0, 8-used.get('requests', 0)),
@@ -138,16 +193,12 @@ def gate(state, archive, action):
                      and focus.get('region') is not None)
             independent = any(isinstance(h, dict) and action['names'][0] not in h.get('claim', '')
                               for h in claims)
-            if not (fresh and len(claims) >= 2 and independent and focus.get('falsifier')):
+            note = state.get('research_location') or {}
+            documented = (note.get('status') == 'candidate' and len(note.get('anchors',[])) >= 2
+                          and note.get('map_comparison') and note.get('image_comparison'))
+            if not (documented or (fresh and len(claims) >= 2 and independent and focus.get('falsifier'))):
                 return {'status':'search_diversity_recheck',
-                        'next_step':'No request sent; search quota unchanged. A Nominatim miss/place hit does NOT exclude a road. Prefer another independent visible label. Before retrying the same name with another region, observe the relevant label/landmark, then research_focus with at least two competing claims including an independent screenshot clue or alternative reading, a falsifier and why this region is evidenced. Do not ask the user to supply roads. Candidate map-relative positions never establish screenshot-relative positions.'}
-    if action.get('action') == 'search_map_evidence' and conflict(state, action):
-        focus = state.get('research_focus', {})
-        observation = state.get('review_region', {})
-        if not (focus.get('preview_count') == state.get('review_preview_count', 0)
-                and focus.get('preview_count', 0) > state.get('research_last_search_preview', 0)
-                and focus.get('region') == observation.get('region_original_xyxy')):
-            return {'status': 'needs_image_recheck', 'next_step': 'Conflicting text readings: observe_region on the disputed label, then research_focus with competing readings, explicit unknown/support/exclusion, and a falsifiable next query purpose. Do not silently switch names.'}
+                        'next_step':'No request sent; search quota unchanged. A Nominatim miss/place hit does NOT exclude a road. Prefer another independent visible label. Before retrying the same name with another region, document the independent image and returned-map comparison in research_location (or reuse a relevant existing focus); no duplicate observation ritual is required. Do not ask the user to supply roads. Candidate map-relative positions never establish screenshot-relative positions.'}
     if action.get('action') == 'inspect_map_object':
         kind, ident = action.get('object_type'), action.get('object_id')
         for record in state.get('research_requests', []):
@@ -167,4 +218,4 @@ def outcome(archive, action, result):
             'supported': {'returned_road_ids': roads, 'object_facts_only': True},
             'excluded': ['non-road objects cannot establish a road intersection'] if ways and not roads else [],
             'unknown': ['screenshot identity', 'ordered traversal including turnbacks', 'unreturned roads'],
-            'next_step': 'Compare connections and WGS84 bbox directions with a localized screenshot hypothesis; fetch relevant connecting way/full if coordinates missing. Record what would falsify each competing reading. A miss/failure excludes no road.'}
+            'next_step': 'First test the locality with independent visible anchors and distinct search bounds; a background road is not a located route. After a candidate locality exists, compare route shape and real geometry, then fetch only discriminating connecting way/full if needed. Map directions are not screenshot positions; no road label or registration prerequisite for multi-evidence candidates. A miss/failure excludes no road.'}

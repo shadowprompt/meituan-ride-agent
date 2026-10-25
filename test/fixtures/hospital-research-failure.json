@@ -1,0 +1,188 @@
+{
+  "notice": "Offline public-response bounds + action audit only; no image, user data, authorization or expected correct route. This is hospital-image evidence, NOT the previous park turnback.",
+  "task_id": "0bd74825-ca5f-4434-a118-fb1a3a2672ab",
+  "budget": {
+    "requests": 8,
+    "searches": 2
+  },
+  "searched_names": [
+    "水城路",
+    "中环路"
+  ],
+  "requests": [
+    {
+      "tool": "search_map_evidence",
+      "request": {
+        "names": [
+          "水城路"
+        ],
+        "region": "上海",
+        "q": "上海 水城路"
+      }
+    },
+    {
+      "tool": "search_map_evidence",
+      "request": {
+        "names": [
+          "中环路"
+        ],
+        "region": "上海",
+        "q": "上海 中环路"
+      }
+    },
+    {
+      "tool": "inspect_map_object",
+      "request": {
+        "object_type": "way",
+        "object_id": 70650838
+      }
+    },
+    {
+      "tool": "inspect_map_object",
+      "request": {
+        "object_type": "way",
+        "object_id": 656490079
+      }
+    },
+    {
+      "tool": "inspect_map_object",
+      "request": {
+        "object_type": "way",
+        "object_id": 1100831013
+      }
+    },
+    {
+      "tool": "inspect_map_object",
+      "request": {
+        "object_type": "node",
+        "object_id": 560769399
+      }
+    },
+    {
+      "tool": "inspect_map_object",
+      "request": {
+        "object_type": "way",
+        "object_id": 1329812771
+      }
+    },
+    {
+      "tool": "inspect_map_object",
+      "request": {
+        "object_type": "way",
+        "object_id": 1227641732
+      }
+    }
+  ],
+  "discoveries": [
+    {
+      "type": "node",
+      "id": 5306444955,
+      "query": "上海 水城路",
+      "bbox_wgs84": [
+        121.3826028,
+        31.1962461,
+        121.3926028,
+        31.2062461
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1100831014,
+      "query": "上海 水城路",
+      "bbox_wgs84": [
+        121.3873142,
+        31.2156627,
+        121.3885214,
+        31.2201654
+      ]
+    },
+    {
+      "type": "way",
+      "id": 656490079,
+      "query": "上海 水城路",
+      "bbox_wgs84": [
+        121.3865952,
+        31.2013963,
+        121.3877491,
+        31.2056351
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1100831013,
+      "query": "上海 水城路",
+      "bbox_wgs84": [
+        121.3864156,
+        31.212072,
+        121.3873142,
+        31.2156627
+      ]
+    },
+    {
+      "type": "node",
+      "id": 804474558,
+      "query": "上海 水城路",
+      "bbox_wgs84": [
+        121.3875661,
+        31.2011735,
+        121.3876661,
+        31.2012735
+      ]
+    },
+    {
+      "type": "way",
+      "id": 239298155,
+      "query": "上海 中环路",
+      "bbox_wgs84": [
+        121.5097938,
+        31.1514874,
+        121.552478,
+        31.1643187
+      ]
+    },
+    {
+      "type": "way",
+      "id": 232167218,
+      "query": "上海 中环路",
+      "bbox_wgs84": [
+        121.4025842,
+        31.138599,
+        121.4096371,
+        31.1529779
+      ]
+    },
+    {
+      "type": "way",
+      "id": 39150988,
+      "query": "上海 中环路",
+      "bbox_wgs84": [
+        121.5068005,
+        31.30067,
+        121.5171548,
+        31.3038705
+      ]
+    },
+    {
+      "type": "way",
+      "id": 50177930,
+      "query": "上海 中环路",
+      "bbox_wgs84": [
+        121.5171548,
+        31.3038705,
+        121.5208562,
+        31.3049768
+      ]
+    },
+    {
+      "type": "way",
+      "id": 70650838,
+      "query": "上海 中环路",
+      "bbox_wgs84": [
+        121.3716347,
+        31.2141052,
+        121.3719458,
+        31.2218376
+      ]
+    }
+  ]
+}

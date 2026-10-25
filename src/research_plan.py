@@ -93,6 +93,9 @@ def convergence(state):
 def decision_key(state, action):
     name = action.get('action')
     # 文案变化不算路线假说/复核进展。相同证据、相同结论不反复计数。
+    if name == 'research_location':
+        return [state.get('research_version'), name, action.get('anchors'), action.get('status'),
+                action.get('map_comparison'), action.get('image_comparison')]
     if name == 'research_hypothesis':
         return [state.get('research_version'), name, action.get('ordered_roads')]
     if name == 'review_research':
@@ -133,13 +136,19 @@ def local_next(state, proposed=None):
         return None
     if proposed:
         allowed = {'observe_region', 'research_focus', 'research_hypothesis',
-                   'review_research', 'inspect_roads', 'build_corridor'}
+                   'review_research', 'inspect_roads', 'build_corridor', 'research_location'}
         if (not isinstance(proposed, dict) or proposed.get('action') not in allowed
                 or plan['counts'][category(proposed.get('action'))] >= LIMITS[category(proposed.get('action'))]
                 or duplicate(state, proposed)):
             return None
         name = proposed['action']
-        if name == 'observe_region':
+        if name == 'research_location':
+            import research_decision
+            try:
+                research_decision.location_note(proposed)
+            except (ValueError, TypeError, KeyError):
+                return None
+        elif name == 'observe_region':
             import route_review
             try:
                 route_review.region_box(proposed.get('region'), state['image_size'])
@@ -231,6 +240,7 @@ def checkpoint(state, reason, action=None, allow_continue=False, planning=None):
             'An existing focus is not a completed investigation. Inspect an actually seen candidate way/full or known road node/ways only if network_allowed_this_invocation; otherwise compare cached geometry or choose a DIFFERENT relevant screenshot region. '
             'Do not invent focus, coordinates, screenshot positions or fill unknown legs. No new evidence means stop at the next checkpoint.') if continuing and repair else None,
         'can_resume':plan['model_calls'] < MAX_MODEL_CALLS and plan['counts']['closure'] < LIMITS['closure'],
+        'no_resume':plan['model_calls'] >= MAX_MODEL_CALLS or plan['counts']['closure'] >= LIMITS['closure'],
         'resume_requires_fresh_upload_consent':True, 'verified':False, 'original_gps':False,
         'evidence_summary':{'observed_regions':c['observations'], 'focus':state.get('research_focus'),
                             'ordered_hypothesis':state.get('research_hypothesis'),
@@ -244,7 +254,7 @@ def checkpoint(state, reason, action=None, allow_continue=False, planning=None):
         # 没有真正的用户决策问题，不假装等待用户填写道路；paused是显式未收敛。
         state.update(status='waiting_for_user' if reason == 'specific_user_question' else 'paused',
             verified=False, original_gps=False,
-            question=f"调研未收敛，进度已保存；停止原因：{blocked}（保留动作/模型硬上限）。地图请求 {8-progress['network_requests_remaining']}/8（不等于地图预算耗尽）。未知路段保留，未导出完整路线；不会自动续授权或重放任务。")
+            question=f"调研未收敛，进度已保存；停止原因：{blocked}（保留动作/模型硬上限）。地图请求 {8-progress['network_requests_remaining']}/8（{'请求额度已用尽' if progress['network_requests_remaining'] == 0 else '请求仍有余量，非请求耗尽'}；搜索 {state.get('research_budget_used', {}).get('searches', 0)}/3）。未知路段保留，未导出完整路线；不会自动续授权或重放任务。")
     if not continuing and state.get('research_failures'):
         import json
         state['question'] += ' 局部失败记录：' + json.dumps([

@@ -14,7 +14,7 @@ class DecisionTests(unittest.TestCase):
     call = fixture.OnlineTests.call
     discover = fixture.OnlineTests.discover
     # 复用仅本地白图/Mock HTTP的fixture，不读取用户截图。
-    def test_conflicting_readings_require_new_local_observe_and_focus_before_search(self):
+    def test_changed_reading_no_longer_requires_duplicate_observe_focus_ritual(self):
         class Planner:
             semantic_review = True
             def __init__(inner):
@@ -35,7 +35,8 @@ class DecisionTests(unittest.TestCase):
             state = ride_agent.run(self.state,self.folder,Planner(),budget=6,consent_map=True)
         self.assertEqual(get.call_count,2)
         reports = [m['content'] for m in state['messages'] if m['role']=='user']
-        self.assertTrue(any('needs_image_recheck' in m for m in reports))
+        self.assertFalse(any('needs_image_recheck' in m for m in reports))
+        self.assertEqual(state['research_plan']['counts']['correction'], 1)  # cached query only, no focus prerequisite
         self.assertEqual(state['research_focus']['hypotheses'][0]['status'],'unknown')
         self.assertEqual(state['research_budget_used']['requests'],2)
         self.assertFalse(state['corridor_complete'])

@@ -306,7 +306,7 @@ def execute(state, folder, action, budget, consent):
                 if (len(box) == 4 and all(math.isfinite(v) for v in box)
                         and -85 <= box[0] <= box[1] <= 85 and -180 <= box[2] <= box[3] <= 180):
                     discovery_bounds.append({'type':item['osm_type'],'id':item['osm_id'],
-                        'bbox_wgs84':[box[2],box[0],box[3],box[1]],'discovery_only':True})
+                        'bbox_wgs84':[box[2],box[0],box[3],box[1]],'discovery_only':True,'query':query,'label':label})
                 hits.append({'object':{'type':item['osm_type'],'id':item['osm_id'],'tags':{'name':label}},'sources':[source], 'discovery_only':True})
             # 原始搜索响应仅本地留证；不把地点中心当作道路节点坐标。
             target = Path(folder)/'research'/('search-'+hashlib.sha256((source['url'] + source['sha256']).encode()).hexdigest()+'.json')
