@@ -96,13 +96,34 @@ class OnlineTests(unittest.TestCase):
         self.assertIn('Fixture Road',state['question'])
         self.assertEqual(state['research_diagnostic']['reason_code'],'consent_required')
 
+    def test_default_research_does_not_mask_model_network_failure(self):
+        import urllib.error
+        with patch.dict('os.environ',{'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-only'}), patch('ride_agent.urllib.request.build_opener') as opener, patch.object(live,'_get') as maps:
+            opener.return_value.open.side_effect=urllib.error.URLError('mock network unavailable')
+            planner=ride_agent.APIPlanner()
+            state=ride_agent.run(self.state,self.folder,planner,consent_map=True)
+        self.assertEqual(state['error_category'],'api_network')
+        self.assertEqual(state['error_stage'],'planner')
+        self.assertEqual(state['map_provider'],'research')
+        self.assertFalse(state['corridor_complete'])
+        maps.assert_not_called()
+
+    def test_mock_model_http_image_revision_rebuilds_and_reviews_before_delivery(self):
+        self.run_corridor_loop(False, model_http=True, revise=True)
+
+    def test_mock_model_http_node_search_discovers_parent_then_full_geometry(self):
+        self.run_corridor_loop(False, model_http=True, node_first=True)
+
+    def test_mock_model_http_full_research_loop_preserves_turnback(self):
+        self.run_corridor_loop(False, model_http=True)
+
     def test_agent_real_action_loop_dynamic_versions(self):
         self.run_corridor_loop(False)
 
     def test_two_searches_then_timeout_still_inspects_and_builds_corridor(self):
         self.run_corridor_loop(True)
 
-    def run_corridor_loop(self, partial_failure):
+    def run_corridor_loop(self, partial_failure, model_http=False, node_first=False, revise=False):
         class Planner:
             semantic_review=True
             index=0
@@ -124,6 +145,9 @@ class OnlineTests(unittest.TestCase):
                         self.assertIn('unavailable',state['messages'][-1]['content'])
                     if step > 3:
                         step -= 2
+                revision_review = revise and step == 8
+                if revise and step > 8:
+                    step = {9:4,10:5,11:6,12:7,13:8,14:9}[step]
                 actions={1:self.search,2:{'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Search ID'},
                     3:{'action':'inspect_map_object','object_type':'node','object_id':1,'evidence':'Actual way member'},
                     4:{'action':'research_hypothesis','version':state['research_version'],'ordered_roads':['Fixture Road','Fixture Road'],'evidence':'Unit repeated legs','limitations':'Fixture only'},
@@ -132,16 +156,42 @@ class OnlineTests(unittest.TestCase):
                     7:{'action':'observe_region','region':[0,0,60,60],'hypothesis':'repeated_order','reason':'Unit crop comparison'},
                     8:{'action':'review_research','version':state['research_version'],'result':'consistent','evidence':'Mock presented crop only','limitations':'Not real E2E'},
                     9:{'action':'deliver','summary':'Unit unverified candidate'}}
-                if step==8:
+                if revision_review:
+                    actions[8] = {**actions[8], 'result':'needs_revision','evidence':'Mock screenshot comparison requires revised candidate; no real visual claim'}
+                if step==8 and not model_http:
                     # Script planner模拟成功模型传输标记；真实API分支单独测试，不将脚本称为视觉验收。
                     state['research_presented_version']=state['research_version']
+                if node_first and step in (2,3):
+                    return {'action':'inspect_map_object','object_type':'node' if step==2 else 'way','object_id':1 if step==2 else 5,'evidence':'Actual search or returned parent ID'}
                 return actions[step]
         bodies=[[{'osm_type':'way','osm_id':5,'display_name':'Fixture Road'}],{'elements':[self.way]+self.nodes},{'elements':[self.way]}]
+        if node_first:
+            bodies=[[{'osm_type':'node','osm_id':1,'display_name':'Fixture junction'}], {'elements':[self.way]}, {'elements':[self.way]+self.nodes}]
         responses = [json.dumps(b).encode() for b in bodies]
         if partial_failure:
             responses[1:1] = [responses[0],MapFetchError('remote body withheld',code='timeout')]
-        with patch.object(live,'_get',side_effect=responses) as get:
-            state=ride_agent.run(self.state,self.folder,Planner(),budget=11 if partial_failure else 9,consent_map=True)
+        script = Planner()
+        def mock_model(request, **kwargs):
+            payload = json.loads(request.data)
+            self.assertIn('CURRENT_STAGE_STATE', json.dumps(payload))
+            response = unittest.mock.MagicMock()
+            action = script.decide(self.state, self.folder)
+            response.__enter__.return_value.read.return_value = json.dumps({'choices':[{'message':{'content':json.dumps(action)}}]}).encode()
+            return response
+        with patch.object(live,'_get',side_effect=responses) as get, patch.dict('os.environ',{'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-only'}), patch('ride_agent.urllib.request.build_opener') as opener:
+            opener.return_value.open.side_effect = mock_model
+            planner = ride_agent.APIPlanner() if model_http else script
+            planner.map_query_authorized = True
+            state=ride_agent.run(self.state,self.folder,planner,budget=14 if revise else 11 if partial_failure else 9,consent_map=True)
+            if model_http:
+                self.assertEqual(opener.return_value.open.call_count,14 if revise else 9)
+                self.assertEqual(state['research_presented_version'],state['research_version'])
+                self.assertEqual([call.args[1] for call in get.call_args_list][1:], ['/api/0.6/node/1/ways.json','/api/0.6/way/5/full.json'] if node_first else ['/api/0.6/way/5/full.json','/api/0.6/node/1/ways.json'])
+                geo = next(self.folder/name for name in state['corridor_artifacts'] if name.endswith('.geojson'))
+                coordinates = json.loads(geo.read_text())['features'][0]['geometry']['coordinates']
+                self.assertEqual(coordinates[0],coordinates[-1])
+                self.assertIn([10.001,20.001],coordinates)
+
         self.assertEqual(get.call_count,5 if partial_failure else 3)
         self.assertEqual(state['status'],'needs_confirmation')
         audit=json.loads((self.folder/'research-audit.json').read_text())
@@ -335,6 +385,35 @@ import sys
 import test_ride_web as web_fixture
 
 class OnlineWebTests(web_fixture.WebTests):
+    def test_default_create_needs_no_relay_configuration_and_keeps_old_providers(self):
+        def cli(args):
+            with patch.object(sys,'argv',['ride_agent.py',*args]):
+                ride_agent.main()
+        image=io.BytesIO()
+        Image.new('RGB',(30,30),'white').save(image,format='PNG')
+        with patch.dict('os.environ',{'OSM_SERVICE_URL':'','OSM_SERVICE_TOKEN':''}), patch.object(self.server,'run_cli',side_effect=cli), patch.object(live,'_get') as net, patch('osm_relay.require_configuration') as relay:
+            code,_,body=self.request('/api/tasks',{'mode':'demo','image_base64':base64.b64encode(image.getvalue()).decode()})
+            self.assertEqual(code,201,body)
+            state=json.loads(body)
+            self.assertEqual((state['map_provider'],state['goal']),('research','corridor'))
+            self.assertTrue(state['research_online'])
+            relay.assert_not_called();net.assert_not_called()
+            config=json.loads(self.request('/api/config')[2])
+            self.assertEqual(config['default_map_provider'],'research')
+        for provider in ('amap','osm_relay','osm'):
+            task=self.state(map_provider=provider,mode='api')
+            before=(self.root/task/'task'/'task.json').read_bytes()
+            with patch.object(self.server,'run_cli') as runner:
+                code,_,body=self.request('/api/tasks/'+task+'/resume',{'consent_upload':True,'consent_map':True})
+                if provider=='osm':
+                    self.assertEqual(code,409,body)
+                    runner.assert_not_called()
+                else:
+                    self.assertEqual(code,200,body)
+                    args=runner.call_args.args[0]
+                    self.assertEqual(args[args.index('--map-provider')+1],provider)
+            self.assertEqual((self.root/task/'task'/'task.json').read_bytes(),before)
+
     def test_normal_web_research_create_resume_separate_consent_restore(self):
         class Planner:
             semantic_review=True

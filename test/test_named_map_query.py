@@ -37,7 +37,7 @@ class NamedMapTests(unittest.TestCase):
     def test_model_image_query_returns_amap_gcj02_clues_not_corridor(self):
         from test_amap_provider import raw, KEY
         state=agent.start(self.image,self.root/'task',False,'corridor'); folder=self.root/'task'
-        state['map_provider']='amap'
+        agent.select_map_provider(state,folder,'amap')
         action={'action':'query_map','area_name':'合成区','names':['A & B'],'evidence':'合成图文'}
         requests=[]
         def model_http(req,**kwargs):
@@ -59,7 +59,7 @@ class NamedMapTests(unittest.TestCase):
         from test_amap_provider import raw, KEY, Planner
         for consent in (False,True):
             folder=self.root/str(consent); state=agent.start(self.image,folder,True,'corridor')
-            state['map_provider']='amap'
+            agent.select_map_provider(state,folder,'amap')
             with patch.dict('os.environ',{'AMAP_API_KEY':KEY}),patch('amap_fetch._request',return_value=raw()) as net,patch('map_fetch._download') as osm:
                 done=agent.run(state,folder,Planner(),consent_map=consent)
                 self.assertEqual(net.call_count,1 if consent else 0)
@@ -93,7 +93,7 @@ class NamedMapWebTests(unittest.TestCase):
             calls.append(args)
             folder=Path(args[args.index('--task-dir')+1])
             if args[0]=='start':
-                state=agent.start(args[args.index('--image')+1],folder,False,'corridor'); state['map_provider']='amap'; agent.save(state,folder)
+                state=agent.start(args[args.index('--image')+1],folder,False,'corridor'); agent.select_map_provider(state,folder,'amap'); agent.save(state,folder)
         payload={'image_base64':base64.b64encode(image.getvalue()).decode(),'mode':'api','goal':'corridor','map_provider':'amap','consent_upload':True,'consent_map':True}
         with patch.object(self.server,'run_cli',side_effect=cli):
             created=self.server.create(payload)
@@ -125,8 +125,9 @@ class QueryActionBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             image=Path(d)/'synthetic.png';Image.new('RGB',(12,12),'white').save(image)
             for index,extra in enumerate(({'url':'https://evil.invalid'},{'output_path':'/tmp/map'},{'bounds':[1,2,3,4]})):
-                state=agent.start(image,Path(d)/str(index),True,'corridor')
-                state['map_provider']='amap'
+                folder=Path(d)/str(index)
+                state=agent.start(image,folder,True,'corridor')
+                agent.select_map_provider(state,folder,'amap')
                 action={'action':'query_map','area_name':'合成区','names':['A & B'],'evidence':'合成图中文字',**extra}
                 class Bad:
                     semantic_review=True

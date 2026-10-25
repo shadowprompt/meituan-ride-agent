@@ -90,11 +90,11 @@ class RelayTests(unittest.TestCase):
             try:
                 with patch.object(server,'run_cli') as cli, patch('ride_agent.APIPlanner') as model:
                     with self.assertRaises(ride_web.WebError):
-                        server.create({'mode':'api','consent_upload':True,'image_base64':'AA=='})
+                        server.create({'mode':'api','consent_upload':True,'image_base64':'AA==','map_provider':'osm_relay'})
                     cli.assert_not_called();model.assert_not_called()
                     self.assertEqual(list(server.root.iterdir()),[])
                 target=root/'new-task'
-                with patch.object(sys,'argv',['ride_agent.py','start','--image',str(root/'missing.png'),'--task-dir',str(target),'--consent-upload']),patch('ride_agent.ConsentedPlanner') as model:
+                with patch.object(sys,'argv',['ride_agent.py','start','--image',str(root/'missing.png'),'--task-dir',str(target),'--consent-upload','--map-provider','osm_relay']),patch('ride_agent.ConsentedPlanner') as model:
                     with self.assertRaises(SystemExit):agent.main()
                     model.assert_not_called();self.assertFalse(target.exists())
             finally:server.server_close()
@@ -161,6 +161,7 @@ class RelayTests(unittest.TestCase):
             root = Path(tmp); task_id = str(uuid.uuid4()); folder = root/task_id/'task'
             image = root/'synthetic.png'; Image.new('RGB',(20,20),'white').save(image)
             state = agent.start(image, folder, True, 'corridor')
+            agent.select_map_provider(state,folder,'osm_relay')
             with patch('osm_relay._request', return_value=result()):
                 xml, evidence = relay.query(admin_hierarchy=HIERARCHY, road_names=['合成路'], consent_download=True)
             relay.save_evidence(folder, xml, evidence)
@@ -182,7 +183,8 @@ class RelayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);image=root/'synthetic.png';Image.new('RGB',(30,20),'white').save(image)
             folder=root/'task';state=agent.start(image,folder,True,'corridor')
-            self.assertEqual(state['map_provider'],'osm_relay')
+            self.assertEqual(state['map_provider'],'research')
+            agent.select_map_provider(state,folder,'osm_relay')
             for old in ('amap','osm'):
                 with self.assertRaises(ValueError):agent.validate_map_invocation('osm_relay',previous=old,consent_map=True)
                 agent.validate_map_invocation('osm_relay',previous=old,consent_map=True,consent_upload=True)
@@ -238,6 +240,7 @@ class LoopbackIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); image=root/'synthetic.png';Image.new('RGB',(30,20),'white').save(image)
             folder=root/'task';state=agent.start(image,folder,True,'corridor')
+            agent.select_map_provider(state,folder,'osm_relay')
             hypothesis={'schema_version':1,'coordinate_system':'WGS84','source':{'kind':'model','evidence':'合成顺序，不是真实截图'},'legs':[{'road':{'name':'合成路'},'via':[{'node_id':11},{'node_id':13}]}]}
             actions=iter([ACTION,{'action':'inspect_roads','names':['合成路']},{'action':'build_corridor','hypothesis':hypothesis},{'action':'deliver','summary':'合成道路走廊，未验证，不可导航'}])
             class Planner:
@@ -265,6 +268,7 @@ class LoopbackIntegration(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 root=Path(tmp);image=root/'synthetic.png';Image.new('RGB',(20,20),'white').save(image)
                 folder=root/'task';state=agent.start(image,folder,True,'corridor')
+                agent.select_map_provider(state,folder,'osm_relay')
                 class Planner:
                     semantic_review=True
                     def decide(self,*args):return ACTION

@@ -37,7 +37,7 @@ class DiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             image=Path(d)/'synthetic.png';Image.new('RGB',(20,20),'white').save(image)
             folder=Path(d)/'task';state=agent.start(image,folder,True,'corridor')
-            state['map_provider']='amap'
+            agent.select_map_provider(state,folder,'amap')
             action=dict(ACTION,area_name='合成市合成区',area_hierarchy=['合成市','合成区'])
             with patch('ride_agent.fetch_location_clues',side_effect=map_fetch.MapFetchError('SECRET',code='amap_service_error')):
                 done=agent.run(state,folder,Planner(action),consent_map=True)
@@ -91,7 +91,7 @@ class DiagnosticsTests(unittest.TestCase):
             folder=Path(d)/'task';image=Path(d)/'synthetic.png'
             Image.new('RGB',(20,20),'white').save(image)
             state=agent.start(image,folder,True,'corridor')
-            state['map_provider']='amap'
+            agent.select_map_provider(state,folder,'amap')
             attempts=[]
             def fail(*args,**kwargs):
                 started=json.loads((folder/'map-query-diagnostic.json').read_text())
@@ -121,7 +121,7 @@ class DiagnosticsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             image=Path(d)/'synthetic.png';folder=Path(d)/'task';Image.new('RGB',(20,20),'white').save(image)
             state=agent.start(image,folder,True,'corridor')
-            state['map_provider']='amap'
+            agent.select_map_provider(state,folder,'amap')
             with patch('ride_agent.fetch_location_clues',side_effect=map_fetch.MapFetchError('fixed',code='network_error')):
                 state=agent.run(state,folder,Planner(),consent_map=True)
             old_id=state['map_query_diagnostic']['attempt_id']

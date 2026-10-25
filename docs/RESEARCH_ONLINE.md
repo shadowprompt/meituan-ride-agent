@@ -1,7 +1,7 @@
 # 普通网页实时自主调研（非真实原图验收）
 
-网页仍使用 `python3 src/ride_web.py --port 18766`。在普通页面地图服务中选择
-**自主调研：实时文字检索与具体对象核查（WGS84）**，保留默认 API / 道路走廊目标，
+网页仍使用 `python3 src/ride_web.py --port 18766`。普通页面与新任务默认
+**自主调研 research（WGS84）**，保留默认 API / 道路走廊目标，
 选择截图后分别勾选本次模型上传和本次地图查询授权，再创建任务。
 不需要 manifest、way/node ID、道路 JSON、行政区层级或控制点。
 创建/继续后授权取消；刷新只读，不重放联网。没有授权时工具报告具体缺口。
@@ -74,3 +74,15 @@ build_corridor → 局部图观察 → 模拟版本复核 → 未验证候选交
 共434项，424通过、10跳过；专项 research_online/map_research/web_simple_ui 共41项通过。
 Node 执行普通页面完整脚本及新增局部失败摘要断言通过（不是只做语法检查）。
 本地日志：`outputs/partial-research-regression/{full-tests-final,targeted-tests,page-js}.log`。
+
+## 默认入口与故障分层回归
+
+普通网页、`POST /api/tasks` 省略 provider/goal 和 CLI 新建默认 research/corridor；
+旧任务恢复沿用已有provider，缺provider的旧档仍按旧osm处理，不静默迁移。
+像素等高级目标仍可显式选择，不被research存档校验阻塞。中转缺配置只阻止显式中转任务，
+不再阻止默认自主调研。模型 api_network 属于模型连接故障，改地图默认不能修复它；
+不绕过模型/地图双授权，也不宣称已完成真实图验收。
+
+新增Mock模型HTTP完整主链回归，实际经过APIPlanner解析、原图/局部图请求载荷与成功呈现标记，
+搜索→way/full→node/ways→有序重复假说→inspect/build→局部图→review→deliver。
+这只验证代码编排与几何来源，不证明模型自主推理质量；原图路线没有硬编码。

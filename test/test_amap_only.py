@@ -22,8 +22,8 @@ class OnlyAMapTests(unittest.TestCase):
         self.folder = self.root/'task'
         self.state = agent.start(image,self.folder,True,'corridor')
 
-    def test_new_task_defaults_to_relay(self):
-        self.assertEqual(self.state['map_provider'],'osm_relay')
+    def test_new_task_defaults_to_research(self):
+        self.assertEqual(self.state['map_provider'],'research')
 
     def test_all_retired_network_helpers_refuse_even_with_consent_and_mock_transport(self):
         target=self.folder/'map.osm'; target.write_text('<osm/>')
@@ -104,9 +104,9 @@ class MigrationHTTPTests(unittest.TestCase):
             self.assertEqual(code,409);cli.assert_not_called();preflight.assert_not_called()
             code,_,body=self.request('/api/tasks',{'mode':'demo','image_base64':'AA=='})
             self.assertEqual(code,201,body)
-            preflight.assert_called_with('osm_relay')
+            preflight.assert_called_with('research')
             argv=cli.call_args.args[0]
-            self.assertEqual(argv[argv.index('--map-provider')+1],'osm_relay')
+            self.assertEqual(argv[argv.index('--map-provider')+1],'research')
 
 class MigrationCLITests(OnlyAMapTests):
     def test_cli_legacy_rejection_before_preflight_planner_or_task_mutation(self):

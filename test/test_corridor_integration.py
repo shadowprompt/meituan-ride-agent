@@ -29,6 +29,7 @@ class CorridorIntegrationTests(unittest.TestCase):
     def task(self):
         folder = self.root/'task'
         state = agent.start(self.image, folder, True, 'corridor')
+        agent.select_map_provider(state,folder,'osm')
         (folder/'map.osm').write_text(XML)
         return state, folder
 
@@ -86,6 +87,7 @@ class CorridorIntegrationTests(unittest.TestCase):
                 # 每次使用独立任务，避免前一次错误影响状态。
                 folder = self.root/(kind+str(len(extra)))
                 state = agent.start(self.image, folder, True, 'corridor')
+                state['map_provider']='osm_relay'  # Explicit provider for model boundary rejection, no query.
                 (folder/'map.osm').write_text(XML)
                 p = json.loads(json.dumps(self.hypothesis)); p['source']['kind']=kind
                 class Bad:

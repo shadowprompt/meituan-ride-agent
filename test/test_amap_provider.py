@@ -139,12 +139,13 @@ class AMapTests(unittest.TestCase):
             self.assertEqual(error.exception.code,'response_limit')
 
     def test_switch_invalidates_and_archives_not_reuses(self):
+        previous_audits=len(list(self.folder.glob('map-audit-*.osm')))
         agent.select_map_provider(self.state,self.folder,'osm')
         (self.folder/'map.osm').write_text('synthetic old map')
         self.state.update(corridor_complete=True,corridor_inspection={'old':True},map_query={'old':True},messages=[{'role':'user','content':'old node IDs'}],map_query_diagnostic={'old':True})
         agent.select_map_provider(self.state,self.folder,'amap')
         self.assertFalse((self.folder/'map.osm').exists())
-        self.assertEqual(len(list(self.folder.glob('map-audit-*.osm'))),1)
+        self.assertEqual(len(list(self.folder.glob('map-audit-*.osm'))),previous_audits+1)
         self.assertFalse(self.state['corridor_complete'])
         self.assertNotIn('map_query',self.state)
         self.assertEqual(self.state['messages'],[])

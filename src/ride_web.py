@@ -493,12 +493,12 @@ class RideServer(ThreadingHTTPServer):
         if data.keys() - allowed:
             raise WebError('未知创建参数（不接受文件路径）')
         mode = data.get('mode', 'demo')
-        goal = data.get('goal', 'pixels')
+        goal = data.get('goal', 'corridor')
         if mode not in ('demo', 'api') or goal not in ('pixels', 'registration', 'roads', 'approximate', 'corridor'):
             raise WebError('模式或目标无效')
-        provider = data.get('map_provider', 'osm_relay')
+        provider = data.get('map_provider', 'research')
         if provider not in ('amap', 'osm_relay', 'research'):
-            raise WebError('旧OSM直连已停用；请显式选择osm_relay或amap，并给予本次双授权；不会静默迁移或重放', 409)
+            raise WebError('旧OSM直连已停用；请显式选择research、osm_relay或amap，并给予本次双授权；不会静默迁移或重放', 409)
         consent_map = flag(data, 'consent_map')
         consent = flag(data, 'consent_upload')
         if mode == 'api' and not consent:
@@ -578,7 +578,7 @@ class RideServer(ThreadingHTTPServer):
                 raise WebError('复核使用当前已保存证据，不接受同时修改参数或选择')
         provider = data.get('map_provider', state.get('map_provider', 'osm'))
         if provider not in ('amap', 'osm_relay', 'research'):
-            raise WebError('旧OSM直连已停用；请显式选择osm_relay或amap，并给予本次双授权；不会静默迁移或重放', 409)
+            raise WebError('旧OSM直连已停用；请显式选择research、osm_relay或amap，并给予本次双授权；不会静默迁移或重放', 409)
         from ride_agent import validate_map_invocation
         try:
             validate_map_invocation(provider, previous=state.get('map_provider', 'osm'),
@@ -588,7 +588,7 @@ class RideServer(ThreadingHTTPServer):
             raise WebError(str(exc), 409) from None
         if 'osm_xml' in data:
             raise WebError('网页不提供OSM入口；离线文件仅用CLI --local-only --map-provider osm 调试')
-        if provider == 'research' and state.get('map_provider') == 'research' and not state.get('research_online'):
+        if provider == 'research' and state.get('map_provider') == 'research' and state.get('goal') == 'corridor' and not state.get('research_online'):
             raise WebError('此任务为CLI离线快照回放，不是实时搜索。请在普通页面新建自主调研任务，旧档保留审计。', 409)
         consent_map = flag(data, 'consent_map')
         fetch_map = flag(data, 'fetch_map')
@@ -727,15 +727,15 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <style>body{max-width:950px;margin:2em auto;padding:0 1em;font-family:system-ui;line-height:1.6}fieldset{margin:1em 0}label{display:block;margin:.5em 0}textarea{width:95%;height:6em}button{padding:.5em 1em}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1em}img{max-width:100%;max-height:420px}input[type=text]{width:70%}details{margin:1em 0;border:1px solid #ccc;padding:.6em}summary{cursor:pointer;font-weight:bold}.result{border:2px solid #397b68;padding:1em;background:#f3faf7}.consent{border:2px solid #855400;background:#fff4cf;padding:1em;font-weight:bold}</style>
 <h1>上传骑行截图，识别道路线索</h1>
 <p>上传截图 → 本次授权 → 开始识别 → 查看结果或具体缺口。所有坐标只是未验证候选，非原始 GPS，不可导航。</p>
-<p id="capabilityNotice">模型可读取原图地名与道路线索；默认OSM受控中转，可查WGS84道路节点与连接并构建未验证走廊；本地OSM/Overpass直连禁止（自主调研例外：仅固定官方具体对象入口，不作范围下载）。可选自主调研实时搜索，不要求行政区层级。高德仅为GCJ-02线索兼容项。文字或地域不清会询问，不保证识别成功。不会静默下载地图或上传图片；无需为尝试识别先填道路名、控制点或技术文件。</p>
+<p id="capabilityNotice">模型可读取原图地名与道路线索；默认自主调研：候选检索 → 官方对象核连接 → 回图修正 → 有序坐标预览下载；本地OSM/Overpass直连禁止（自主调研例外：仅固定官方具体对象入口，不作范围下载）。自主调研无需中转配置、不要求行政区层级。高德仅为GCJ-02线索兼容项。文字或地域不清会询问，不保证识别成功。不会静默下载地图或上传图片；无需为尝试识别先填道路名、控制点或技术文件。</p>
 <fieldset><legend>1. 上传截图并授权</legend><label>截图（PNG/JPEG/WebP，≤20 MB、≤400万像素） <input id="image" type="file" accept="image/png,image/jpeg,image/webp"></label>
 <details id="startAdvanced"><summary>高级选项：运行模式与手动目标</summary><p>默认使用真实视觉 API 识别道路线索；需要管理员预先配置模型服务。离线 Demo 是固定演示，并非自动识路。道路查询仅限本次授权的具体对象，不下载大范围路网。</p>
 <label>模式 <select id="mode"><option value="api">真实视觉 API（需要本次授权）</option><option value="demo">离线 Demo（固定演示）</option></select></label>
-<label>手动目标 <select id="goal"><option value="corridor">读图识路 → OSM中转道路候选（默认）</option><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">严格配准后道路匹配</option></select></label></details>
+<label>手动目标 <select id="goal"><option value="corridor">读图 → 自主调研核连接 → 有序坐标候选（默认）</option><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">严格配准后道路匹配</option></select></label></details>
 <label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（含所选服务地图查询结果，不含完整地图文件；创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
-<label>地图服务 <select id="mapProvider"><option value="osm_relay">OSM受控中转（WGS84道路节点与连接）</option><option value="research">自主调研：实时文字检索与具体对象核查（WGS84）</option><option value="amap">高德（仅GCJ-02定位线索，不支持道路走廊）</option></select></label>
+<label>地图服务 <select id="mapProvider"><option value="research">自主调研（默认）：候选检索 → 官方对象核连接 → 回图修正（WGS84）</option><option value="osm_relay">OSM受控中转（显式兼容，需管理员配置）</option><option value="amap">高德（仅GCJ-02定位线索，不支持道路走廊）</option></select></label>
 <p id="mapPreflight" role="status">提交前先本地检查所选服务配置，不发送测试请求、不消耗模型调用。</p>
-<p id="providerNotice">默认OSM受控中转，无本地OSM/Overpass直连，无失败回退。旧任务须显式选择迁移与本次双授权。</p>
+<p id="providerNotice">默认自主调研，固定Nominatim与官方具体对象入口；无需中转配置，不依赖Overpass。旧任务保留服务，切换须显式选择与本次双授权。</p>
 <p>高德 Key 仅由管理员通过服务器 AMAP_API_KEY 配置，不在网页输入。曾在群聊公开的 Key 请立即撤销并轮换；勿再次粘贴。高德查询不调用骑行规划、不访问OSM、不恢复历史轨迹。</p>
 <label class="consent"><input id="queryMapConsent" type="checkbox">仅本次同意向上方所选地图服务发送模型从原图识别的行政区及道路/地点文字（OSM中转：一次动作、25秒、4MB；高德：最多三次地理编码、各512KB、30秒；自主调研：文字发往公开 Nominatim、返回ID发往官方OSM对象接口，每轮最多3次搜索/8次请求，各25秒/4MB，全局每1.1秒至多一次，不重试、不发截图；返回的公开证据将随之后模型请求上传）。与模型上传授权独立，创建/继续后自动取消。</label>
 <button id="create">开始识别</button><button id="continueMap">授权后继续识路 / 查询地图</button></fieldset>
@@ -787,7 +787,7 @@ function lockRunning(){if(executionBusy)for(const b of document.querySelectorAll
 // 用当前服务端事实概括缺口；缺地图时不向普通用户堆叠 JSON 操作要求。
 function resultSummary(d){if(d.map_provider==='research'&&d.research_online===false)return '此任务为CLI离线快照回放，未执行实时搜索。请新建自主调研任务；原档保留审计。';if(d.research_diagnostic&&d.status!=='needs_confirmation')return d.question||('局部调研请求失败：'+JSON.stringify(d.research_diagnostic.request)+' ['+d.research_diagnostic.reason_code+']；已成功证据保留，搜索候选不是道路几何；未重试，目标尚未完成。');
  if(d.places)return d.question||d.places.notice;
- if(d.map_provider==='osm')return '旧OSM任务仅只读恢复，联网已停用。若需继续，请显式选择OSM中转或高德兼容：重新勾选本次地图查询与模型上传授权后点击“授权后继续识路 / 查询地图”。不会自动迁移、重放或上传；旧道路产物保留审计；中转支持WGS84候选，高德仅GCJ-02位置线索。';
+ if(d.map_provider==='osm')return '旧OSM任务仅只读恢复，联网已停用。若需继续，请显式选择自主调研、OSM中转或高德兼容：重新勾选本次地图查询与模型上传授权后点击“授权后继续识路 / 查询地图”。不会自动迁移、重放或上传；旧道路产物保留审计；中转支持WGS84候选，高德仅GCJ-02位置线索。';
  if(['queued','running'].includes(d.execution_state))return '正在识别，请稍候；只刷新状态，不会重复上传或重跑任务。本轮仅在明确地图查询授权下联网，不保证输出经纬度。';
  const q=d.map_query_diagnostic;
  if(d.map_provider==='amap'&&d.location_clues&&(!q||q.outcome==='succeeded'))return (d.question||d.location_clues.warning)+' 定位线索：'+d.location_clues.clues.map(c=>c.query_name+'：'+(c.candidates.map(p=>p.location.join(',')+'（GCJ-02，未验证）').join(' / ')||'无结果')).join('；')+'。不是道路几何，不是WGS84轨迹，不可导航。';
@@ -823,7 +823,7 @@ function renderPlaces(d){
  if(d.places){const img=document.createElement('img');img.src='/artifacts/'+d.task_id+'/input.png';img.alt='用于对照地标文字与像素区域的原始截图';$('placeList').append(img);}
  for(const p of d.places?.candidates||[]){const card=document.createElement('p');card.textContent=p.id+' · '+p.name+' · '+p.pname+'/'+p.cityname+'/'+p.adname+' ['+p.adcode+'] '+p.address+' · '+p.type+' · '+p.positions.map(x=>x.kind+': '+x.location.join(',')).join(' / ')+' GCJ-02；'+(p.region_anomaly?'区域异常，禁止作为锚点':'区域文本匹配但未验证')+'；来源 '+p.match_source.keywords+' / '+p.match_source.region;$('placeList').append(card);}
 }
-function render(d){renderPlaces(d);renderLocationClues(d);if(d.map_provider){if($('mapProvider').value!==d.map_provider){$('queryMapConsent').checked=false;$('mapConsent').checked=false;}$('mapProvider').value=d.map_provider==='osm'?'osm_relay':d.map_provider;providerNotice();}schedulePoll(d);$('resultSummary').textContent=resultSummary(d);$('candidatePanel').open=!!d.component_selection?.candidates?.length;for(const b of document.querySelectorAll('button'))b.disabled=false;$('reviewEntry').hidden=d.mode!=='api';$('reviewConsent').checked=false;const source={local:'本地执行',api:'API复核流程',unknown:'历史执行来源未知'}[d.execution?.source]||'执行来源未知';const review={not_reviewed:'尚未模型复核',consistent:'模型已报告当前版本可见一致（非真值验证）',needs_revision:'模型发现当前版本需要修正',ambiguous:'模型报告当前版本存在歧义'}[d.review_status]||'尚未模型复核';$('executionNotice').textContent='后台执行：'+({queued:'排队中',running:'运行中',succeeded:'本轮执行与状态已保存（不代表目标完成或真值验证）',failed:'本轮失败',idle:'历史任务待继续'}[d.execution_state]||'待查询')+'。'+(d.web_execution?.recovery_hint||'')+(d.execution?.source==='local'&&d.centerlined&&d.user_components_applied?'候选已应用、本地中心线已生成，':'')+review+'。本轮来源：'+source+'；成功模型响应：'+(d.execution?.api_responses||0)+'。成功响应为0不代表未发送原图（可能已发送但未收到有效响应）；mode仅为任务配置；始终未验证、非原始GPS。';$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}$('previewHoles').disabled=!!$('proposalAck');lockRunning();}
+function render(d){renderPlaces(d);renderLocationClues(d);if(d.map_provider){if($('mapProvider').value!==d.map_provider){$('queryMapConsent').checked=false;$('mapConsent').checked=false;}if(d.map_provider==='osm'&&!Array.from($('mapProvider').options).some(o=>o.value==='osm')){const legacy=document.createElement('option');legacy.value='osm';legacy.textContent='旧OSM（仅只读，须显式选择新服务）';$('mapProvider').append(legacy);}$('mapProvider').value=d.map_provider;providerNotice();}schedulePoll(d);$('resultSummary').textContent=resultSummary(d);$('candidatePanel').open=!!d.component_selection?.candidates?.length;for(const b of document.querySelectorAll('button'))b.disabled=false;$('reviewEntry').hidden=d.mode!=='api';$('reviewConsent').checked=false;const source={local:'本地执行',api:'API复核流程',unknown:'历史执行来源未知'}[d.execution?.source]||'执行来源未知';const review={not_reviewed:'尚未模型复核',consistent:'模型已报告当前版本可见一致（非真值验证）',needs_revision:'模型发现当前版本需要修正',ambiguous:'模型报告当前版本存在歧义'}[d.review_status]||'尚未模型复核';$('executionNotice').textContent='后台执行：'+({queued:'排队中',running:'运行中',succeeded:'本轮执行与状态已保存（不代表目标完成或真值验证）',failed:'本轮失败',idle:'历史任务待继续'}[d.execution_state]||'待查询')+'。'+(d.web_execution?.recovery_hint||'')+(d.execution?.source==='local'&&d.centerlined&&d.user_components_applied?'候选已应用、本地中心线已生成，':'')+review+'。本轮来源：'+source+'；成功模型响应：'+(d.execution?.api_responses||0)+'。成功响应为0不代表未发送原图（可能已发送但未收到有效响应）；mode仅为任务配置；始终未验证、非原始GPS。';$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}$('previewHoles').disabled=!!$('proposalAck');lockRunning();}
 // 所有预览只读本地白名单产物；编号逐像素解码，不把重叠包围框当成候选。
 let componentView=null, componentEpoch=0;
 function selectedComponentIds(){return Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));}
@@ -918,7 +918,7 @@ async function action(fn){$('error').textContent='处理中，请稍候（提交
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
 let mapConfigurations={};
-function providerNotice(){const provider=$('mapProvider').value;if(provider==='research'){$('mapPreflight').textContent='固定公开HTTPS入口，无需中转配置；本地入口就绪，不表示已验证公网可用。';$('providerNotice').textContent='实时自主调研：Nominatim仅人工发起的单任务文字搜索（不自动补全/批量），OSM官方way/full与node/ways核查；不依赖Overpass。单轮最多3次搜索、8次请求；全局串行间隔≥1.1秒，各25秒/4MB，不重试/不回退。仅发文字或返回的ID，非截图；地图证据会进入后续已授权模型请求。© OpenStreetMap contributors https://www.openstreetmap.org/copyright';return;}const configured=mapConfigurations[provider]==='configured_not_verified';$('mapPreflight').textContent=configured?'所选服务配置已存在（仅本地格式预检，非网络/配额验证）':'所选服务配置未就绪：请管理员私下配置 '+(provider==='osm_relay'?'OSM_SERVICE_URL / OSM_SERVICE_TOKEN':'AMAP_API_KEY')+'；不在网页输入。提交仍会预检，不调用模型。';$('providerNotice').textContent=provider==='osm_relay'?'OSM受控中转：仅固定named-roads/way路由，25秒/4MB，一次动作；国家level2到市区level>=6需有依据，不能只凭城市猜国家。只发文字/way ID，不发截图；不直连OSM、不重试、不回退。© OpenStreetMap contributors。':'高德显式兼容：GCJ-02定位线索/地标，不构建道路走廊；无OSM回退。';}
+function providerNotice(){const provider=$('mapProvider').value;if(provider==='research'){$('mapPreflight').textContent='固定公开HTTPS入口，无需中转配置；本地入口就绪，不表示已验证公网可用。';$('providerNotice').textContent='实时自主调研：Nominatim仅人工发起的单任务文字搜索（不自动补全/批量），OSM官方way/full与node/ways核查；不依赖Overpass。单轮最多3次搜索、8次请求；全局串行间隔≥1.1秒，各25秒/4MB，不重试/不回退。仅发文字或返回的ID，非截图；地图证据会进入后续已授权模型请求。© OpenStreetMap contributors https://www.openstreetmap.org/copyright';return;}if(provider==='osm'){$('mapPreflight').textContent='旧OSM任务只读；请选择服务并重新明确授权，不自动迁移。';$('providerNotice').textContent='保留旧证据，不自动联网重放。';return;}const configured=mapConfigurations[provider]==='configured_not_verified';$('mapPreflight').textContent=configured?'所选服务配置已存在（仅本地格式预检，非网络/配额验证）':'所选服务配置未就绪：请管理员私下配置 '+(provider==='osm_relay'?'OSM_SERVICE_URL / OSM_SERVICE_TOKEN':'AMAP_API_KEY')+'；不在网页输入。提交仍会预检，不调用模型。';$('providerNotice').textContent=provider==='osm_relay'?'OSM受控中转：仅固定named-roads/way路由，25秒/4MB，一次动作；国家level2到市区level>=6需有依据，不能只凭城市猜国家。只发文字/way ID，不发截图；不直连OSM、不重试、不回退。© OpenStreetMap contributors。':'高德显式兼容：GCJ-02定位线索/地标，不构建道路走廊；无OSM回退。';}
 request('/api/config').then(c=>{for(const [key,value] of Object.entries(c.map_providers||{}))mapConfigurations[key]=value.configuration_status;providerNotice();}).catch(()=>{$('mapPreflight').textContent='配置预检读取失败；提交时仍先预检，不自动联网测试。';});
 $('mapProvider').onchange=()=>{$('queryMapConsent').checked=false;$('mapConsent').checked=false;renderLocationClues({});providerNotice();};
 $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,map_provider:$('mapProvider').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked,...($('queryMapConsent').checked?{consent_map:true}:{})}));});
@@ -987,7 +987,7 @@ class Handler(BaseHTTPRequestHandler):
                 from amap_fetch import configuration_status
                 from osm_relay import configuration_status as relay_status
                 self.send_json(200, {'csrf_token': self.server.token,
-                                     'default_map_provider': 'osm_relay',
+                                     'default_map_provider': 'research',
                                      'map_providers': {'research': {'configuration_status':'configured_not_verified', 'supports_corridor':True, 'coordinate_system':'WGS84'}, 'osm_relay': {'configuration_status': relay_status(), 'supports_corridor':True, 'coordinate_system':'WGS84'}, 'amap': {'configuration_status': configuration_status(),
                                                                'supports_corridor': False, 'coordinate_system': 'GCJ02'}}})
                 return

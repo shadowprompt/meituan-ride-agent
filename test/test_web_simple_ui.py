@@ -55,9 +55,30 @@ class SimplePageTests(unittest.TestCase):
         for identity in ('uploadConsent', 'reviewConsent', 'mapConsent'):
             self.assertNotIn('checked', page.attrs[identity])
         self.assertEqual(page.parents['queryMapConsent'], ())
-        self.assertEqual(page.options['mapProvider'], ['osm_relay','research','amap'])
+        self.assertEqual(page.options['mapProvider'], ['research','osm_relay','amap'])
         self.assertIn('本地OSM/Overpass直连禁止', PAGE)
         self.assertIn('具体对象', PAGE)
+
+    @unittest.skipUnless(shutil.which('node'), '需要本地 Node')
+    def test_restore_old_provider_does_not_select_new_default_or_authorize(self):
+        script=PAGE.split('<script nonce="__TOKEN__">')[1].split('</script>')[0]
+        harness=r"""
+const assert=require('assert'),nodes={};
+global.document={getElementById:id=>nodes[id]||(nodes[id]={checked:false,value:'',files:[],options:[],append(o){this.options.push(o)}}),querySelectorAll:()=>[],querySelector:()=>null,createElement:()=>({})};
+"""+script+r"""
+renderPlaces=()=>{};renderLocationClues=()=>{};schedulePoll=()=>{throw Error('stop after provider restore')};
+$('mapProvider').value='research';
+for(const provider of ['osm_relay','amap','osm','osm']){
+ $('queryMapConsent').checked=true;$('mapConsent').checked=true;
+ const changed=$('mapProvider').value!==provider;
+ try{render({map_provider:provider})}catch(e){assert.equal(e.message,'stop after provider restore')}
+ assert.equal($('mapProvider').value,provider);
+ if(changed){assert.equal($('queryMapConsent').checked,false);assert.equal($('mapConsent').checked,false)}
+}
+assert.equal($('mapProvider').options.filter(o=>o.value==='osm').length,1);
+assert($('mapPreflight').textContent.includes('旧OSM'));
+"""
+        subprocess.run(['node','-e',harness],check=True,capture_output=True)
 
     @unittest.skipUnless(shutil.which('node'), '需要本地 Node')
     def test_summary_create_and_restore_do_not_inject_evidence(self):

@@ -8,23 +8,23 @@
 
 > **无需 API 的第一阶段入口：** `python3 src/ride_web.py` 后访问 `http://127.0.0.1:8765/pixel-route`。可在原图上按经过顺序人工点击、方向预览、保存/重开及导出有序像素 JSON；保留重复经过，明确人工近似、未验证、非 GPS。操作和真实浏览器验收见 [PIXEL_ROUTE_ACCEPTANCE.md](PIXEL_ROUTE_ACCEPTANCE.md)。自动图段排序尚未实现。
 
-> **当前地图入口：默认 `osm_relay` 受控OSM中转。** 模型读图提出明确行政层级/精确路名 → 本次独立授权 → 固定中转服务查询 → WGS84 OSM way/node 证据 → `inspect_roads` / `build_corridor` 未验证走廊。**本机永不直连OSM/Overpass；无自动重试或供应商回退。** 高德保留为显式兼容选项，仅GCJ-02位置/地标线索，不支持道路走廊。严格截图配准仍需真实控制点；走廊不是历史GPS或导航路线。
+> **当前地图入口：默认 `research` 自主调研。** 模型读图提出候选 → Nominatim文字检索 → 官方OSM node/ways、way/full核连接与节点坐标 → 回图修正 → 保留重复的有序WGS84坐标候选、预览与下载。无需中转配置、完整路网、手填ID/道路名或控制点；不依赖Overpass。不硬编码原图路线，缺证据/未知段不能拼接交付。走廊仍未验证，非历史GPS、不可导航。
 
 ## 当前地图默认与旧任务迁移
 
-完整配置、授权、服务契约、测试层级与未上线边界见 [OSM中转接入说明](docs/OSM_RELAY.md)。
-
-- 管理员私下配置 `OSM_SERVICE_URL`、`OSM_SERVICE_TOKEN`；仅HTTPS或loopback HTTP（SSH隧道），不接受用户/模型指定地址、路径、凭证。配置预检不发网络请求，不代表真实上游可用。
-- 新任务默认 `osm_relay`。API模式每次须明确同意模型上传；地图查询另须本次 `consent_map`。只发行政层级/道路文字或way ID，不把截图发给中转。
-- 国家level=2到最后市区level>=6必须明确、递增、有图文依据；不能只凭城市猜国家，不能固定某一城市。名称与模型层级均未验证，由服务逐层精确解析，歧义停止。
-- 旧高德任务**不静默改回OSM、不重放、不上传**；用户显式切换并给予双授权：
+- 普通网页和CLI新建默认 `research` / `corridor`；高级像素目标仍可显式选择。内部 `start()` 算法辅助函数保留像素目标默认，避免破坏离线模块调用。
+- 每次API调用仍须本次模型上传授权，地图查询另须本次 `consent_map`。固定公开入口无需 `OSM_SERVICE_URL` / `OSM_SERVICE_TOKEN`；入口格式就绪不代表公网可用。
+- `osm_relay` 与 `amap` 仍为显式兼容选项；中转配置和约束见 [OSM中转说明](docs/OSM_RELAY.md)。中转仍不直连OSM；自主调研仅访问固定公开文字检索/具体对象入口，不作范围下载、不重试、不回退。
+- **旧任务沿用原provider，不静默迁移、不重放、不上传**；旧OSM页面恢复也不替用户选择新服务。切换需显式选择并给予本次双授权，旧证据保留审计。示例：
 
 ```sh
 python3 src/ride_agent.py resume --task-dir outputs/旧任务 \
-  --map-provider osm_relay --consent-map --consent-upload
+  --map-provider research --consent-map --consent-upload
 ```
 
-旧OSM任务也须显式选择中转；缺任一授权拒绝，旧地图/对话保留审计、旧道路证据失效。仅本地CLI可用 `--map-provider osm --local-only --osm-file /本地/获授权地图.osm` 只读调试；不能将本地XML冒充中转证据。旧 `fetch_map` 范围下载完全停用。
+旧 `fetch_map` 范围下载完全停用；本地XML仅CLI `--map-provider osm --local-only --osm-file /本地/获授权地图.osm` 调试。详细预算、隐私与验收边界见 [实时自主调研](docs/RESEARCH_ONLINE.md)。
+
+**模型 `api_network` 是独立的模型连接故障。** 改地图默认不能修复模型DNS/TLS/网络连接；不得把本地配置预检通过或Mock通过称为供应商/原图E2E成功。当前真实原图未验收。
 
 高德兼容需显式 `--map-provider amap` / 网页选择高德及私下 `AMAP_API_KEY`；不自动回退OSM。POI内容许可门禁保留：仅本地展示/复核，不回传模型或生成配准锚点。历史高德说明见 [高德定位线索](docs/AMAP_PROVIDER.md)，其中“唯一/默认高德”属于已被本节替代的历史策略。
 
@@ -44,7 +44,7 @@ PYTHONPATH=src python -m unittest discover -s test -v
 - `test/`：回归测试；`examples/`：合成示例；`training-demo/`：独立训练演示。
 - `outputs/`、`local-data/`：本地任务与私有数据，仍在原位置，不会迁入 `src/`。
 - Web 创建/继续采用后台异步任务协议：HTTP 快速返回 **202** 和任务编号，网页轮询状态；不再把完整多轮流程压在一个 HTTP 请求内。模型 API 单次超时仍为 **300 秒**，后台一轮 CLI 默认总预算 **4500 秒（75 分钟）**。地图下载、HTTP 请求读取等安全限时不变；不自动重试或重放上传授权。详见下方“异步 Web 协议”。
-- 旧命令 `python ride_web.py` 改为 `python src/ride_web.py`；其他业务脚本同理。已有 `outputs/web` 任务及产物保留；OSM旧任务只读恢复无需重传，但联网继续必须显式选择受控中转或高德兼容并给予本次双授权，不能直接重放。
+- 旧命令 `python ride_web.py` 改为 `python src/ride_web.py`；其他业务脚本同理。已有 `outputs/web` 任务及产物保留；OSM旧任务只读恢复无需重传，但联网继续必须显式选择自主调研、受控中转或高德兼容并给予本次双授权，不能直接重放。
 
 ## 目标
 

@@ -110,7 +110,7 @@ class AsyncHTTPTests(unittest.TestCase):
         ImageDraw.Draw(im).line([(10,40),(50,40),(50,10)],fill='#00BFA5',width=5)
         out=io.BytesIO();im.save(out,format='PNG');image=out.getvalue()
         with patch('urllib.request.OpenerDirector.open',side_effect=AssertionError('禁止外部网络')):
-            code,_,body=self.raw('/api/tasks',{'mode':'demo','image_base64':base64.b64encode(image).decode()})
+            code,_,body=self.raw('/api/tasks',{'mode':'demo','goal':'pixels','image_base64':base64.b64encode(image).decode()})
             self.assertEqual(code,202)
             task_id=json.loads(body)['task_id']
             result=self.wait_done(task_id)
