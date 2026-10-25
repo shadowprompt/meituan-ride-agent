@@ -33,7 +33,7 @@ BASE = SOURCE_DIR.parent
 MAX_IMAGE = 20_000_000
 MAX_BODY = 44_000_000  # 30 MB OSM XML plus JSON overhead
 ARTIFACTS = frozenset((
-    'corridor-inspection.json', 'map-query.json',
+    'corridor-inspection.json', 'map-query.json', 'map-query-diagnostic.json',
     'inspection/colors.json', 'inspection/color-preview.png',
     'extraction/question-source.png', 'extraction/question-overlay.png',
     'extraction/mask.png', 'extraction/overlay.png', 'extraction/extraction.json',
@@ -68,6 +68,8 @@ def artifact_current(state, name):
     prefix = name.split('/')[0]
     if prefix == 'corridors':
         return state.get('goal') == 'corridor' and bool(state.get('corridor_complete')) and name in state.get('corridor_artifacts', [])
+    if name == 'map-query-diagnostic.json':
+        return bool(state.get('map_query_diagnostic'))
     if name == 'map-query.json':
         return bool(state.get('map_query'))
     if name == 'corridor-inspection.json':
@@ -365,7 +367,7 @@ class RideServer(ThreadingHTTPServer):
             state = load(folder/'task')
         except (ValueError, OSError, TypeError, KeyError):
             raise WebError('任务状态尚未生成或无法读取', 409) from None
-        fields = ('candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
+        fields = ('map_query_diagnostic', 'candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
                   'registration_notice', 'corridor_complete', 'approximate_complete', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
@@ -710,6 +712,9 @@ function lockRunning(){if(executionBusy)for(const b of document.querySelectorAll
 // 用当前服务端事实概括缺口；缺地图时不向普通用户堆叠 JSON 操作要求。
 function resultSummary(d){
  if(['queued','running'].includes(d.execution_state))return '正在识别，请稍候；只刷新状态，不会重复上传或重跑任务。本轮仅在明确地图查询授权下联网，不保证输出经纬度。';
+ const q=d.map_query_diagnostic;
+ if(d.goal==='corridor'&&!d.corridor_complete&&!d.error_category&&d.execution_state!=='failed'&&q&&['failed','started'].includes(q.outcome))return '本轮尚未交付经纬度。'+(q.outcome==='failed'?'地图查询失败 ['+q.reason_code+']：'+q.message:'上次地图查询未记录最终结果；不能断言是否发送成功。')+' 查询行政区：'+(q.request?.area_name||'（非法或缺失）')+'；道路：'+(q.request?.names||[]).join('、')+'。'+(q.retry_advice||'请先核对任务状态，不要盲目重复授权。')+' 后台本轮结束不等于业务完成；未自动重试。';
+ if(d.status==='waiting_for_user'&&typeof d.question==='string')return '等待用户确认：'+d.question+' 本轮未完成经纬度交付；刷新不会重跑。';
  if(d.execution_state==='failed'||d.error_category)return '本轮未完成。'+(d.recovery_hint||d.web_execution?.recovery_hint||'请查看任务详情中的安全提示；不会自动重试上传。')+(d.goal==='corridor'&&!d.map_available?' 本任务尚无地图证据；可核对问题后重新授权具体对象查询，未交付经纬度。':'');
  if(d.corridor_complete)return '已生成道路走廊经纬度候选，请在下方查看产物。尚未确认起终点、经过顺序及完整性，非原始 GPS，不可导航。';
  if(d.goal==='corridor'&&!d.map_available)return '尚缺地图证据：请查看具体问题；如需查询，勾选本次模型上传与地图查询授权后点击“授权后继续识路 / 查询地图”。模型自行读取地名并查询具体对象，普通用户无需填写路名、OSM或假设。本轮未完成经纬度交付。';

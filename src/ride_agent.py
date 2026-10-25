@@ -121,6 +121,34 @@ def save(state, folder):
     temp.replace(path)
 
 
+def map_query_diagnostic(state, folder, action, outcome, **summary):
+    """每次尝试留安全审计；请求仅保存有界文字，不保存远端正文/配置。"""
+    key = os.environ.get('RIDE_API_KEY')
+    def text(value, limit):
+        if not isinstance(value, str):
+            return None
+        value = value.replace(key, '[已隐藏]') if key else value
+        return ''.join(c for c in value if ord(c) >= 32 and not 0xD800 <= ord(c) <= 0xDFFF)[:limit]
+    names = action.get('names')
+    request = {'area_name': text(action.get('area_name'), 80),
+               'names': [text(n, 80) for n in names[:3]] if isinstance(names, list) else [],
+               'evidence': text(action.get('evidence'), 2000),
+               'evidence_source': 'model_visible_text_unverified'}
+    previous = state.get('map_query_diagnostic', {})
+    attempt_id = (previous['attempt_id'] if outcome != 'started' and previous.get('outcome') == 'started'
+                  else str(uuid.uuid4()))
+    diagnostic = {'attempt_id': attempt_id, 'outcome': outcome,
+                  'request': request, 'verified': False, 'original_gps': False, **summary}
+    state['map_query_diagnostic'] = diagnostic
+    # 在开始网络请求前落盘；即使没有map.osm或进程被中止也可定位本次输入。
+    save(state, folder)
+    path = Path(folder)/'map-query-diagnostic.json'
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(diagnostic, ensure_ascii=False, allow_nan=False), encoding='utf-8')
+    temporary.replace(path)
+    return diagnostic
+
+
 def load(folder):
     path = Path(folder)/'task.json'
     if path.stat().st_size > 10_000_000:
@@ -231,6 +259,7 @@ class APIPlanner:
             current['map_query_authorized'] = bool(getattr(self, 'map_query_authorized', False))
             current['corridor_complete'] = bool(state.get('corridor_complete'))
             current['corridor_inspection'] = state.get('corridor_inspection')
+            current['map_query_diagnostic'] = state.get('map_query_diagnostic')
         current['review_version'] = review_version
         current['extraction_config'] = state.get('extraction_config')
         current['route_review'] = state.get('route_review')
@@ -686,16 +715,25 @@ def run(state, folder, planner, budget=12, consent_map=False):
                     return state
                 map_query_used = True
                 planner.map_query_authorized = False
+                map_query_diagnostic(state, folder, action, 'started')
                 try:
                     result = fetch_named_roads(action['area_name'], action['names'], Path(folder)/'map.osm', consent_download=True)
-                except MapFetchError:
-                    state.update(status='waiting_for_user', question='具体地图对象查询失败（地域歧义、无结果、预算或网络错误）。未自动重试；请核对原图地域/文字，必要时重新授权继续。')
+                except MapFetchError as exc:
+                    diagnostic = map_query_diagnostic(state, folder, action, 'failed', **exc.diagnostic())
+                    request = diagnostic['request']
+                    state.update(status='waiting_for_user', question=(
+                        f"地图查询失败 [{diagnostic['reason_code']}]：{diagnostic['message']} "
+                        f"查询行政区：{request['area_name']}；道路：{'、'.join(n or '（非法名称）' for n in request['names'])}。"
+                        + diagnostic['retry_advice']))
                     save(state, folder)
                     return state
+                map_query_diagnostic(state, folder, action, 'succeeded',
+                                     result_summary={k: result[k] for k in (
+                                         'area_id', 'node_count', 'way_count', 'response_bytes', 'osm_sha256', 'status')})
                 invalidate_corridor(state)
                 state.pop('artifacts', None)
                 state.pop('summary', None)
-                state['map_query'] = {**result, 'evidence': action['evidence']}
+                state['map_query'] = {**result, 'evidence': state['map_query_diagnostic']['request']['evidence']}
                 (Path(folder)/'map-query.json').write_text(json.dumps(state['map_query'], ensure_ascii=False), encoding='utf-8')
                 tool_result = {'tool':name, **result}
             elif name in ('inspect_roads', 'build_corridor'):

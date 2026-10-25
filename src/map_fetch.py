@@ -33,7 +33,39 @@ MAX_REFERENCES = 400_000
 
 
 class MapFetchError(ValueError):
-    """Invalid input, remote failure, unsafe data, or output failure."""
+    """安全结构化错误；诊断不使用远端正文或异常字符串。"""
+
+    def __init__(self, message, *, code='response_invalid', http_status=None):
+        super().__init__(message)
+        self.code = code if code in REASONS else 'response_invalid'
+        self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+
+    def diagnostic(self):
+        message, retry = REASONS.get(self.code, REASONS['response_invalid'])
+        result = {'reason_code': self.code, 'message': message,
+                  'retry_advice': retry, 'automatic_retry': False}
+        if self.http_status is not None:
+            result['http_status'] = self.http_status
+        return result
+
+
+# 固定文案独立于异常/响应正文，避免密钥、URL或服务端内容回显。
+REASONS = {
+    'area_ambiguous': ('行政区名称匹配多个对象，无法安全选择。', '请补充原图可见的城市/区县上下文；不会自动扩大地域。'),
+    'area_not_found': ('未找到该精确行政区。', '请核对行政区全称及 OSM 收录情况；重复授权不会修正名称。'),
+    'roads_not_found': ('该行政区内未找到请求的精确道路。', '请核对道路文字和所属行政区；不会模糊搜索或扩大范围。'),
+    'http_429': ('地图服务限流（HTTP 429）。', '请稍后自行决定是否重新授权；不会自动重试。'),
+    'http_error': ('地图服务返回非成功 HTTP 状态。', '请稍后检查服务状态，再决定是否重新授权。'),
+    'timeout': ('地图查询超过本次时间预算。', '请稍后手动重新授权，或核对是否可以缩小精确查询；不会自动重试。'),
+    'network_error': ('无法完成地图网络连接。', '请检查服务器网络后再决定是否重新授权。'),
+    'response_limit': ('地图响应超过安全大小或对象预算。', '请缩小精确道路查询；不会提高预算或自动重试。'),
+    'response_incomplete': ('地图服务报告结果不完整，不能作为道路证据。', '请稍后手动查询或缩小精确请求；不会接受截断结果。'),
+    'response_invalid': ('地图响应格式或对象校验不通过。', '请检查服务状态；未保存或采用无效地图。'),
+    'invalid_input': ('地图查询输入不合法。', '请提供一个短行政区全称和 1–3 个不重复的精确道路名。'),
+    'consent_required': ('本次地图查询尚未授权。', '核对待查询对象后再决定是否授权；旧授权不会继承。'),
+    'output_error': ('无法安全保存本地地图文件。', '请检查任务目录及磁盘写入权限；不要盲目重复授权。'),
+    'redirect_refused': ('地图服务重定向已被安全拒绝。', '仅允许固定 HTTPS 端点；不会跟随重定向。'),
+}
 
 
 def _number(value):
@@ -44,29 +76,29 @@ def _number(value):
 def _bounds(bounds):
     if (not isinstance(bounds, (list, tuple)) or len(bounds) != 4
             or not all(_number(v) for v in bounds)):
-        raise MapFetchError('Bounds must be four finite numbers [west,south,east,north]')
+        raise MapFetchError('Bounds must be four finite numbers [west,south,east,north]', code='invalid_input')
     west, south, east, north = bounds
     if not (-180 <= west < east <= 180 and -85 <= south < north <= 85):
-        raise MapFetchError('Bounds require west < east, south < north, longitude ±180 and latitude ±85; no antimeridian')
+        raise MapFetchError('Bounds require west < east, south < north, longitude ±180 and latitude ±85; no antimeridian', code='invalid_input')
     width, height = east - west, north - south
     # Conservative local planar upper bound (cosine nearest the equator).
     latitude = 0 if south <= 0 <= north else min(abs(south), abs(north))
     area = width * height * 111.32 ** 2 * math.cos(math.radians(latitude))
     if width > MAX_SPAN_DEGREES or height > MAX_SPAN_DEGREES or area > MAX_AREA_KM2:
-        raise MapFetchError('Bounding box too large: max span 0.1 degrees and area 25 km²; request a smaller local box')
+        raise MapFetchError('Bounding box too large: max span 0.1 degrees and area 25 km²; request a smaller local box', code='invalid_input')
     return [float(v) for v in bounds], area
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise MapFetchError('Overpass redirect refused; only the fixed HTTPS endpoint is permitted')
+        raise MapFetchError('Overpass redirect refused; only the fixed HTTPS endpoint is permitted', code='redirect_refused')
 
 
 def _download(query, *, deadline=None, max_bytes=None):
     max_bytes = MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
     remaining = min(TIMEOUT_SECONDS, deadline - time.monotonic()) if deadline else TIMEOUT_SECONDS
     if remaining <= 0:
-        raise MapFetchError("Map query deadline exceeded; no automatic retry")
+        raise MapFetchError("Map query deadline exceeded; no automatic retry", code='timeout')
     request = urllib.request.Request(
         ENDPOINT, data=urllib.parse.urlencode({'data': query}).encode('ascii'),
         headers={'Content-Type': 'application/x-www-form-urlencoded',
@@ -78,7 +110,7 @@ def _download(query, *, deadline=None, max_bytes=None):
     try:
         with opener.open(request, timeout=remaining) as response:
             if response.status != 200:
-                raise MapFetchError(f'Overpass HTTP {response.status}; no automatic retry')
+                raise MapFetchError(f'Overpass HTTP {response.status}; no automatic retry', code='http_429' if response.status == 429 else 'http_error', http_status=response.status)
             if response.headers.get('Content-Encoding', 'identity').lower() != 'identity':
                 raise MapFetchError('Unexpected compressed Overpass response')
             length = response.headers.get('Content-Length')
@@ -88,28 +120,31 @@ def _download(query, *, deadline=None, max_bytes=None):
                 except (ValueError, TypeError) as exc:
                     raise MapFetchError('Invalid Overpass Content-Length') from exc
                 if length < 0 or length > max_bytes:
-                    raise MapFetchError('Overpass response exceeds byte limit')
+                    raise MapFetchError('Overpass response exceeds byte limit', code='response_limit')
             chunks, size = [], 0
             while True:
                 if time.monotonic() - start > remaining:
-                    raise MapFetchError('Overpass download deadline exceeded; no automatic retry')
+                    raise MapFetchError('Overpass download deadline exceeded; no automatic retry', code='timeout')
                 chunk = response.read(min(65536, max_bytes + 1 - size))
                 if not chunk:
                     break
                 size += len(chunk)
                 if size > max_bytes:
-                    raise MapFetchError('Overpass response exceeds byte limit')
+                    raise MapFetchError('Overpass response exceeds byte limit', code='response_limit')
                 chunks.append(chunk)
             if time.monotonic() - start > remaining:
-                raise MapFetchError('Overpass download deadline exceeded; no automatic retry')
+                raise MapFetchError('Overpass download deadline exceeded; no automatic retry', code='timeout')
             return b''.join(chunks)
     except urllib.error.HTTPError as exc:
         # Deliberately exclude URLs, server body and query from error messages.
         exc.close()
-        raise MapFetchError(f'Overpass HTTP {exc.code}; no automatic retry') from exc
-    except (urllib.error.URLError, TimeoutError, socket.timeout, OSError,
+        raise MapFetchError(f'Overpass HTTP {exc.code}; no automatic retry', code='http_429' if exc.code == 429 else 'http_error', http_status=exc.code) from exc
+    except (TimeoutError, socket.timeout) as exc:
+        raise MapFetchError('Overpass timeout; no automatic retry', code='timeout') from exc
+    except (urllib.error.URLError, OSError,
             http.client.HTTPException) as exc:
-        raise MapFetchError('Overpass network/timeout failure; no automatic retry') from exc
+        raise MapFetchError('Overpass network failure; no automatic retry',
+                            code='timeout' if isinstance(getattr(exc, 'reason', None), TimeoutError) else 'network_error') from exc
 
 
 def _identifier(value):
@@ -128,10 +163,10 @@ def _convert(raw):
     if not isinstance(data, dict) or not isinstance(data.get('elements'), list):
         raise MapFetchError('Expected Overpass object with elements list')
     if data.get('remark'):
-        raise MapFetchError('Overpass reported an incomplete/error response')
+        raise MapFetchError('Overpass reported an incomplete/error response', code='response_incomplete')
     elements = data['elements']
     if len(elements) > MAX_NODES + MAX_WAYS:
-        raise MapFetchError('Overpass element limit exceeded')
+        raise MapFetchError('Overpass element limit exceeded', code='response_limit')
     nodes, ways, references = {}, {}, 0
     for item in elements:
         if not isinstance(item, dict) or not _identifier(item.get('id')):
@@ -143,7 +178,7 @@ def _convert(raw):
                     or not -180 <= lon <= 180 or not -85 <= lat <= 85):
                 raise MapFetchError('Invalid OSM node coordinate')
             if key in nodes or len(nodes) >= MAX_NODES:
-                raise MapFetchError('Duplicate node or node limit exceeded')
+                raise MapFetchError('Duplicate node or node limit exceeded', code='response_limit')
             nodes[key] = (lon, lat)
         elif kind == 'way':
             ids, tags = item.get('nodes'), item.get('tags')
@@ -152,14 +187,14 @@ def _convert(raw):
                 raise MapFetchError('Invalid OSM way references')
             references += len(ids)
             if references > MAX_REFERENCES:
-                raise MapFetchError('OSM reference limit exceeded')
+                raise MapFetchError('OSM reference limit exceeded', code='response_limit')
             if (not isinstance(tags, dict) or not tags.get('highway')
                     or not all(isinstance(k, str) and isinstance(v, str) for k, v in tags.items())
                     or any(len(k) > 255 or len(v) > 4096 for k, v in tags.items())
                     or len(tags) > 256):
                 raise MapFetchError('Invalid OSM highway way tags')
             if key in ways or len(ways) >= MAX_WAYS:
-                raise MapFetchError('Duplicate way or way limit exceeded')
+                raise MapFetchError('Duplicate way or way limit exceeded', code='response_limit')
             ways[key] = (ids, tags)
         else:
             raise MapFetchError('Unexpected element type; expected highway ways and nodes only')
@@ -180,7 +215,7 @@ def _convert(raw):
             ET.SubElement(way, 'tag', k=k, v=v)
     xml = ET.tostring(root, encoding='utf-8', xml_declaration=True)
     if len(xml) > MAX_OUTPUT_BYTES:
-        raise MapFetchError('Converted OSM exceeds output byte limit')
+        raise MapFetchError('Converted OSM exceeds output byte limit', code='response_limit')
     return xml, len(nodes), len(ways), references
 
 
@@ -195,13 +230,13 @@ def fetch_roads(bounds, output_path, *, consent_download=False):
     bounds, area = _bounds(bounds)
     # 地理范围也是敏感信息：同意仅针对本次调用，不能从旧任务状态继承。
     if consent_download is not True:
-        raise MapFetchError('Explicit consent_download=True required to send bounding box to Overpass')
+        raise MapFetchError('Explicit consent_download=True required to send bounding box to Overpass', code='consent_required')
     try:
         target = Path(output_path)
         if not target.parent.is_dir() or target.is_dir():
-            raise MapFetchError('Output must be a file in an existing directory')
+            raise MapFetchError('Output must be a file in an existing directory', code='output_error')
     except TypeError as exc:
-        raise MapFetchError('Invalid output path') from exc
+        raise MapFetchError('Invalid output path', code='output_error') from exc
     west, south, east, north = bounds
     query = (f'[out:json][timeout:20][maxsize:16777216];'
              f'way["highway"]({south:.12f},{west:.12f},{north:.12f},{east:.12f});'
@@ -218,7 +253,7 @@ def fetch_roads(bounds, output_path, *, consent_download=False):
         os.replace(temporary, target)
         temporary = None
     except OSError as exc:
-        raise MapFetchError('Could not atomically save OSM output') from exc
+        raise MapFetchError('Could not atomically save OSM output', code='output_error') from exc
     finally:
         if temporary is not None:
             os.unlink(temporary)
@@ -236,24 +271,28 @@ MAX_QUERY_NODES = 10000
 
 def _exact_text(value):
     if (not isinstance(value, str) or not 1 <= len(value.strip()) <= 80
-            or any(ord(c) < 32 for c in value) or len(value.encode('utf-8')) > 240):
-        raise MapFetchError('Expected a short exact map name')
+            or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in value)
+            or len(value.encode('utf-8')) > 240):
+        raise MapFetchError('Expected a short exact map name', code='invalid_input')
     return value.strip()
 
 
 def fetch_named_roads(area_name, names, output_path, *, consent_download=False):
     """本次授权下查询具体行政区内最多3个精确道路名；最多两次请求，无重试。"""
     if consent_download is not True:
-        raise MapFetchError('Fresh explicit map query consent required')
+        raise MapFetchError('Fresh explicit map query consent required', code='consent_required')
     area_name = _exact_text(area_name)
     if not isinstance(names, list) or not 1 <= len(names) <= 3:
-        raise MapFetchError('Expected 1..3 exact road names')
+        raise MapFetchError('Expected 1..3 exact road names', code='invalid_input')
     names = [_exact_text(n) for n in names]
     if len(set(names)) != len(names):
-        raise MapFetchError('Duplicate road names')
-    target = Path(output_path)
+        raise MapFetchError('Duplicate road names', code='invalid_input')
+    try:
+        target = Path(output_path)
+    except TypeError as exc:
+        raise MapFetchError('Invalid output path', code='output_error') from exc
     if not target.parent.is_dir() or target.is_dir():
-        raise MapFetchError('Output must be a file in an existing directory')
+        raise MapFetchError('Output must be a file in an existing directory', code='output_error')
     quote = lambda v: json.dumps(v, ensure_ascii=False)
     deadline = time.monotonic() + TIMEOUT_SECONDS
     area_query = ('[out:json][timeout:10][maxsize:2097152];'
@@ -262,29 +301,38 @@ def fetch_named_roads(area_name, names, output_path, *, consent_download=False):
     try:
         data = json.loads(area_raw.decode('utf-8'), parse_constant=_reject_constant)
         areas = data['elements']
-        if (data.get('remark') or not isinstance(areas, list) or len(areas) != 1
-                or areas[0].get('type') != 'area' or not _identifier(areas[0].get('id'))
+        if not isinstance(areas, list):
+            raise ValueError()
+        if data.get('remark'):
+            raise MapFetchError('Incomplete area response', code='response_incomplete')
+        if not areas:
+            raise MapFetchError('No administrative area', code='area_not_found')
+        if len(areas) > 1:
+            raise MapFetchError('Ambiguous administrative area', code='area_ambiguous')
+        if (areas[0].get('type') != 'area' or not _identifier(areas[0].get('id'))
                 or areas[0].get('tags', {}).get('name') != area_name
                 or areas[0].get('tags', {}).get('boundary') != 'administrative'):
             raise ValueError()
+    except MapFetchError:
+        raise
     except (ValueError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError) as exc:
-        raise MapFetchError('Administrative area missing or ambiguous; clarify visible locality, no retry') from exc
+        raise MapFetchError('Invalid administrative area response') from exc
     area_id = areas[0]['id']
     clauses = ''.join(f'way(area.scope)["highway"]["name"={quote(n)}];' for n in names)
     query = (f'[out:json][timeout:15][maxsize:2097152];area({area_id})->.scope;'
              f'({clauses})->.roads;.roads out body 33;node(w.roads);out skel;')
     raw = _download(query, deadline=deadline, max_bytes=2000000)
     if len(raw) > 2_000_000:
-        raise MapFetchError('Named map response exceeds 2 MB')
+        raise MapFetchError('Named map response exceeds 2 MB', code='response_limit')
     xml, nodes, ways, references = _convert(raw)
     if ways > MAX_QUERY_WAYS or nodes > MAX_QUERY_NODES or references > 20000:
-        raise MapFetchError('Named map object budget exceeded; narrow exact names')
+        raise MapFetchError('Named map object budget exceeded; narrow exact names', code='response_limit')
     root = ET.fromstring(xml)
     if any(not any(t.get('k') == 'name' and t.get('v') in names for t in w.findall('tag'))
            for w in root.findall('way')):
         raise MapFetchError('Unexpected road outside requested exact names')
     if not ways:
-        raise MapFetchError('No exact highway objects found; clarify visible road name')
+        raise MapFetchError('No exact highway objects found; clarify visible road name', code='roads_not_found')
     # 有界查询得到完整way节点，原子发布；失败时旧地图不受影响。
     temporary = None
     try:
@@ -296,7 +344,7 @@ def fetch_named_roads(area_name, names, output_path, *, consent_download=False):
         os.replace(temporary, target)
         temporary = None
     except OSError as exc:
-        raise MapFetchError('Could not save named map evidence') from exc
+        raise MapFetchError('Could not save named map evidence', code='output_error') from exc
     finally:
         if temporary is not None:
             os.unlink(temporary)

@@ -113,7 +113,7 @@ class MapFetchTests(unittest.TestCase):
 
     def test_interrupted_body_no_retry_or_output(self):
         self.response.read.side_effect = http.client.IncompleteRead(b'partial')
-        with self.assertRaisesRegex(map_fetch.MapFetchError, 'network/timeout'):
+        with self.assertRaisesRegex(map_fetch.MapFetchError, 'network failure'):
             self.fetch()
         self.assertEqual(self.opener.open.call_count, 1)
         self.assertFalse(self.path.exists())
