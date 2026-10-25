@@ -9,6 +9,8 @@ import shutil
 import sys
 import time
 import math
+import uuid
+import road_corridor
 from pathlib import Path
 import urllib.error
 import urllib.parse
@@ -53,6 +55,38 @@ API候选歧义不再强制先问用户。必须先observe_candidates并在后�
 观察区域必须原图整数坐标且单边不超过512像素。先依据原图理解结构，再提取和中心线；证据不足调用observe_region取得1:1原图/提取/骨架局部证据。不得从缩略图臆测坐标。
 每条review_route观察区域必须先observe_region并在后续请求中看到当前版本1:1证据；不能只填写版本/区域过门。交付前必须review_route consistent且版本完全匹配；consistent仅表示未发现可见矛盾，不是恢复真实路线。发现不符先记录needs_revision和明确区域，再extract安全调整颜色/裁剪、centerline并重新复核；用户锁定参数不得覆盖。仍无法判断回转孔/两臂/遮挡/重复顺序时记录ambiguous并ask。仅有用户批准的有界补孔，不得自行应用或声称自动修好；不得删环/支叉/连断点，不用最短路径伪造遍历顺序。所有结论保持verified=false和original_gps=false。
 """
+
+
+# 道路走廊是独立目标：不借用像素配准/语义复核成功标记，也不允许下载。
+PROMPT += """
+独立goal=corridor：先自己阅读原图地名、道路和行进顺序，再查询已授权本地OSM。
+此目标不要求extract/centerline/register/review_route，不是严格像素配准；旧目标的门禁不变。
+{"action":"inspect_roads","names":["原图可读的精确道路名"]}
+{"action":"build_corridor","hypothesis":{"schema_version":1,"coordinate_system":"WGS84","source":{"kind":"model","evidence":"原图具体道路顺序依据与不确定处"},"legs":[{"road":{"name":"已查询道路名"},"via":[{"node_id":1},{"node_id":2}]}]}}
+模型只能提出可审计假设；node_id必须来自本轮当前地图inspect_roads的返回，不得编造节点、坐标或任意路径。
+缺少地名/OSM/节点证据就ask；重复行进需显式重复via或legs。build后deliver仅表示未确认道路候选，
+不能称恢复真实GPS、截图已配准或路线已验证。禁止为此目标fetch_map；本地OSM只查询所需道路，查询结果随本次授权对话发送给配置模型API。整个OSM文件不会上传。
+"""
+
+
+def invalidate_corridor(state):
+    """换图、重提取或更换地图后，旧道路证据只保留为审计文件。"""
+    state.update(corridor_complete=False)
+    for key in ('corridor_inspection', 'corridor_artifacts', 'corridor_hypothesis'):
+        state.pop(key, None)
+
+
+def corridor_local_action(state, folder):
+    if not (Path(folder)/'map.osm').is_file():
+        return {'action':'ask', 'question':'请上传获授权的本地 OSM XML；本模式不下载地图，也不要求控制点。'}
+    if state.get('corridor_names'):
+        names = state.pop('corridor_names')
+        return {'action':'inspect_roads', 'names':names}
+    if state.get('corridor_complete'):
+        return {'action':'deliver', 'summary':'已根据道路与节点假设生成本地 OSM 道路走廊候选；未确认起终点、顺序、完整路线或骑行权限，非原始 GPS、不可导航。'}
+    if state.get('corridor_hypothesis'):
+        return {'action':'build_corridor', 'hypothesis':state['corridor_hypothesis']}
+    return {'action':'ask', 'question':'请提供 --road-names 查询真实道路节点，再用 --road-hypothesis-file 提供有依据的有序节点假设；或另行授权模型读原图。'}
 
 
 def crop_diagnostics(crop, image_size):
@@ -178,7 +212,7 @@ class APIPlanner:
         messages = [{'role':'system','content':PROMPT}, {'role':'user','content':[
             {'type':'text','text':f'Analyze screenshot. Oriented size: {state["image_size"]}. All results must stay unverified.'},
             {'type':'image_url','image_url':{'url':'data:image/png;base64,'+image}}]}]
-        messages.append({'role':'user','content':json.dumps({'goal':state.get('goal','pixels'), 'controls_available':controls_current(state,folder), 'registered':state.get('registered',False), 'osm_available':(Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
+        messages.append({'role':'user','content':json.dumps({'corridor_complete':state.get('corridor_complete',False), 'goal':state.get('goal','pixels'), 'controls_available':controls_current(state,folder), 'registered':state.get('registered',False), 'osm_available':(Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
         messages.extend(state['messages'])
         # Append current evidence AFTER history: old reports are historical, not current state.
         feedback = visual_feedback(state, folder)
@@ -189,6 +223,9 @@ class APIPlanner:
         feedback += hole_feedback
         review_version = route_review.version(state, folder)
         current = {k:state.get(k,False) for k in ('extracted','centerlined','registered','registration_gate_passed','match_attempted')}
+        if state.get('goal') == 'corridor':
+            current['corridor_complete'] = bool(state.get('corridor_complete'))
+            current['corridor_inspection'] = state.get('corridor_inspection')
         current['review_version'] = review_version
         current['extraction_config'] = state.get('extraction_config')
         current['route_review'] = state.get('route_review')
@@ -344,6 +381,7 @@ def controls_current(state, folder):
 
 def invalidate_extraction(state, invalidate_controls=False):
     """只撤销当前证据标记，旧产物留在磁盘供审计，不再当作有效结果。"""
+    invalidate_corridor(state)
     state.update(extracted=False, centerlined=False, registered=False,
                  registration_gate_passed=False, match_attempted=False, approximate_complete=False)
     for key in ('route_review', 'review_presented_version', 'review_region', 'review_presented_regions'):
@@ -417,6 +455,10 @@ MAX_DELIVERY_CORRECTIONS = 3
 
 def delivery_requirements(state, folder):
     """Current evidence only; never promote missing tools to success."""
+    if state.get('goal') == 'corridor':
+        if state.get('corridor_complete'):
+            return None
+        return {'tool':'deliver', 'status':'rejected', 'missing_tools':['build_corridor'], 'next_step':'inspect authorized local OSM then build an evidenced hypothesis', 'verified':False}
     required = ['extract', 'centerline']
     if state.get('goal') == 'approximate':
         required.append('approximate')
@@ -463,11 +505,13 @@ def run(state, folder, planner, budget=12, consent_map=False):
         try:
             # 已知完整的用户修正直接走确定性提线，避免再让模型猜颜色或裁剪框。
             config = state.get('user_extraction_constraints',{})
-            if state.get('component_selection', {}).get('requires_selection') and not state['semantic_review_required']:
+            if state.get('goal') == 'corridor' and (state.get('corridor_names') or not state['semantic_review_required'] or state.get('corridor_complete') or state.get('corridor_hypothesis')):
+                action = corridor_local_action(state, folder)
+            elif state.get('component_selection', {}).get('requires_selection') and not state['semantic_review_required']:
                 action = {'action':'ask', 'question':'存在多个歧义颜色分量，已保留全部候选但暂停中心线。请查看 components-overlay.png 编号，在网页勾选路线片段（可多个），或 resume --component-ids 编号；不要仅提高面积阈值。'}
-            elif not state.get('extracted') and all(k in config for k in ('color','crop')):
+            elif state.get('goal') != 'corridor' and not state.get('extracted') and all(k in config for k in ('color','crop')):
                 action = {'action':'extract', **config}
-            elif (getattr(planner, 'local_pipeline', False) and state.get('extracted') and not state.get('centerlined')
+            elif (state.get('goal') != 'corridor' and getattr(planner, 'local_pipeline', False) and state.get('extracted') and not state.get('centerlined')
                   and not state.get('component_selection', {}).get('requires_selection')):
                 action = {'action':'centerline'}
             elif state.get('centerlined') and state.get('goal') == 'approximate' and not state.get('approximate_complete'):
@@ -611,6 +655,43 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 tool_result = {'tool':'centerline', **{k:result[k] for k in ('status','component_count','cycle_rank','skeleton_pixels','warnings')},
                                'endpoint_count':len(result['endpoints_xy']), 'junction_pixel_count':len(result['junction_pixels_xy']),
                                'has_geometric_order':result['ordered_path_xy'] is not None}
+            elif name in ('inspect_roads', 'build_corridor'):
+                if state.get('goal') != 'corridor':
+                    raise ValueError('Explicit corridor goal required')
+                stage = name
+                osm = Path(folder)/'map.osm'
+                if name == 'inspect_roads':
+                    if set(action) != {'action','names'}:
+                        raise ValueError('Only road names accepted')
+                    result = road_corridor.inspect_roads(osm, action['names'])
+                    state['corridor_inspection'] = result
+                    target = Path(folder)/'corridor-inspection.json'
+                    target.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
+                    tool_result = {'tool':name, **result}
+                else:
+                    if set(action) != {'action','hypothesis'}:
+                        raise ValueError('Only an evidenced hypothesis accepted')
+                    hypothesis = action['hypothesis']
+                    road_corridor._validate(hypothesis)
+                    if state['semantic_review_required'] and hypothesis != state.get('corridor_hypothesis') and hypothesis['source']['kind'] != 'model':
+                        raise ValueError('Model must not impersonate user evidence')
+                    # 模型引用的节点必须可追溯到当前地图查询，而不是模型自行猜ID。
+                    if hypothesis['source']['kind'] == 'model':
+                        inspection = state.get('corridor_inspection', {})
+                        digest = hashlib.sha256(osm.read_bytes()).hexdigest()
+                        known = {n['node_id'] for n in inspection.get('nodes', [])}
+                        if inspection.get('osm_sha256') != digest or not all(
+                            point['node_id'] in known for leg in hypothesis['legs'] for point in leg['via']):
+                            raise ValueError('Inspect current OSM nodes before proposing model hypothesis')
+                    state['corridor_complete'] = False
+                    state.pop('corridor_artifacts', None)
+                    save(state, folder)
+                    relative = 'corridors/'+str(uuid.uuid4())
+                    result = road_corridor.build_corridor(osm, hypothesis, Path(folder)/relative)
+                    state['corridor_complete'] = True
+                    state['corridor_artifacts'] = [relative+'/'+Path(v).name for v in result['artifacts'].values()]
+                    state.pop('corridor_hypothesis', None)
+                    tool_result = {'tool':name, **result['report']}
             elif name == 'approximate':
                 if state.get('goal') != 'approximate' or not state.get('centerlined') or not anchors_current(state, folder):
                     raise ValueError('Current user/evidence anchors and approximate goal required')
@@ -622,6 +703,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 state['approximate_complete'] = True
                 tool_result = {'tool':'approximate', 'approximate':True, 'verified':False, 'warnings':result['warnings']}
             elif name == 'register':
+                if state.get('goal') == 'corridor':
+                    raise ValueError('Corridor cannot enter strict registration')
                 if state.get('goal') == 'approximate' or state.get('approximate_complete'):
                     raise ValueError('Approximate goal cannot enter strict registration')
                 if not state.get('centerlined'):
@@ -637,6 +720,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 state['registration_gate_passed'] = result['independent_error_gate_passed']
                 tool_result = {'tool':'register', **{k:result[k] for k in ('fit_rmse_m','check_rmse_m','independent_error_gate_passed','warnings')}}
             elif name == 'fetch_map':
+                if state.get('goal') == 'corridor':
+                    raise ValueError('Corridor uses authorized local OSM only')
                 if not state.get('map_download_requested') or not consent_map:
                     state.update(status='waiting_for_user', question='下载会向 Overpass 发送路线地理范围。请用 resume --fetch-map --consent-map 明确同意本次请求，或提供 --osm-file。')
                     save(state,folder)
@@ -647,6 +732,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 result = download_task_map(state, folder)
                 tool_result = {'tool':'fetch_map', **result}
             elif name == 'match':
+                if state.get('goal') == 'corridor':
+                    raise ValueError('Corridor is not registered pixel matching')
                 if state.get('goal') == 'approximate' or state.get('approximate_complete'):
                     raise ValueError('Approximate candidates cannot enter road matching')
                 if not state.get('registered'):
@@ -684,8 +771,10 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 summary = action.get('summary')
                 if not isinstance(summary,str) or not summary.strip() or len(summary)>6000:
                     raise ValueError('Invalid summary')
-                if state['semantic_review_required']:
+                if state['semantic_review_required'] and state.get('goal') != 'corridor':
                     summary += '\n语义复核仅为当前像素版本的模型可见一致性自报，不是路线真值验证。剩余限制：'+state['route_review']['limitations']
+                elif state.get('goal') == 'corridor' and state['semantic_review_required']:
+                    summary += '\n模型仅提出道路假设，本地OSM构建候选；未进行像素配准或路线真值复核。'
                 else:
                     summary += '\n本次为离线确定性编排，未经过语义模型复核。'
                 # 不拦截用户裁剪；即便模型忽略警告，局部交付也附加确定性限制。
@@ -708,11 +797,17 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 if state.get('match_attempted'):
                     state['artifacts'].extend(['roads/road-match.json','roads/road-candidates.geojson','roads/road-overlay.png'])
                     state['road_notice'] = 'Road matching status: '+state['road_match_status']+'; not verified or navigation.'
+                if state.get('goal') == 'corridor':
+                    state['summary'] += '\n道路假设候选：未配准截图，未确认起终点、实际行进顺序、完整性或骑行权限；非原始GPS，不可导航。'
+                    state['artifacts'] = list(state['corridor_artifacts'])
+                    if state.get('corridor_inspection'):
+                        state['artifacts'].append('corridor-inspection.json')
+                    state['road_notice'] = '未确认道路走廊；非截图配准、非原始GPS、不可导航。'
                 state['question'] = None
                 save(state,folder)
                 return state
             else:
-                raise ValueError('Unknown action; only ask/inspect_colors/observe_region/review_route/extract/centerline/register/approximate/fetch_map/match/deliver allowed')
+                raise ValueError('Unknown action; only ask/inspect_colors/observe_region/review_route/extract/centerline/register/approximate/inspect_roads/build_corridor/fetch_map/match/deliver allowed')
             state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps(tool_result,ensure_ascii=False)})
             state['status'] = 'analyzing'
             state.pop('question',None)
@@ -737,7 +832,7 @@ def run(state, folder, planner, budget=12, consent_map=False):
 
 
 def start(image_path, folder, demo=False, goal="pixels"):
-    if goal not in ('pixels','registration','roads','approximate'):
+    if goal not in ('pixels','registration','roads','approximate','corridor'):
         raise ValueError('Unknown goal')
     folder = Path(folder)
     if folder.exists() and any(folder.iterdir()):
@@ -774,12 +869,15 @@ def main():
     begin = sub.add_parser('start')
     begin.add_argument('--image',required=True)
     begin.add_argument('--demo',action='store_true')
-    begin.add_argument('--goal',choices=['pixels','registration','roads','approximate'],default='pixels')
+    begin.add_argument('--goal',choices=['pixels','registration','roads','approximate','corridor'],default='pixels')
     resume = sub.add_parser('resume')
     resume.add_argument('--review-continue', action='store_true', help='本次授权后复核当前证据，不要求新回答、不重提取或重选')
     resume.add_argument('--local-only', action='store_true', help='仅用已有证据本地继续，不上传截图，不调用模型 API')
     resume.add_argument('--fetch-map', action='store_true', help='Download roads for checked registration bounds; requires --consent-map')
     resume.add_argument('--consent-map', action='store_true', help='Allow this invocation to send route bounds to Overpass (not screenshot)')
+    resume.add_argument('--road-corridor', action='store_true', help='明确选择独立道路假设候选，不要求严格像素配准')
+    resume.add_argument('--road-names', nargs='+', help='查询本地OSM精确道路名')
+    resume.add_argument('--road-hypothesis-file', help='有依据的有序道路/OSM节点JSON；不能提供自由坐标')
     resume.add_argument('--osm-file',help='Local OSM XML only; model cannot choose filesystem paths')
     resume.add_argument('--approximate-anchors-file', help='明确选择近似模式；带来源和不确定度的WGS84锚点JSON，不通过严格配准')
     resume.add_argument('--controls-file',help='User supplied WGS84 landmark JSON; never produced by model')
@@ -807,16 +905,24 @@ def main():
             review_continue = getattr(args, 'review_continue', False)
             if review_continue and (demo or local_only or not args.consent_upload):
                 raise ValueError('模型复核继续仅限API任务且须本次上传授权，不能同时仅本地')
-            if review_continue and any((args.answer, args.answer_file, args.color, args.crop, args.component_ids, args.controls_file, args.approximate_anchors_file, args.osm_file, args.fetch_map, args.reset_extraction)):
+            if review_continue and any((args.answer, args.answer_file, args.color, args.crop, args.component_ids, args.controls_file, args.approximate_anchors_file, args.osm_file, args.fetch_map, args.reset_extraction, args.road_corridor, args.road_names, args.road_hypothesis_file)):
                 raise ValueError('复核继续不接受修改或文件，使用当前已保存证据')
             planner = LocalPlanner() if local_only else (DemoPlanner() if demo else ConsentedPlanner())
             state = start(args.image,args.task_dir,demo,args.goal) if args.command=='start' else load(args.task_dir)
             if args.command=='resume':
+                if args.road_corridor:
+                    if args.fetch_map or args.controls_file or args.approximate_anchors_file:
+                        raise ValueError('Corridor cannot combine registration/approximation/download')
+                    state['goal'] = 'corridor'
+                if state.get('goal') == 'corridor' and (args.fetch_map or args.controls_file or args.approximate_anchors_file):
+                    raise ValueError('Keep corridor isolated from strict registration and downloads')
+                if (args.road_names or args.road_hypothesis_file) and state.get('goal') != 'corridor':
+                    raise ValueError('Select --road-corridor explicitly')
                 if args.fetch_map and args.osm_file:
                     raise ValueError('Choose fetch-map or osm-file, not both')
                 if args.fetch_map and not args.consent_map:
                     raise ValueError('--fetch-map requires explicit --consent-map each invocation')
-                if not args.answer and not args.answer_file and not args.controls_file and not args.approximate_anchors_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue:
+                if not args.answer and not args.answer_file and not args.controls_file and not args.approximate_anchors_file and not args.osm_file and not args.road_names and not args.road_hypothesis_file and not args.road_corridor and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue:
                     raise ValueError('Provide answer, answer-file, controls-file or osm-file')
                 answer = args.answer or ('用户本次明确授权上传当前任务截图、派生预览、诊断和对话，继续复核当前已保存证据；保留用户候选选择，不重新提取。' if review_continue else 'User supplied local evidence file.')
                 if args.color is not None or args.crop is not None:
@@ -839,10 +945,22 @@ def main():
                     if osm.stat().st_size > 30000000:
                         raise ValueError('OSM exceeds 30 MB')
                     shutil.copyfile(osm,Path(args.task_dir)/'map.osm')
-                    state['goal'] = 'roads'
+                    invalidate_corridor(state)
+                    if state.get('goal') != 'corridor':
+                        state['goal'] = 'roads'
                     state['map_download_requested'] = False
                     state.pop('map_download', None)
                     state['match_attempted'] = False
+                    # 地图已替换就立即落盘失效；后续假设校验失败也不能展示旧地图候选。
+                    save(state, args.task_dir)
+                if args.road_names:
+                    state['corridor_complete'] = False
+                    state['corridor_names'] = args.road_names
+                if args.road_hypothesis_file:
+                    raw = road_corridor._read(args.road_hypothesis_file, road_corridor.MAX_PLAN_BYTES)
+                    hypothesis = json.loads(raw)
+                    road_corridor._validate(hypothesis)
+                    state.update(corridor_hypothesis=hypothesis, corridor_complete=False)
                 if args.approximate_anchors_file and (args.controls_file or args.osm_file or args.fetch_map):
                     raise ValueError('Approximation cannot combine strict controls, OSM or map download')
                 if args.approximate_anchors_file:

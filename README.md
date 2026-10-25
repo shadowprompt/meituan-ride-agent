@@ -236,3 +236,28 @@ python3 src/ride_agent.py resume --task-dir outputs/my-task --local-only \
 - `uncertainty_m` 是证据提供方声明，不是经验证的轨迹误差上界。三点仿射残差接近0不证明定位正确；地标对应错误、投影/地图形变、凸包外推均可能使实际偏差远超声明。报告提供 `vertices_outside_anchor_hull`、`extrapolation_present` 与残差，**不伪造统计置信区间**。
 - 近似候选不能进入道路匹配或地图下载；道路读取器也拒绝带近似标记的 GeoJSON。原有上传同意、地图同意、候选选择、当前裁剪有效性、语义复核要求不被放宽。
 - 自动化测试使用明确标注的合成锚点；即使对真实图片测试提线，也不代表真实地理位置或真实轨迹精度已经验收。
+
+## 独立道路走廊：原图读地名 → 本地 OSM 证据 → 经纬度候选
+
+`corridor` 与 `registration`/`roads` 严格配准目标隔离：无需先提线、控制点或像素配准即可查询本地道路。旧目标的配准独立误差门槛和视觉复核门禁不变。本模式**不下载地图、不生成控制点、不接收模型自由坐标**，也不证明截图真实位置或骑行路线。
+
+```sh
+# 离线起步，不上传；截图是真实用户输入，而非按文件名猜城市
+python3 src/ride_agent.py start --demo --goal corridor --image /path/original.png --task-dir outputs/corridor-demo
+# 已获授权的本地 WGS84 OSM XML（不是GCJ-02地图截图）
+python3 src/ride_agent.py resume --task-dir outputs/corridor-demo --local-only --osm-file /path/local.osm --road-names '真实道路名A' '真实道路名B'
+# 查看 outputs/corridor-demo/corridor-inspection.json 中的way/node与交叉口
+python3 src/ride_agent.py resume --task-dir outputs/corridor-demo --local-only --road-hypothesis-file /path/hypothesis.json
+```
+
+`hypothesis.json` 格式如下；**占位ID不可照抄，必须替换为当前本地OSM真实节点**。人工假设标记 `user`，模型假设标记 `model`；模型不能冒充用户，其必经节点必须来自当前地图 `inspect_roads` 返回。每段至少两个 `via`，相邻段边界共用同一节点；折返需显式重复节点/路段，禁止自由坐标、自动吸附或跨断裂补边。
+
+```json
+{"schema_version":1,"coordinate_system":"WGS84","source":{"kind":"user","evidence":"实际原图可读地名、道路顺序及节点选择依据；说明不确定部分"},"legs":[{"road":{"name":"真实道路名"},"via":[{"node_id":111},{"node_id":222}]}]}
+```
+
+真实视觉API路径：按既有配置设置 `RIDE_API_BASE`/`RIDE_API_KEY`/`RIDE_MODEL`，创建时不用 `--demo` 并明确 `--consent-upload`；继续上传本地OSM时同样须本次 `--consent-upload`。模型读取原图地名，调用 `inspect_roads` 查询证据，再提出 `build_corridor` 假设；地名不可读或证据不足应询问，不编造节点。**每次API调用会上传原图、派生预览、诊断与历史对话，其中包含查询到的本地OSM道路名、节点和坐标；不会上传完整OSM文件。** `--local-only` 不调用模型，不上传。已有API任务也可本地继续并导出候选，缺少用户假设则暂停。
+
+网页创建目标选择“读地名→本地OSM道路走廊”；已有任务勾选“明确切换独立道路走廊目标”。上传本地OSM、按行输入精确道路名即可先查询；查看查询JSON后上传有依据的道路假设JSON继续。仅本地继续不需要API；需要模型自己读图时每次重新同意上传。不要同时上传控制点/近似锚点或勾选下载。网页产物含 `corridors/<服务端UUID>/road-corridor.geojson`、`road-corridor.json`、`road-corridor.png`。示意PNG是本地OSM底图，不是原图配准叠图；JSON/GeoJSON带地图与假设哈希、节点/边way_id、有序分段、未确认起终点与限制。所有结果 `verified=false`、`original_gps=false`，`status=candidate_needs_review`；任务 `needs_confirmation` 也不代表已验证。重提取/修正颜色裁剪/更换OSM会使旧候选失效，网页保留审计链接而不当作当前预览。
+
+真实交付仍需：可读地名的原图、对应地区获授权且节点引用完整的本地WGS84 OSM XML、有依据的道路顺序/转折点/重复行进假设；若要严格截图定位或误差估计，还需独立真实控制点和检查点，不能拿本模式替代。当前回归为合成夹具及mock API动作链，不代表两张用户真实图已跑通或原始GPS已恢复。

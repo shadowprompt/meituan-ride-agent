@@ -13,6 +13,7 @@ GUIDANCE = {
     'extraction_failed': '本地提取步骤失败。请核对截图与模型给出的颜色、裁剪参数；也可能是本地文件或处理故障，请勿据此认定颜色选错。',
     'inspection_failed': '本地颜色检查步骤失败。请核对裁剪参数和本地文件；此错误不证明截图没有轨迹。',
     'centerline_failed': '本地中心线处理失败。请检查当前掩码和本地文件；不能据此直接判断需要更换颜色。',
+    'corridor_failed': '本地道路证据或有序假设未通过校验。请先查询当前地图的精确道路名，核对节点ID、道路连通、权限标签及假设来源；不生成替代坐标，不要求先做像素配准。',
     'registration_failed': '本地配准步骤失败。请核对当前裁剪对应的控制点与独立检查点文件。',
 }
 
@@ -36,6 +37,7 @@ def failure_category(exc, stage=None):
         return 'api_network' if stage == 'planner' else 'task_processing_failed'
     return {'extract':'extraction_failed', 'inspect_colors':'inspection_failed',
             'centerline':'centerline_failed', 'register':'registration_failed',
+            'inspect_roads':'corridor_failed', 'build_corridor':'corridor_failed',
             'match':'road_processing_failed', 'fetch_map':'road_processing_failed',
             'action':'model_action_invalid'}.get(stage, 'task_processing_failed')
 

@@ -2,7 +2,7 @@
 
 POST /api/tasks (202, background): {image_base64, mode: demo|api, goal: pixels|registration|roads|approximate,
 consent_upload: bool}. POST /api/tasks/<uuid>/resume: {answer?, color?, crop?,
-controls_json?, approximate_anchors_json?, osm_xml?, fetch_map?, consent_map?, consent_upload?}.
+controls_json?, approximate_anchors_json?, road_corridor?, road_names?, road_hypothesis_json?, osm_xml?, fetch_map?, consent_map?, consent_upload?}.
 Every POST requires X-CSRF-Token from GET /api/config (or the root UI).
 GET /api/tasks/<uuid> returns a filtered status; GET /artifacts/<uuid>/<name>
 serves only deterministic allowlisted outputs. Nothing exposes credentials/state/input.
@@ -33,6 +33,7 @@ BASE = SOURCE_DIR.parent
 MAX_IMAGE = 20_000_000
 MAX_BODY = 44_000_000  # 30 MB OSM XML plus JSON overhead
 ARTIFACTS = frozenset((
+    'corridor-inspection.json',
     'inspection/colors.json', 'inspection/color-preview.png',
     'extraction/question-source.png', 'extraction/question-overlay.png',
     'extraction/mask.png', 'extraction/overlay.png', 'extraction/extraction.json',
@@ -55,6 +56,8 @@ def allowed_artifact(name):
     parts = name.split('/')
     if len(parts) != 3 or not UUID_RE.fullmatch(parts[1]):
         return False
+    if parts[0] == 'corridors':
+        return parts[2] in ('road-corridor.geojson', 'road-corridor.json', 'road-corridor.png')
     if parts[0] == 'hole-reviews':
         return parts[2] in ('numbered.png','review.json') or bool(re.fullmatch(r'hole-(?:[1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])\.png', parts[2]))
     return parts[0] == 'hole-audit' and parts[2] in AUDIT_NAMES
@@ -63,6 +66,10 @@ def allowed_artifact(name):
 def artifact_current(state, name):
     """旧文件可留作审计，但网页必须逐项标记失效，不能只靠统一免责声明。"""
     prefix = name.split('/')[0]
+    if prefix == 'corridors':
+        return state.get('goal') == 'corridor' and bool(state.get('corridor_complete')) and name in state.get('corridor_artifacts', [])
+    if name == 'corridor-inspection.json':
+        return state.get('goal') == 'corridor' and bool(state.get('corridor_inspection'))
     if prefix in ('hole-reviews', 'hole-audit'):
         return False  # 独立审计，不冒充当前提取产物
     if prefix == 'inspection':
@@ -357,14 +364,14 @@ class RideServer(ThreadingHTTPServer):
         except (ValueError, OSError, TypeError, KeyError):
             raise WebError('任务状态尚未生成或无法读取', 409) from None
         fields = ('candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
-                  'registration_notice', 'approximate_complete', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
+                  'registration_notice', 'corridor_complete', 'approximate_complete', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
             category = processing_category(state)
             result.update(error='任务处理错误（详细错误不在网页公开）',
                           error_category=category, recovery_hint=GUIDANCE[category])
             stage = state.get('error_stage')
-            if isinstance(stage, str) and stage in ('planner','action','inspect_colors','extract','centerline','register','fetch_map','match'):
+            if isinstance(stage, str) and stage in ('planner','action','inspect_colors','extract','centerline','register','fetch_map','match','inspect_roads','build_corridor'):
                 result['error_stage'] = stage
             diagnostic = safe_diagnostic(state.get('error_diagnostic'))
             if diagnostic:
@@ -412,7 +419,7 @@ class RideServer(ThreadingHTTPServer):
                 except (ValueError, OSError):
                     pass
             result['hole_review'] = dict(candidate, current=valid)
-        for prefix in ('hole-reviews', 'hole-audit'):
+        for prefix in ('hole-reviews', 'hole-audit', 'corridors'):
             directory = safe_path(self.root, task_id, 'task', prefix)
             if directory.is_dir():
                 for sub in sorted(directory.iterdir()):
@@ -422,7 +429,7 @@ class RideServer(ThreadingHTTPServer):
                     for item in sorted(sub.iterdir()):
                         name = prefix+'/'+sub.name+'/'+item.name
                         if allowed_artifact(name) and safe_path(self.root, task_id, 'task', name).is_file():
-                            available.append({'name': name, 'url': '/artifacts/'+task_id+'/'+name, 'current': False})
+                            available.append({'name': name, 'url': '/artifacts/'+task_id+'/'+name, 'current': artifact_current(state, name)})
         result['artifacts'] = available
         result['artifact_notice'] = '产物可能来自先前步骤，修改颜色/裁剪后旧文件可能失效；仅为未验证候选，不可导航。'
         # 纵使模型意外复述了环境密钥，也不能显示给浏览器。
@@ -443,7 +450,7 @@ class RideServer(ThreadingHTTPServer):
             raise WebError('未知创建参数（不接受文件路径）')
         mode = data.get('mode', 'demo')
         goal = data.get('goal', 'pixels')
-        if mode not in ('demo', 'api') or goal not in ('pixels', 'registration', 'roads', 'approximate'):
+        if mode not in ('demo', 'api') or goal not in ('pixels', 'registration', 'roads', 'approximate', 'corridor'):
             raise WebError('模式或目标无效')
         consent = flag(data, 'consent_upload')
         if mode == 'api' and not consent:
@@ -488,7 +495,7 @@ class RideServer(ThreadingHTTPServer):
 
     def resume(self, task_id, data, *, asynchronous=False):
         self.idle(task_id)
-        allowed = {'component_ids', 'answer', 'color', 'crop', 'controls_json', 'approximate_anchors_json', 'osm_xml',
+        allowed = {'road_corridor', 'road_names', 'road_hypothesis_json', 'component_ids', 'answer', 'color', 'crop', 'controls_json', 'approximate_anchors_json', 'osm_xml',
                    'fetch_map', 'consent_map', 'consent_upload', 'local_only', 'review_continue'}
         if data.keys() - allowed:
             raise WebError('未知继续参数（不接受文件路径）')
@@ -558,6 +565,24 @@ class RideServer(ThreadingHTTPServer):
                 raise WebError('近似锚点须为WGS84/local_mask、至少3个不共线点，并含来源与正数不确定度和说明') from None
             pending['approximate-anchors-upload.json'] = anchors.encode('utf-8')
             args += ['--approximate-anchors-file', str(folder/'inputs'/'approximate-anchors-upload.json')]
+        if flag(data, 'road_corridor'):
+            if fetch_map or any(k in data for k in ('controls_json','approximate_anchors_json')):
+                raise WebError('道路走廊不能同时进行配准、近似锚点或下载')
+            args.append('--road-corridor')
+        if 'road_names' in data:
+            names = data['road_names']
+            if not isinstance(names, list) or not 1 <= len(names) <= 16 or not all(isinstance(n,str) and n.strip() and not n.startswith('-') and len(n) <= 255 for n in names):
+                raise WebError('需要1..16个精确道路名')
+            args += ['--road-names', *names]
+        if 'road_hypothesis_json' in data:
+            raw = text(data['road_hypothesis_json'], '道路假设 JSON', 256000)
+            try:
+                import road_corridor
+                road_corridor._validate(json.loads(raw))
+            except (ValueError, TypeError):
+                raise WebError('道路假设格式非法；仅支持有依据的道路名/way_id和OSM node_id，不接受自由坐标') from None
+            pending['road-hypothesis-upload.json'] = raw.encode('utf-8')
+            args += ['--road-hypothesis-file', str(folder/'inputs'/'road-hypothesis-upload.json')]
         if 'controls_json' in data:
             controls = text(data['controls_json'], '控制点 JSON', 1_000_000)
             try:
@@ -575,7 +600,7 @@ class RideServer(ThreadingHTTPServer):
                 raise WebError('OSM XML 为空或含禁止的 DTD/实体')
             pending['osm-upload.xml'] = osm.encode('utf-8')
             args += ['--osm-file', str(folder/'inputs'/'osm-upload.xml')]
-        if not any(k in data for k in ('component_ids', 'answer', 'color', 'crop', 'controls_json', 'approximate_anchors_json', 'osm_xml')) and not fetch_map and not local_only and not review_continue:
+        if not any(k in data for k in ('road_corridor', 'road_names', 'road_hypothesis_json', 'component_ids', 'answer', 'color', 'crop', 'controls_json', 'approximate_anchors_json', 'osm_xml')) and not fetch_map and not local_only and not review_continue:
             raise WebError('请提供回答、修正或证据文件')
         if upload:
             args.append('--consent-upload')
@@ -621,8 +646,8 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <h1>骑行截图分析 · 本地网页</h1><p>结果只是未验证候选，不是真实 GPS，不可用于导航。Demo 为固定离线演示，并非模型识别。截图不会通过本网页向外发送；只有明确同意的 API / 地图步骤会访问外部服务。</p>
 <fieldset><legend>1. 创建任务</legend><label>截图（PNG/JPEG/WebP，≤20 MB、≤400万像素） <input id="image" type="file" accept="image/png,image/jpeg,image/webp"></label>
 <label>模式 <select id="mode"><option value="demo">离线 Demo</option><option value="api">真实视觉 API</option></select></label>
-<label>目标 <select id="goal"><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">道路候选匹配</option></select></label>
-<label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
+<label>目标 <select id="goal"><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">严格配准后道路匹配</option><option value="corridor">读地名→本地OSM道路走廊（独立未确认候选）</option></select></label>
+<label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（含本地OSM道路查询结果，不含完整地图文件；创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
 <button id="create">创建并开始</button></fieldset>
 <fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><p id="executionNotice" role="status" style="font-weight:bold;border:2px solid #b66;padding:12px"></p><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset>
 <fieldset><legend>3. 回答 / 修正 / 上传证据</legend><label>回答（Demo 首次可填 {"crop":[0,0,80,60],"color":"#00BFA5"}）<textarea id="answer"></textarea></label>
@@ -651,7 +676,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <p id="roadsNotice">注意：勾选下载地图或上传本地 OSM 后，点击“继续处理”会将任务目标自动切换为 roads（道路候选匹配），即使原目标为像素提取或配准。下载须先完成配准并通过独立检查；下载授权与 API 上传授权相互独立，未勾选不会下载。</p>
 <label><input id="fetch" type="checkbox">下载当前配准范围的地图（不可同时上传 OSM）</label><label><input id="mapConsent" type="checkbox">仅本次同意向 Overpass 发送地理范围（不发送截图）</label>
 <label><input id="localOnly" type="checkbox">仅本地继续（已有颜色/裁剪或有效掩码；不上传、不调用模型，可恢复中心线；地图下载仍单独授权）</label>
-<button id="resume">继续处理</button></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。structure-diagnostics.png 黄框仅表示被保守保护的间隙总范围，不表示已识别折返；同路往返次数和先后须人工确认。</p><div id="artifacts"></div>
+<p>道路走廊不要求像素配准。仅使用用户本地OSM，模型可在本次上传授权后读原图并提出道路/节点假设；不下载地图，不恢复原始GPS。</p><label><input id="corridorMode" type="checkbox">明确切换独立道路走廊目标</label><label>精确道路名（每行一个，可先查询节点）<textarea id="roadNames"></textarea></label><label>有依据的道路假设 JSON <input id="roadHypothesis" type="file" accept=".json"></label><button id="resume">继续处理</button></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。structure-diagnostics.png 黄框仅表示被保守保护的间隙总范围，不表示已识别折返；同路往返次数和先后须人工确认。</p><div id="artifacts"></div>
 <p><a href="/pixel-route">无需 API：本地人工有序像素路线标注、保存与导出</a></p>
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
@@ -765,7 +790,7 @@ $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.si
 // 专用继续入口只提交本次授权；不读取localOnly、回答、颜色/裁剪等可能陈旧的表单。
 $('continueReview').onclick=()=>action(async()=>{if(!$('reviewConsent').checked)throw Error('请先勾选本次模型复核上传授权；尚未上传');render(await request(taskPath()+'/resume',{review_continue:true,consent_upload:true}));});
 $('refresh').onclick=()=>action(async()=>render(await request(taskPath())));
-$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined){if($('locationMode').value==='approximate'){if(!d.local_only)throw Error('近似模式须勾选仅本地继续');d.approximate_anchors_json=controls;}else d.controls_json=controls;}if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
+$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined){if($('locationMode').value==='approximate'){if(!d.local_only)throw Error('近似模式须勾选仅本地继续');d.approximate_anchors_json=controls;}else d.controls_json=controls;}if(osm!==undefined)d.osm_xml=osm;if($('corridorMode').checked)d.road_corridor=true;const names=$('roadNames').value.split('\n').map(x=>x.trim()).filter(Boolean);if(names.length)d.road_names=names;const hypothesis=await fileText('roadHypothesis',256000);if(hypothesis!==undefined)d.road_hypothesis_json=hypothesis;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('roadNames').value='';$('roadHypothesis').value='';$('fetch').checked=false;});
 </script></html>'''
 
 

@@ -122,3 +122,13 @@ python src/ride_agent.py resume --task-dir outputs/实际任务目录 --local-on
 真实交付还需要：原始图片和当前裁剪、颜色/分量确认、可溯源地标与WGS84经纬度、对应 local_mask 像素、每点不确定度和歧义说明。没有这些输入不会凭图名造坐标。近似报告的误差声明不是实际轨迹精度保证，尤其凸包外推可能出现无已知上界偏差。示例与测试中的坐标均为合成，不代表真实任务已定位。
 
 验收命令：`PYTHONPATH=src:test python3 -m unittest test_approximate_location -v`，包含真实 loopback HTTP→CLI 子进程上传、近似模式切换、产物下载与元数据校验，无外部模型/地图调用。全量回归：`PYTHONPATH=src python3 -m unittest discover -s test -v`。
+
+## 道路走廊业务接入（corridor）
+
+已把已有 `road_corridor.py` 接入 Agent JSON 动作白名单、受限执行、CLI续跑及网页本地OSM/道路假设上传，不再只是独立工具。显式 `--goal corridor` 或续跑 `--road-corridor`；`--road-names` 查询，`--road-hypothesis-file` 构建。道路/节点仅来自用户授权本地OSM；模型只能提出带来源依据的假设，其节点引用必须先经当前地图查询。无证据暂停；不下载范围路网，不输出模型自由坐标，不绕过旧严格配准目标门禁。
+
+产物采用UUID隔离，含候选GeoJSON、可审计报告和本地OSM示意图。状态始终未确认；更换地图或重提取失效旧证据，网页明确标记旧文件非当前。使用步骤、上传范围和真实输入缺口见README“独立道路走廊”。
+
+验收范围：`test_corridor_integration.py` 覆盖真实CLI与Web→真实CLI离线查询/构建、mock API实际请求载荷两轮inspect→build、缺地图/缺地名、模型冒充用户/无查询节点/任意路径拒绝、旧配准目标隔离、换地图与重提取失效。测试所有坐标与截图均为明确合成夹具，**没有宣称用户原图到真实轨迹已经通过**。真实数据研究独立进行；本轮业务交付不以历史已知道路演示冒充盲测。
+
+本轮业务接入回归结果：`PYTHONPATH=src python3 -m unittest discover -s test` **312项，全部通过，10项按既有环境条件跳过**；`PYTHONPATH=src:test python3 -m unittest test_corridor_integration test_road_corridor -v` 27项通过。另以 `node --check` 校验网页内联JavaScript语法，`git diff --check` 无错误。测试不调用真实外部模型/地图服务，不能替代真实截图与本地地图证据验收。
