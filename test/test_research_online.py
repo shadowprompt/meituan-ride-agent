@@ -73,8 +73,8 @@ class OnlineTests(unittest.TestCase):
         from urllib.parse import urlsplit, parse_qs
         actions = [
             {**self.search,'names':['长风路']},
-            {'action':'search_map_evidence','names':['长风路'],'region':'上海'},
-            {**self.search,'names':['长风路'],'region':'上海'},
+            {'action':'search_map_evidence','names':['Independent Landmark'],'region':'Mock Region'},
+            {**self.search,'names':['Independent Landmark'],'region':'Mock Region'},
             {'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Returned search ID'},
             {'action':'ask','question':'Mock geometry gathered; correspondence remains uncertain'},
         ]
@@ -101,7 +101,7 @@ class OnlineTests(unittest.TestCase):
             state = ride_agent.run(self.state,self.folder,ride_agent.APIPlanner(),budget=5,consent_map=True)
         self.assertEqual(len(payloads),5)
         self.assertEqual(get.call_count,3)
-        self.assertEqual(parse_qs(urlsplit(get.call_args_list[1].args[1]).query)['q'],['上海 长风路'])
+        self.assertEqual(parse_qs(urlsplit(get.call_args_list[1].args[1]).query)['q'],['Mock Region Independent Landmark'])
         self.assertEqual(state['research_budget_used'], {'requests':3,'searches':2})
         self.assertEqual(state['research_failures'][0]['corrections_used'],1)
         self.assertTrue(state['research_failures'][0]['resolved'])

@@ -2,6 +2,37 @@
 import re
 
 
+def planning_evidence(state, archive, consent=False):
+    """规划输入仅来自真实已返回对象；建议不是授权，也不是截图对应结论。"""
+    import research_plan
+    plan = research_plan.ledger(state)
+    facts = spatial(archive, state.get('research_discoveries', []), state.get('research_requests', []))
+    attempted = {(r.get('request', {}).get('object_type'), r.get('request', {}).get('object_id'))
+                 for r in state.get('research_requests', []) if r.get('tool') == 'inspect_map_object'}
+    archived = archive['objects']
+    candidates = [{'action':'inspect_map_object','object_type':'way','object_id':ident,
+                   'evidence':'Returned uninspected candidate only; test tags and full geometry against a specific competing screenshot clue, not assumed identity.'}
+                  for kind, ident in state.get('research_seen_ids', [])
+                  if kind == 'way' and ('way', ident) not in archived and ('way', ident) not in attempted]
+    suggestions = candidates + [a for a in facts['suggested_queries']
+                               if (a['object_type'], a['object_id']) not in attempted]
+    used = state.get('research_budget_used', {})
+    network_allowed = (consent is True and state.get('research_online') is True
+                       and plan['phase'] != 'closure' and not plan.get('checkpoint_local_only')
+                       and used.get('requests', 0) < 8 and plan['counts']['network'] < 8)
+    return {'uninspected_candidates':candidates[:32], 'known_geometry':facts['ways'],
+            'network_suggestions':suggestions[:32], 'network_allowed_this_invocation':network_allowed,
+            'remaining':{'model':max(0, research_plan.MAX_MODEL_CALLS-plan['model_calls']),
+                         'requests':max(0, 8-used.get('requests', 0)),
+                         'searches':max(0, 3-used.get('searches', 0)),
+                         'categories':{k:max(0, v-plan['counts'][k]) for k,v in research_plan.LIMITS.items()}},
+            'observed_regions':research_plan.convergence(state)['observations'],
+            'observation_purposes':[m.get('content') for m in state.get('messages', [])
+                                    if m.get('role') == 'assistant' and 'observe_region' in str(m.get('content'))][-6:],
+            'focus':state.get('research_focus'),
+            'notice':'Candidate evidence only. Map-relative positions are not screenshot positions without independent registration. Local comparison and network plans are separate; real seen IDs, fresh separate consent, deduplication and all existing gates still apply.'}
+
+
 def spatial(archive, discoveries=(), requests=()):
     objects = archive['objects']
     ways = [v['object'] for (kind, _), v in objects.items() if kind == 'way']
@@ -93,6 +124,23 @@ def gate(state, archive, action):
             return None  # strict executor owns security validation
         if any(r.get('tool') == name and r.get('outcome') == 'succeeded' and _successful_query(r).casefold() == query for r in state.get('research_requests', [])):
             return {'status':'cached_search', 'next_step':'Already searched this normalized query; use existing discovery IDs and local spatial evidence. Do not repeat search or change region without new focus/evidence.'}
+        # 三次发现额度不应被同名加区县耗尽；未取得道路几何不等于道路不存在。
+        normalized_name = ' '.join(action['names'][0].split()).casefold()
+        repeated_name = any(r.get('tool') == name and r.get('outcome') == 'succeeded'
+                            and any(isinstance(n, str) and ' '.join(n.split()).casefold() == normalized_name
+                                    for n in r.get('request', {}).get('names', []))
+                            for r in state.get('research_requests', []))
+        if repeated_name:
+            focus = state.get('research_focus') or {}
+            claims = focus.get('hypotheses', [])
+            fresh = (focus.get('preview_count', 0) > state.get('research_last_search_preview', 0)
+                     and focus.get('region') == state.get('review_region', {}).get('region_original_xyxy')
+                     and focus.get('region') is not None)
+            independent = any(isinstance(h, dict) and action['names'][0] not in h.get('claim', '')
+                              for h in claims)
+            if not (fresh and len(claims) >= 2 and independent and focus.get('falsifier')):
+                return {'status':'search_diversity_recheck',
+                        'next_step':'No request sent; search quota unchanged. A Nominatim miss/place hit does NOT exclude a road. Prefer another independent visible label. Before retrying the same name with another region, observe the relevant label/landmark, then research_focus with at least two competing claims including an independent screenshot clue or alternative reading, a falsifier and why this region is evidenced. Do not ask the user to supply roads. Candidate map-relative positions never establish screenshot-relative positions.'}
     if action.get('action') == 'search_map_evidence' and conflict(state, action):
         focus = state.get('research_focus', {})
         observation = state.get('review_region', {})

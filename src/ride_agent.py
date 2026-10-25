@@ -202,7 +202,19 @@ accepted next action plus evidence_summary. Follow that checked task, not a cont
 Same version/region cannot be reobserved by changing reason. Same version/ordered_roads or
 review conclusion is not new progress. Checkpoints count against existing closure=2, and
 three consecutive duplicate/checkpoint turns stop unresolved. No budget increases.
-After a continuing checkpoint use ONLY local actions, never more map requests.
+After a continuing checkpoint with a checked next_local_action use ONLY local actions.
+Exception: a reason-only checkpoint with an existing focus can receive ONE planner_repair,
+not an invented focus or permission. Read its structured planning_evidence and next_planner_task:
+choose a concrete different relevant local region/comparison OR inspect an actually returned
+uninspected candidate way/full or known road node/ways if network_allowed_this_invocation=true.
+Search exhaustion does not exhaust inspect quota. Fresh independent map consent, real seen IDs,
+request/category budgets, deduplication, fixed endpoints and local-only closure remain mandatory.
+Never replay authorization or requests. A second no-information checkpoint stops within closure=2.
+Protect the three searches: after a miss/place-only result, prefer another independent visible
+clue or competing reading, not the same name with only a changed district. Same-name region
+retry requires a new relevant observation and research_focus comparing independent claims and
+a falsifier. Misses do not prove nonexistence. Map-internal relative positions are candidate
+evidence only; never describe them as screenshot positions without independent registration.
 For a new region choose an actually relevant DIFFERENT image part (turnback/connecting bend),
 not a made-up location. research_focus must name concrete competing returned-road/pixel claims,
 support/exclusion/unknown and a falsifier testing direction, shared-node connectivity or relative
@@ -518,6 +530,8 @@ class APIPlanner:
             current['research_plan'] = state.get('research_plan')
             current['research_progress'] = state.get('research_progress')
             current['research_focus'] = state.get('research_focus')
+            current['research_planning_evidence'] = research_decision.planning_evidence(
+                state, archive, bool(getattr(self, 'map_query_authorized', False)))
             current['research_last_outcome'] = state.get('research_last_outcome')
             current['research_review'] = state.get('research_review')
             current['research_online'] = bool(state.get('research_online'))
@@ -979,12 +993,14 @@ def run(state, folder, planner, budget=None, consent_map=False):
                 if set(action) - {'action','reason','next_local_action'} or 'reason' not in action:
                     raise ValueError('Research checkpoint requires reason and optional concrete local action')
                 route_review.text(action['reason'], 2000)
-                progress = research_plan.checkpoint(state, 'model_checkpoint', action, allow_continue=True)
+                progress = research_plan.checkpoint(state, 'model_checkpoint', action, allow_continue=True,
+                    planning=research_decision.planning_evidence(state, research_archive(state, folder), consent_map))
                 if progress['status'] == 'continuing_local':
-                    research_plan.ledger(state)['checkpoint_local_only'] = True
+                    if not progress['planner_repair']:
+                        research_plan.ledger(state)['checkpoint_local_only'] = True
                     state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps({
                         'tool':name, **progress,
-                        'next_step':'Progress saved, not a user question. Execute next_local_action or fill the specified focus comparison using current evidence. Local actions ONLY for the rest of this invocation; no network, retry, new permission or budget. Preserve unknowns. If no defensible comparison remains, checkpoint with no next action to stop.'},ensure_ascii=False)})
+                        'next_step':progress['next_planner_task'] if progress['planner_repair'] else 'Progress saved, not a user question. Execute next_local_action or fill the specified focus comparison using current evidence. Local actions ONLY for the rest of this invocation; no network, retry, new permission or budget. Preserve unknowns. If no defensible comparison remains, checkpoint with no next action to stop.'},ensure_ascii=False)})
                     save(state, folder)
                     continue
                 save(state, folder)

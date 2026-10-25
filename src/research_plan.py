@@ -187,7 +187,7 @@ def local_next(state, proposed=None):
     return None
 
 
-def checkpoint(state, reason, action=None, allow_continue=False):
+def checkpoint(state, reason, action=None, allow_continue=False, planning=None):
     """保存与停止分离；仅当前调用授权内继续，不触发resume或网络动作。"""
     plan = ledger(state)
     c = convergence(state)
@@ -197,8 +197,16 @@ def checkpoint(state, reason, action=None, allow_continue=False):
         c['no_progress'] += 1  # checkpoint itself is never evidence/progress
     proposed = action.get('next_local_action') if action else None
     next_action = local_next(state, proposed) if reason == 'model_checkpoint' else None
-    continuing = (allow_continue and next_action is not None and c['no_progress'] < 3
+    # 已有focus并不代表所有候选已核查。reason-only旧协议给一次真实证据规划修复，
+    # 不生成focus/区域/配准，也不占用额外closure或扩大任何预算。
+    repair = (reason == 'model_checkpoint' and not proposed and next_action is None
+              and bool(state.get('research_focus')) and planning is not None
+              and plan.get('planner_repairs', 0) < 1 and plan['model_calls'] < MAX_MODEL_CALLS
+              and (planning.get('uninspected_candidates') or planning.get('known_geometry')))
+    continuing = (allow_continue and (next_action is not None or repair) and c['no_progress'] < 3
                   and plan['counts']['closure'] < LIMITS['closure'])
+    if continuing and repair:
+        plan['planner_repairs'] = plan.get('planner_repairs', 0) + 1
     blocked = None if continuing else reason
     if reason == 'model_checkpoint' and not continuing:
         blocked = ('no_progress_limit' if c['no_progress'] >= 3 else
@@ -216,6 +224,12 @@ def checkpoint(state, reason, action=None, allow_continue=False):
         'last_outcome':state.get('research_last_outcome'), 'failures':state.get('research_failures', []),
         'unresolved':['screenshot correspondence', 'ordered traversal', 'unknown legs'],
         'next_local_action':next_action if continuing else None,
+        'planner_repair':bool(continuing and repair),
+        'continuation_scope':('bounded_planning_with_current_consent' if repair else 'local_only') if continuing else None,
+        'planning_evidence':planning if continuing and repair else None,
+        'next_planner_task':('Choose one concrete nonduplicate action using the structured evidence. '
+            'An existing focus is not a completed investigation. Inspect an actually seen candidate way/full or known road node/ways only if network_allowed_this_invocation; otherwise compare cached geometry or choose a DIFFERENT relevant screenshot region. '
+            'Do not invent focus, coordinates, screenshot positions or fill unknown legs. No new evidence means stop at the next checkpoint.') if continuing and repair else None,
         'can_resume':plan['model_calls'] < MAX_MODEL_CALLS and plan['counts']['closure'] < LIMITS['closure'],
         'resume_requires_fresh_upload_consent':True, 'verified':False, 'original_gps':False,
         'evidence_summary':{'observed_regions':c['observations'], 'focus':state.get('research_focus'),
