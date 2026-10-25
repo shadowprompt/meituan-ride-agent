@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "coordinate_system": "WGS84",
+  "source": {
+    "kind": "user",
+    "evidence": "纯合成schema示例，仅用于test/test_road_corridor.py中的虚构节点与道路；不能用于真实定位或声称GPS恢复。节点ID须先用inspect在实际本地OSM中核对。"
+  },
+  "legs": [
+    {
+      "road": {"name": "合成道路A", "way_ids": [10]},
+      "via": [{"node_id": 1}, {"node_id": 3}, {"node_id": 1}, {"node_id": 2}]
+    },
+    {
+      "road": {"name": "合成道路B"},
+      "via": [{"node_id": 2}, {"node_id": 4}]
+    }
+  ]
+}
