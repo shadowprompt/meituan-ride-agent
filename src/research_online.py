@@ -214,6 +214,22 @@ def refresh(state, folder):
     return data
 
 
+def search_candidate_type(item):
+    """保留服务返回类别而非从名字猜道路；搜索类型仍不是道路几何真值。"""
+    category = item.get('class', item.get('category'))
+    kind = item.get('type')
+    tags = item.get('extratags') if isinstance(item.get('extratags'), dict) else {}
+    highway = tags.get('highway')
+    road = bool(highway) and tags.get('area') != 'yes'
+    candidate = tags.get('area') != 'yes' and (road or (category == 'highway' and kind not in
+                        ('bus_stop', 'crossing', 'traffic_signals', 'street_lamp')))
+    nonroad = (tags.get('area') == 'yes' or (category is not None and not candidate))
+    return {'candidate_kind':'road_candidate' if candidate else 'non_road' if nonroad else 'unknown',
+            'returned_category':category if isinstance(category,str) else None,
+            'returned_type':kind if isinstance(kind,str) else None,
+            'returned_highway':highway if isinstance(highway,str) else None}
+
+
 def execute(state, folder, action, budget, consent):
     """失败也消耗本轮预算；查询正文/令牌不进入异常；仅成功真实响应成为证据。"""
     name = action.get('action')
@@ -268,7 +284,7 @@ def execute(state, folder, action, budget, consent):
             fail('invalid_input')
         budget['searches'] += 1
         host = 'nominatim.openstreetmap.org'
-        path = '/search?' + urlencode({'q':query,'format':'jsonv2','limit':5,'addressdetails':0})
+        path = '/search?' + urlencode({'q':query,'format':'jsonv2','limit':5,'addressdetails':0,'extratags':1})
     elif name == 'inspect_map_object':
         kind, ident = action['object_type'], action['object_id']
         if not isinstance(kind, str) or type(ident) is not int:
@@ -298,6 +314,7 @@ def execute(state, folder, action, budget, consent):
                 label = item.get('display_name','')
                 if not isinstance(label,str) or len(label)>4096:
                     fail('response_invalid')
+                candidate_type = search_candidate_type(item)
                 # Nominatim bbox为南北西东；仅保留有效真实响应范围，不把中心点当路节点。
                 try:
                     box = [float(v) for v in item.get('boundingbox', [])]
@@ -306,8 +323,8 @@ def execute(state, folder, action, budget, consent):
                 if (len(box) == 4 and all(math.isfinite(v) for v in box)
                         and -85 <= box[0] <= box[1] <= 85 and -180 <= box[2] <= box[3] <= 180):
                     discovery_bounds.append({'type':item['osm_type'],'id':item['osm_id'],
-                        'bbox_wgs84':[box[2],box[0],box[3],box[1]],'discovery_only':True,'query':query,'label':label})
-                hits.append({'object':{'type':item['osm_type'],'id':item['osm_id'],'tags':{'name':label}},'sources':[source], 'discovery_only':True})
+                        'bbox_wgs84':[box[2],box[0],box[3],box[1]],'discovery_only':True,'query':query,'label':label, **candidate_type})
+                hits.append({'object':{'type':item['osm_type'],'id':item['osm_id'],'tags':{'name':label}},'sources':[source], 'discovery_only':True, **candidate_type})
             # 原始搜索响应仅本地留证；不把地点中心当作道路节点坐标。
             target = Path(folder)/'research'/('search-'+hashlib.sha256((source['url'] + source['sha256']).encode()).hexdigest()+'.json')
             target.write_bytes(raw)

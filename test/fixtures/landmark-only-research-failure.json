@@ -1,0 +1,361 @@
+{
+  "record_id": "1e3439f6-bfec-403f-bc7a-246efb7ff115",
+  "model_calls": 13,
+  "budget": {
+    "requests": 4,
+    "searches": 3
+  },
+  "location": {
+    "action": "research_location",
+    "anchors": [
+      {
+        "label": "上海会聚",
+        "kind": "landmark",
+        "image_evidence": "终点标记旁可见“上海会聚”；灰色路线从终点向东延伸"
+      },
+      {
+        "label": "上海长风公园",
+        "kind": "landmark",
+        "image_evidence": "起点北侧可见“上海长风公园”；路线在公园西侧附近向北折返"
+      },
+      {
+        "label": "近铁城市广场",
+        "kind": "landmark",
+        "image_evidence": "路线中段北侧可见“近铁城市广场”，与终点和公园标注相互独立"
+      },
+      {
+        "label": "长宁路",
+        "kind": "road",
+        "image_evidence": "路线北伸段下方附近可见“长宁路”；标注位置不证明路线沿此路行驶"
+      }
+    ],
+    "query_plan": [
+      "上海会聚",
+      "上海长风公园",
+      "近铁城市广场"
+    ],
+    "map_comparison": "尚未查询地图对象，位置未核实",
+    "image_comparison": "原图显示起点在右侧，灰色路线先向北形成窄幅折返，再向西到达终点；道路归属及折返经过顺序未核实",
+    "status": "unlocated",
+    "next_step": "先搜索终点旁的“上海会聚”，再用独立公园地标核对位置",
+    "verified": false
+  },
+  "requests": [
+    {
+      "tool": "search_map_evidence",
+      "request": {
+        "names": [
+          "上海会聚"
+        ],
+        "q": "上海会聚"
+      },
+      "outcome": "succeeded",
+      "request_index": 1,
+      "request_limit": 8,
+      "source": {
+        "url": "https://nominatim.openstreetmap.org/search?q=%E4%B8%8A%E6%B5%B7%E4%BC%9A%E8%81%9A&format=jsonv2&limit=5&addressdetails=0",
+        "sha256": "527d0517791238aee0dbb730c1a7ad79b57ea9699c04ed45ba5e6748dacc9bcc"
+      },
+      "object_count": 1
+    },
+    {
+      "tool": "search_map_evidence",
+      "request": {
+        "names": [
+          "上海长风公园"
+        ],
+        "q": "上海长风公园"
+      },
+      "outcome": "succeeded",
+      "request_index": 2,
+      "request_limit": 8,
+      "source": {
+        "url": "https://nominatim.openstreetmap.org/search?q=%E4%B8%8A%E6%B5%B7%E9%95%BF%E9%A3%8E%E5%85%AC%E5%9B%AD&format=jsonv2&limit=5&addressdetails=0",
+        "sha256": "d9872a5be0dbea18aaa27d4a66a1de7cee96c8dff34876a985ed0a41b1cead4f"
+      },
+      "object_count": 2
+    },
+    {
+      "tool": "search_map_evidence",
+      "request": {
+        "names": [
+          "近铁城市广场"
+        ],
+        "q": "近铁城市广场"
+      },
+      "outcome": "succeeded",
+      "request_index": 3,
+      "request_limit": 8,
+      "source": {
+        "url": "https://nominatim.openstreetmap.org/search?q=%E8%BF%91%E9%93%81%E5%9F%8E%E5%B8%82%E5%B9%BF%E5%9C%BA&format=jsonv2&limit=5&addressdetails=0",
+        "sha256": "68dcda628134603f0a2fd38759f5de9cbcc90a6e2fb1c944542b3fdebe9bdf96"
+      },
+      "object_count": 3
+    },
+    {
+      "tool": "inspect_map_object",
+      "request": {
+        "object_type": "way",
+        "object_id": 44354955
+      },
+      "outcome": "succeeded",
+      "request_index": 4,
+      "request_limit": 8,
+      "source": {
+        "url": "https://api.openstreetmap.org/api/0.6/way/44354955/full.json",
+        "sha256": "e8a9791805d92c438f68eee55d41904faa586398660dcb60c0b5f181171d612b"
+      },
+      "object_count": 72
+    }
+  ],
+  "discoveries": [
+    {
+      "type": "way",
+      "id": 741601056,
+      "bbox_wgs84": [
+        121.3501373,
+        31.2225732,
+        121.3537527,
+        31.2252841
+      ],
+      "discovery_only": true,
+      "query": "上海会聚",
+      "label": "上海荟聚, 新泾镇, 长宁区, 上海市, 中国"
+    },
+    {
+      "type": "way",
+      "id": 44354955,
+      "bbox_wgs84": [
+        121.3918288,
+        31.2232513,
+        121.3979242,
+        31.2308307
+      ],
+      "discovery_only": true,
+      "query": "上海长风公园",
+      "label": "长风公园, 长风新村街道, 普陀区, 上海市, 中国"
+    },
+    {
+      "type": "way",
+      "id": 900800819,
+      "bbox_wgs84": [
+        121.3907705,
+        31.2259336,
+        121.3919492,
+        31.2284392
+      ],
+      "discovery_only": true,
+      "query": "上海长风公园",
+      "label": "长风公园, 大渡河路, 新渡口, 长风新村街道, 普陀区, 上海市, 200062, 中国"
+    },
+    {
+      "type": "way",
+      "id": 489341250,
+      "bbox_wgs84": [
+        121.3750349,
+        31.2329907,
+        121.3778746,
+        31.2341388
+      ],
+      "discovery_only": true,
+      "query": "近铁城市广场",
+      "label": "近铁城市广场, 长风新村街道, 普陀区, 上海市, 中国"
+    },
+    {
+      "type": "node",
+      "id": 2999351524,
+      "bbox_wgs84": [
+        121.3759726,
+        31.2338033,
+        121.3760726,
+        31.2339033
+      ],
+      "discovery_only": true,
+      "query": "近铁城市广场",
+      "label": "近铁城市广场, 金沙江路, 长风新村街道, 长征镇, 普陀区, 上海市, 200333, 中国"
+    },
+    {
+      "type": "node",
+      "id": 2999351523,
+      "bbox_wgs84": [
+        121.3769234,
+        31.2344397,
+        121.3770234,
+        31.2345397
+      ],
+      "discovery_only": true,
+      "query": "近铁城市广场",
+      "label": "近铁城市广场, 金沙江路, 真北, 长征镇, 普陀区, 上海市, 200333, 中国"
+    }
+  ],
+  "search_returns": [
+    {
+      "osm_type": "way",
+      "osm_id": 489341250,
+      "category": "landuse",
+      "type": "commercial",
+      "boundingbox": [
+        "31.2329907",
+        "31.2341388",
+        "121.3750349",
+        "121.3778746"
+      ]
+    },
+    {
+      "osm_type": "node",
+      "osm_id": 2999351524,
+      "category": "shop",
+      "type": "mall",
+      "boundingbox": [
+        "31.2338033",
+        "31.2339033",
+        "121.3759726",
+        "121.3760726"
+      ]
+    },
+    {
+      "osm_type": "node",
+      "osm_id": 2999351523,
+      "category": "shop",
+      "type": "mall",
+      "boundingbox": [
+        "31.2344397",
+        "31.2345397",
+        "121.3769234",
+        "121.3770234"
+      ]
+    },
+    {
+      "osm_type": "way",
+      "osm_id": 741601056,
+      "category": "landuse",
+      "type": "commercial",
+      "boundingbox": [
+        "31.2225732",
+        "31.2252841",
+        "121.3501373",
+        "121.3537527"
+      ]
+    },
+    {
+      "osm_type": "way",
+      "osm_id": 44354955,
+      "category": "leisure",
+      "type": "park",
+      "boundingbox": [
+        "31.2232513",
+        "31.2308307",
+        "121.3918288",
+        "121.3979242"
+      ]
+    },
+    {
+      "osm_type": "way",
+      "osm_id": 900800819,
+      "category": "railway",
+      "type": "station",
+      "boundingbox": [
+        "31.2259336",
+        "31.2284392",
+        "121.3907705",
+        "121.3919492"
+      ]
+    }
+  ],
+  "way": {
+    "type": "way",
+    "id": 44354955,
+    "timestamp": "2025-09-22T02:24:11Z",
+    "version": 26,
+    "changeset": 172271710,
+    "user": "OrangeGear",
+    "uid": 18601430,
+    "nodes": [
+      563692331,
+      3933997415,
+      3931857587,
+      3005876358,
+      13161252619,
+      563692332,
+      3933997708,
+      563692333,
+      3786124792,
+      3934087520,
+      3786123724,
+      3934087522,
+      3786124793,
+      3786123729,
+      3786124794,
+      3786124795,
+      3786124796,
+      563692340,
+      12860290834,
+      11181003935,
+      3940136944,
+      3940136943,
+      3940136942,
+      12860290813,
+      3940136941,
+      3940136935,
+      3940136934,
+      564508038,
+      563692341,
+      1198211020,
+      12736534808,
+      1198210877,
+      1198211051,
+      12736534807,
+      563692342,
+      13160997178,
+      3940136881,
+      1198210941,
+      563692343,
+      13160997181,
+      13160997171,
+      3940075373,
+      1198211060,
+      563692334,
+      1198210972,
+      13160997172,
+      3940075150,
+      3940075145,
+      1198210859,
+      3940075143,
+      563692335,
+      3940075117,
+      3935575582,
+      3935575562,
+      563692336,
+      3935575242,
+      3940075102,
+      1882249604,
+      3940075092,
+      563692319,
+      3940075057,
+      3931857567,
+      3931857573,
+      3931857584,
+      3931857583,
+      3931857586,
+      8666099888,
+      3931857585,
+      3931857582,
+      3931857568,
+      563692331
+    ],
+    "tags": {
+      "leisure": "park",
+      "name": "长风公园",
+      "name:en": "Changfeng Park",
+      "wikidata": "Q15046355",
+      "wikimedia_commons": "Category:Changfeng Park",
+      "wikipedia": "en:Changfeng Park"
+    }
+  },
+  "node_reject": {
+    "tool": "inspect_map_object",
+    "status": "non_road_boundary",
+    "next_step": "Known parents are non-road boundaries, not intersections. No road connection is established. Inspect a discovered road way/full instead; do not spend node/ways on this parcel boundary.",
+    "verified": false
+  }
+}

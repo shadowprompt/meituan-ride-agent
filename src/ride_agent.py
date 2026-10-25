@@ -169,6 +169,16 @@ Keep 2..8 anchors and at most 3 planned queries; never copy example labels. This
 working note, not verified localization. Update it only when useful, not every turn.
 Read CURRENT_STAGE_STATE.research_planning_evidence.localization and discovery_comparisons.
 Search bounds are enough for an initial local-space test, not road geometry or connectivity.
+Independent clues do NOT mean three landmarks. Usually 1-2 effective independent clues suffice;
+a relevant road query can itself cross-check locality. Explicitly separate landmark queries from
+road-seed queries in the plan. Dynamically protect the remaining 3-search/8-request budget:
+without a road seed, do not spend the final search on a redundant third landmark. No fixed 2+1
+allocation. Read road_seed_plan and returned candidate_kind/category/type/highway/bbox; never
+infer road type from a name. Known park/parcel bounds already exclude them as road geometry;
+do not fetch their full merely to re-exclude them, or crawl their nodes looking for roads.
+No search and no legal road seed means honestly stop, not repeatedly crop or checkpoint.
+Location notes are versioned model claims: stale notes are history, not current unlocated or
+located truth. Consult current requests and returned geometry; never promote status automatically.
 Before selecting way/full explain why that particular candidate tests the independently
 localized area and route structure. Before node/ways explain the relevant junction, not
 just an arbitrary endpoint. Map requests are scarce: reserve them for route-bearing ways,
@@ -215,8 +225,9 @@ accepted next action plus evidence_summary. Follow that checked task, not a cont
 Same version/region cannot be reobserved by changing reason. Same version/ordered_roads or
 review conclusion is not new progress. Checkpoints count against existing closure=2, and
 three consecutive duplicate/checkpoint turns stop unresolved. No budget increases.
-After a continuing checkpoint with a checked next_local_action use ONLY local actions.
-Exception: a reason-only checkpoint with an existing focus can receive ONE planner_repair,
+A checkpoint never revokes CURRENT fresh map consent. With request capacity and a real returned
+road seed, necessary nonduplicate way/full or road node/ways remain available before closure.
+A reason-only checkpoint can receive ONE planner_repair from actionable current evidence,
 not an invented focus or permission. Read its structured planning_evidence and next_planner_task:
 choose a concrete different relevant local region/comparison OR inspect an actually returned
 uninspected candidate way/full or known road node/ways if network_allowed_this_invocation=true.
@@ -537,7 +548,7 @@ class APIPlanner:
             current['research_plan'] = state.get('research_plan')
             current['research_progress'] = state.get('research_progress')
             current['research_focus'] = state.get('research_focus')
-            current['research_location'] = state.get('research_location')
+            current['research_location'] = research_decision.location_snapshot(state)
             current['research_planning_evidence'] = research_decision.planning_evidence(
                 state, archive, bool(getattr(self, 'map_query_authorized', False)))
             current['research_spatial_evidence']['suggested_queries'] = current['research_planning_evidence']['network_suggestions']
@@ -911,6 +922,11 @@ def run(state, folder, planner, budget=None, consent_map=False):
                 research_plan.checkpoint(state, 'task_model_limit')
                 save(state, folder)
                 return state
+            seed = research_decision.road_seed_plan(state, research_archive(state, folder))
+            if seed['stop_without_road_seed']:
+                research_plan.checkpoint(state, 'search_exhausted_without_road_seed')
+                save(state, folder)
+                return state
             plan['phase'] = 'closure' if plan.get('closure_reason') or plan['model_calls'] >= research_plan.MAX_MODEL_CALLS-research_plan.CLOSURE_RESERVE else 'research'
         stage = 'planner'
         try:
@@ -962,7 +978,7 @@ def run(state, folder, planner, budget=None, consent_map=False):
             if state.get('research_online') and consent_map is True and name in ('search_map_evidence', 'inspect_map_object'):
                 blocked = research_decision.gate(state, research_archive(state, folder), action)
                 if blocked:
-                    if planned_research and not research_plan.charge(state, 'correction'):
+                    if planned_research and not blocked.get('planning_feedback') and not research_plan.charge(state, 'correction'):
                         research_plan.checkpoint(state, 'correction_limit', action)
                         save(state, folder)
                         return state
@@ -985,7 +1001,7 @@ def run(state, folder, planner, budget=None, consent_map=False):
                     save(state, folder)
                     continue
                 kind = research_plan.category(name)
-                if (plan['phase'] == 'closure' or plan.get('checkpoint_local_only')) and kind == 'network':
+                if plan['phase'] == 'closure' and kind == 'network':
                     if not research_plan.charge(state, 'correction'):
                         research_plan.checkpoint(state, 'closure_network_loop', action)
                         save(state, folder)
@@ -1009,11 +1025,9 @@ def run(state, folder, planner, budget=None, consent_map=False):
                 progress = research_plan.checkpoint(state, 'model_checkpoint', action, allow_continue=True,
                     planning=research_decision.planning_evidence(state, research_archive(state, folder), consent_map))
                 if progress['status'] == 'continuing_local':
-                    if not progress['planner_repair']:
-                        research_plan.ledger(state)['checkpoint_local_only'] = True
                     state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps({
                         'tool':name, **progress,
-                        'next_step':progress['next_planner_task'] if progress['planner_repair'] else 'Progress saved, not a user question. Execute next_local_action or fill the specified focus comparison using current evidence. Local actions ONLY for the rest of this invocation; no network, retry, new permission or budget. Preserve unknowns. If no defensible comparison remains, checkpoint with no next action to stop.'},ensure_ascii=False)})
+                        'next_step':progress['next_planner_task'] if progress['planner_repair'] else 'Progress saved, not a user question. Execute next_local_action or fill the specified focus comparison using current evidence. Saving a checkpoint does not revoke fresh current map consent. Necessary nonduplicate road actions remain subject to real returned IDs, request limits and closure; no retry, new permission or budget. Preserve unknowns. If no defensible comparison remains, checkpoint with no next action to stop.'},ensure_ascii=False)})
                     save(state, folder)
                     continue
                 save(state, folder)
@@ -1143,7 +1157,8 @@ def run(state, folder, planner, budget=None, consent_map=False):
             elif name == 'research_location':
                 if state.get('map_provider') != 'research':
                     raise ValueError('Research provider required')
-                state['research_location'] = research_decision.location_note(action)
+                state['research_location'] = {**research_decision.location_note(action),
+                    'evidence_basis':[state.get('research_version'), len(state.get('research_requests', []))]}
                 tool_result = {'tool':name, 'status':'recorded', 'verified':False,
                     'notice':'Model working localization, not ground truth. Execute the discriminating query; do not repeat this note as a gate.'}
             elif name == 'research_focus':

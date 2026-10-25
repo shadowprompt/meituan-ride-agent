@@ -388,6 +388,9 @@ class RideServer(ThreadingHTTPServer):
         fields = ('research_location', 'research_plan', 'research_progress', 'research_focus', 'research_last_outcome', 'places', 'place_stage', 'place_review', 'place_diagnostic', 'map_provider', 'research_online', 'research_requests', 'research_failures', 'research_budget_used', 'research_object_count', 'research_seen_ids', 'research_diagnostic', 'research_hypothesis', 'research_review', 'location_clues', 'map_query_diagnostic', 'candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
                   'registration_notice', 'corridor_complete', 'approximate_complete', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
         result = {key: state[key] for key in fields if key in state}
+        if state.get('research_location'):
+            import research_decision
+            result['research_location'] = research_decision.location_snapshot(state)
         if state.get('error') or state.get('status') == 'error':
             category = processing_category(state)
             result.update(error='任务处理错误（详细错误不在网页公开）',

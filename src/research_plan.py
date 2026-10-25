@@ -212,6 +212,14 @@ def checkpoint(state, reason, action=None, allow_continue=False, planning=None):
               and bool(state.get('research_focus')) and planning is not None
               and plan.get('planner_repairs', 0) < 1 and plan['model_calls'] < MAX_MODEL_CALLS
               and (planning.get('uninspected_candidates') or planning.get('known_geometry')))
+    # 有当前授权及真实可执行对象时，保存进度不能把阶段永久降成local-only。
+    network_repair = (reason == 'model_checkpoint' and not proposed and next_action is None
+                      and not state.get('research_review')
+                      and planning and planning.get('network_allowed_this_invocation')
+                      and planning.get('network_suggestions') and plan.get('planner_repairs',0) < 1)
+    repair = repair or network_repair
+    if planning and planning.get('road_seed_plan',{}).get('stop_without_road_seed'):
+        next_action, repair = None, False
     continuing = (allow_continue and (next_action is not None or repair) and c['no_progress'] < 3
                   and plan['counts']['closure'] < LIMITS['closure'])
     if continuing and repair:
@@ -234,8 +242,8 @@ def checkpoint(state, reason, action=None, allow_continue=False, planning=None):
         'unresolved':['screenshot correspondence', 'ordered traversal', 'unknown legs'],
         'next_local_action':next_action if continuing else None,
         'planner_repair':bool(continuing and repair),
-        'continuation_scope':('bounded_planning_with_current_consent' if repair else 'local_only') if continuing else None,
-        'planning_evidence':planning if continuing and repair else None,
+        'continuation_scope':('bounded_planning_with_current_consent' if planning and planning.get('network_allowed_this_invocation') else 'local_only') if continuing else None,
+        'planning_evidence':planning if continuing else None,
         'next_planner_task':('Choose one concrete nonduplicate action using the structured evidence. '
             'An existing focus is not a completed investigation. Inspect an actually seen candidate way/full or known road node/ways only if network_allowed_this_invocation; otherwise compare cached geometry or choose a DIFFERENT relevant screenshot region. '
             'Do not invent focus, coordinates, screenshot positions or fill unknown legs. No new evidence means stop at the next checkpoint.') if continuing and repair else None,

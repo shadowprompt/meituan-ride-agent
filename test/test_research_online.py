@@ -41,7 +41,7 @@ class OnlineTests(unittest.TestCase):
         first, _ = self.call({**self.search,'names':['长风路']}, body)
         second, get = self.call({**self.search,'names':['长风路'],'region':'上海'}, body)
         params = parse_qs(urlsplit(get.call_args.args[1]).query)
-        self.assertEqual(params, {'q':['上海 长风路'],'format':['jsonv2'],'limit':['5'],'addressdetails':['0']})
+        self.assertEqual(params, {'q':['上海 长风路'],'format':['jsonv2'],'limit':['5'],'addressdetails':['0'],'extratags':['1']})
         self.assertEqual(self.budget, {'requests':2,'searches':2})
         self.assertEqual(self.state['research_search_queries'], ['长风路','上海 长风路'])
         self.assertNotEqual(first['source']['url'], second['source']['url'])
@@ -293,7 +293,7 @@ class OnlineTests(unittest.TestCase):
                 return actions[step]
         bodies=[[{'osm_type':'way','osm_id':5,'display_name':'Fixture Road'}],{'elements':[self.way]+self.nodes},{'elements':[self.way]}]
         if node_first:
-            bodies=[[{'osm_type':'node','osm_id':1,'display_name':'Fixture junction'}], {'elements':[self.way]}, {'elements':[self.way]+self.nodes}]
+            bodies=[[{'osm_type':'node','osm_id':1,'display_name':'Fixture junction','category':'highway','type':'turning_circle','boundingbox':['20','20','10','10']}], {'elements':[self.way]}, {'elements':[self.way]+self.nodes}]
         responses = [json.dumps(b).encode() for b in bodies]
         if partial_failure:
             responses[1:1] = [responses[0],MapFetchError('remote body withheld',code='timeout')]

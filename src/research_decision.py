@@ -43,6 +43,42 @@ def discovery_comparisons(discoveries):
     return pairs[:64]
 
 
+def location_snapshot(state):
+    """笔记按对象版本+成功/失败查询次数标记过期；不擅自改成定位成功。"""
+    note = state.get('research_location')
+    if not note:
+        return None
+    basis = [state.get('research_version'), len(state.get('research_requests', []))]
+    stale = note.get('evidence_basis') != basis
+    return {**note, 'stale':stale, 'current_evidence_basis':basis,
+            'status': 'stale' if stale else note.get('status', 'unlocated'),
+            'recorded_status':note.get('status'),
+            'notice':'Historical model note; consult current returned evidence, not an automatic localization decision.'}
+
+
+def road_seed_plan(state, archive):
+    """地标定位与道路种子分开规划，不固定2+1配额，不把闭合地块当道路入口。"""
+    discoveries = state.get('research_discoveries', [])
+    roads = [v['object']['id'] for (k,_),v in archive['objects'].items() if k == 'way'
+             and v['object'].get('tags',{}).get('highway') and v['object'].get('tags',{}).get('area') != 'yes']
+    road_candidates = [d for d in discoveries if d.get('type') == 'way' and d.get('candidate_kind') == 'road_candidate'
+                       and (('way',d['id']) not in archive['objects'] or d['id'] in roads)]
+    anchors = (state.get('research_location') or {}).get('anchors', [])
+    searched = [n for r in state.get('research_requests',[]) for n in r.get('request',{}).get('names',[])]
+    queries = [{'action':'search_map_evidence','names':[a['label']],
+                'evidence':a['image_evidence']} for a in anchors
+               if a.get('kind') == 'road' and a.get('label') not in searched]
+    searches = state.get('research_budget_used',{}).get('searches',0)
+    no_seed = not roads and not road_candidates
+    return {'road_ids':roads, 'road_candidates':road_candidates, 'road_search_options':queries,
+            'landmark_queries_used': [n for n in searched if any(a.get('label') == n and a.get('kind') != 'road' for a in anchors)],
+            'risk':'search_exhausted_without_road_seed' if no_seed and searches >= 3 else 'no_road_seed' if no_seed else None,
+            'stop_without_road_seed':bool(no_seed and searches >= 3 and discoveries and
+                all(d.get('candidate_kind') == 'non_road' or (('way',d['id']) in archive['objects']
+                    and d['id'] not in roads) for d in discoveries)),
+            'next_step':'Usually 1-2 effective independent clues suffice for a locality hypothesis; a road can itself cross-check locality. Reserve remaining searches and requests for a relevant readable road and way/full, not a third redundant landmark or parcel-node crawling. Additional landmark queries are justified only by a concrete unresolved locality discriminator. No fixed allocation; unknown return types remain unknown.'}
+
+
 def planning_evidence(state, archive, consent=False):
     """规划输入仅来自真实已返回对象；建议不是授权，也不是截图对应结论。"""
     import research_plan
@@ -51,28 +87,30 @@ def planning_evidence(state, archive, consent=False):
     attempted = {(r.get('request', {}).get('object_type'), r.get('request', {}).get('object_id'))
                  for r in state.get('research_requests', []) if r.get('tool') == 'inspect_map_object'}
     archived = archive['objects']
+    nonroads = {(d['type'],d['id']) for d in state.get('research_discoveries',[]) if d.get('candidate_kind') == 'non_road'}
     candidates = [{'action':'inspect_map_object','object_type':'way','object_id':ident,
                    'evidence':'Returned uninspected candidate only; test tags and full geometry against a specific competing screenshot clue, not assumed identity.'}
                   for kind, ident in state.get('research_seen_ids', [])
-                  if kind == 'way' and ('way', ident) not in archived and ('way', ident) not in attempted]
+                  if kind == 'way' and ('way',ident) not in nonroads and ('way', ident) not in archived and ('way', ident) not in attempted]
     suggestions = candidates + [a for a in facts['suggested_queries']
                                if (a['object_type'], a['object_id']) not in attempted]
     used = state.get('research_budget_used', {})
     network_allowed = (consent is True and state.get('research_online') is True
-                       and plan['phase'] != 'closure' and not plan.get('checkpoint_local_only')
+                       and plan['phase'] != 'closure'
                        and used.get('requests', 0) < 8 and plan['counts']['network'] < 8)
     comparisons = discovery_comparisons(state.get('research_discoveries', []))
     searched = [r.get('request',{}).get('names',[]) for r in state.get('research_requests',[]) if r.get('tool') == 'search_map_evidence']
-    note = state.get('research_location') or {}
+    note = location_snapshot(state) or {}
+    seed = road_seed_plan(state, archive)
     localized = note.get('status') == 'candidate'
     # Before a candidate locality exists, generic endpoint expansion is a bad default.
     # Keep all real candidates accessible, but stop actively recommending blind crawling.
     if not localized and used.get('searches',0) < 3:
         suggestions = [a for a in suggestions if a['object_type'] == 'way']
-    return {'localization':{'status':note.get('status','unlocated'), 'model_claim_only':True,
+    return {'road_seed_plan':seed, 'localization':{'status':note.get('status','unlocated'), 'recorded_status':note.get('recorded_status'), 'stale':note.get('stale',False), 'evidence_basis':note.get('evidence_basis'), 'model_claim_only':True,
                 'searched_names':searched, 'anchors':note.get('anchors',[]),
                 'priority':('Test the route-bearing geometry and alternatives in the candidate locality.' if localized else
-                    'Read the full original for an independent landmark near the route; compare distinct search bounds before endpoint crawling. A background road is not localization.'),
+                    seed['next_step']),
                 'geometry_warning':'Do not spend remaining requests on serial background-road segments; retain unknown branches.'},
             'discovery_comparisons':comparisons,
             'uninspected_candidates':candidates[:32], 'known_geometry':facts['ways'],
@@ -185,6 +223,20 @@ def gate(state, archive, action):
                             and any(isinstance(n, str) and ' '.join(n.split()).casefold() == normalized_name
                                     for n in r.get('request', {}).get('names', []))
                             for r in state.get('research_requests', []))
+        seed = road_seed_plan(state, archive)
+        note = state.get('research_location') or {}
+        label = action['names'][0]
+        landmark = any(a.get('label') == label and a.get('kind') == 'landmark' for a in note.get('anchors', []))
+        road_planned = any(q == a.get('label') for q in note.get('query_plan', [])
+                           for a in note.get('anchors', []) if a.get('kind') == 'road')
+        # 仅明确“最后搜索仍是地标且无道路计划”时给一次规划反馈；不引入focus仪式。
+        import research_plan
+        plan = research_plan.ledger(state)
+        if (state.get('research_budget_used',{}).get('searches',0) == 2 and seed['risk'] == 'no_road_seed'
+                and landmark and not road_planned and not plan.get('road_planning_feedback')):
+            plan['road_planning_feedback'] = True
+            return {'status':'road_seed_planning', 'planning_feedback':True, 'road_seed_plan':seed,
+                    'next_step':'No request sent. This would consume the last search on another landmark with no road seed or road plan. Reconsider a relevant readable road from current image evidence, or explain a concrete locality ambiguity that requires this landmark; the next valid choice is not forced to a fixed allocation. No focus action required.'}
         if repeated_name:
             focus = state.get('research_focus') or {}
             claims = focus.get('hypotheses', [])
@@ -204,10 +256,13 @@ def gate(state, archive, action):
         for record in state.get('research_requests', []):
             if record.get('outcome') == 'succeeded' and record.get('request') == {'object_type': kind, 'object_id': ident}:
                 return {'status': 'cached_object', 'next_step': 'Already inspected; use current spatial evidence, do not repeat this endpoint.'}
+        if kind == 'way' and any(d.get('type') == kind and d.get('id') == ident and d.get('candidate_kind') == 'non_road' for d in state.get('research_discoveries', [])):
+            return {'status':'non_road_candidate', 'next_step':'Returned category already identifies a non-road. Use its bbox for locality; do not fetch full merely to exclude a park or crawl parcel nodes. Choose a relevant road seed.'}
         if kind == 'node':
             parents = [v['object'] for (k, _), v in archive['objects'].items() if k == 'way' and ident in v['object']['nodes']]
-            if parents and not any(p.get('tags', {}).get('highway') and p.get('tags', {}).get('area') != 'yes' for p in parents):
-                return {'status': 'non_road_boundary', 'next_step': 'Known parents are non-road boundaries, not intersections. No road connection is established. Inspect a discovered road way/full instead; do not spend node/ways on this parcel boundary.'}
+            road_node = any(d.get('type') == 'node' and d.get('id') == ident and d.get('candidate_kind') == 'road_candidate' for d in state.get('research_discoveries', []))
+            if not road_node and not any(p.get('tags', {}).get('highway') and p.get('tags', {}).get('area') != 'yes' for p in parents):
+                return {'status': 'non_road_boundary', 'next_step': 'No returned road parent or highway-node evidence; parcel/place nodes are not intersections. No road connection is established. Inspect a discovered road way/full instead; do not spend node/ways on this parcel boundary.'}
     return None
 
 
@@ -218,4 +273,4 @@ def outcome(archive, action, result):
             'supported': {'returned_road_ids': roads, 'object_facts_only': True},
             'excluded': ['non-road objects cannot establish a road intersection'] if ways and not roads else [],
             'unknown': ['screenshot identity', 'ordered traversal including turnbacks', 'unreturned roads'],
-            'next_step': 'First test the locality with independent visible anchors and distinct search bounds; a background road is not a located route. After a candidate locality exists, compare route shape and real geometry, then fetch only discriminating connecting way/full if needed. Map directions are not screenshot positions; no road label or registration prerequisite for multi-evidence candidates. A miss/failure excludes no road.'}
+            'next_step': 'Reserve scarce searches for relevant road seeds after useful independent locality clues; do not require three landmarks. Never fetch a known park full to exclude it. First test the locality with independent visible anchors and distinct search bounds; a background road is not a located route. After a candidate locality exists, compare route shape and real geometry, then fetch only discriminating connecting way/full if needed. Map directions are not screenshot positions; no road label or registration prerequisite for multi-evidence candidates. A miss/failure excludes no road.'}

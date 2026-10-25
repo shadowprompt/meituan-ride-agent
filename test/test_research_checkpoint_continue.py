@@ -111,20 +111,20 @@ class CheckpointContinueTests(recovery.ResearchReviewRecoveryTests):
         self.assertFalse(state.get('artifacts'))
         self.assertEqual(state['research_budget_used'],{'requests':7,'searches':3})
 
-    def test_checkpoint_cannot_acquire_network_permission_or_reuse_budget(self):
+    def test_checkpoint_preserves_current_consent_and_remaining_road_request(self):
         self.prefix()
         attempted={'action':'inspect_map_object','object_type':'node','object_id':1,
-                   'evidence':'Mock attempt forbidden after checkpoint'}
+                   'evidence':'Mock returned road node after checkpoint'}
         def decide(n):
             if n==1:return self.checkpoint_action()
             if n==2:return attempted
             return self.checkpoint()
-        with patch.object(live,'_get') as get:
+        with patch.object(live,'_get',return_value=json.dumps({'elements':[self.way]}).encode()) as get:
             state,_=self.model_run(decide,consent=True)
-        get.assert_not_called()
-        self.assertIn('closure_local_only',str(state['messages']))
-        self.assertEqual(state['research_budget_used'],{'requests':7,'searches':3})
-        self.assertEqual(state['research_plan']['counts']['network'],7)
+        self.assertEqual(get.call_count,1)
+        self.assertNotIn('closure_local_only',str(state['messages']))
+        self.assertEqual(state['research_budget_used'],{'requests':8,'searches':3})
+        self.assertEqual(state['research_plan']['counts']['network'],8)
         self.assertEqual(state['research_plan']['counts']['closure'],2)
         self.assertTrue(state['research_progress']['resume_requires_fresh_upload_consent'])
 

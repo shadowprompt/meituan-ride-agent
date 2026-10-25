@@ -151,3 +151,24 @@ hash/内部故障、无授权、危险参数和未知网络对象ID仍走原失�
 记录下方，不将 Mock 编排通过写作真实原图验收。
 最终全量：`PYTHONPATH=src:test python3 -m unittest discover -s test -q`，
 467项，457通过、10项既有环境条件跳过，0失败；不是新增跳过。
+
+### 地标→道路种子与 checkpoint 阶段衔接（2026-10-25）
+
+详见 `美团截图识别.md` 同名修正节。三次搜索不是三个地标的固定仪式：规划返回
+`road_seed_plan`（已有道路、实际返回的道路候选、截图道路搜索选项、无种子风险）。
+固定搜索请求新增 `extratags=1`，展示返回 category/type/highway/bbox，不从名字猜对象类型。
+已知非道路不推荐/允许为排除它而再次 full，节点查询须实际道路父对象或返回 highway-node 证据。
+最后搜索仍是地标且无道路计划只提醒一次，模型预算不增加；无搜索且已知没有合法种子立即暂停。
+
+checkpoint 不再设置 `checkpoint_local_only`；当前调用 fresh 双授权及实际 seen 对象、
+请求与动作预算、429/去重/无自动重试、末六轮收尾限制仍适用。没有新调用授权不能联网，
+不自动 resume 旧任务。笔记 `evidence_basis` 绑定对象版本与审计数，当前展示 stale 而非复用
+“尚未查询”作现状，更不能自动升级为定位成功。真实失败输入只读，静态公开证据 fixture 与
+mock 编排不宣称真实图片识路通过。未重启服务或触碰配置。
+
+本补丁专项：`PYTHONPATH=src:test python3 -m unittest discover -s test -p 'test_research*.py'`
+Ran 120，120通过、0跳过、0失败。源码内联脚本3段 `node --check`、修改模块
+`py_compile`、`git diff --check` 通过。专项包括既有429立即停止、失败项同轮不重试、
+第8请求失败停止、末轮禁止联网、跨调用计数不重置及真实loopback网页协议回归。
+最终全量：`PYTHONPATH=src:test python3 -m unittest discover -s test`，
+Ran 522，512通过、10项既有条件跳过、0失败（通过数为总数减skipped，不把522写成通过）。

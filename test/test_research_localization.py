@@ -31,7 +31,7 @@ class RecordedFailureTests(unittest.TestCase):
         self.assertEqual(facts['localization']['status'],'unlocated')
         self.assertEqual(facts['remaining']['searches'],1)
         self.assertEqual(facts['remaining']['requests'],0)
-        self.assertIn('independent landmark',facts['localization']['priority'])
+        self.assertIn('relevant readable road',facts['localization']['priority'])
         self.assertFalse(facts['network_allowed_this_invocation'])
 
     @unittest.skipUnless(RECORDED.exists(), 'Local real record is optional; not shipped as fixture')
