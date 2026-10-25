@@ -39,6 +39,35 @@ class DiagnosticsTests(unittest.TestCase):
                     self.assertEqual(transport.call_count,len(replies))
                     self.assertEqual(path.read_text(),'old')
 
+    def test_hierarchy_failure_agent_and_main_result_show_safe_levels(self):
+        from test_admin_area import relation
+        action = {'action':'query_map', 'area_name':'上海市普陀区',
+                  'area_hierarchy':['上海市','普陀区'], 'names':['合成路'], 'evidence':'合成文本，不是真实识别'}
+        class Planner:
+            semantic_review = True
+            def decide(self, *args): return action
+        with tempfile.TemporaryDirectory() as d:
+            image = Path(d)/'synthetic.png'
+            Image.new('RGB', (30,20), 'white').save(image)
+            folder = Path(d)/'task'
+            state = agent.start(image, folder, True, 'corridor')
+            with patch('map_fetch._download', return_value=json.dumps({'elements':[relation(1, '上海市', 4)]}).encode()) as transport:
+                done = agent.run(state, folder, Planner(), consent_map=True)
+            self.assertEqual(transport.call_count, 1)
+            self.assertEqual(done['status'], 'waiting_for_user')
+            self.assertIn('上海市 → 普陀区', done['question'])
+            self.assertIn('relation_ids', done['question'])
+            diagnostic = done['map_query_diagnostic']
+            self.assertEqual(diagnostic['request']['area_hierarchy'], ['上海市','普陀区'])
+            self.assertEqual(diagnostic['reason_code'], 'area_membership_unverified')
+            page = ride_web.PAGE
+            start = page.index('function resultSummary(')
+            end = page.index('\nfunction ', start+10)
+            script = page[start:end]+'\nconsole.log(resultSummary('+json.dumps({'execution_state':'succeeded','status':'waiting_for_user','goal':'corridor','map_query_diagnostic':diagnostic})+'));'
+            result = subprocess.run(['node','-e',script], capture_output=True,text=True,check=True).stdout
+            for text in ('上海市普陀区','上海市 → 普陀区','relation_ids','area_membership_unverified'):
+                self.assertIn(text,result)
+
     def test_partial_road_match_is_not_success_or_old_map_replacement(self):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'map.osm';path.write_text('old evidence')

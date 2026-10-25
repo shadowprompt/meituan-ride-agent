@@ -261,3 +261,7 @@ python3 src/ride_agent.py resume --task-dir outputs/corridor-demo --local-only -
 网页创建目标选择“读地名→本地OSM道路走廊”；已有任务勾选“明确切换独立道路走廊目标”。上传本地OSM、按行输入精确道路名即可先查询；查看查询JSON后上传有依据的道路假设JSON继续。仅本地继续不需要API；需要模型自己读图时每次重新同意上传。不要同时上传控制点/近似锚点或勾选下载。网页产物含 `corridors/<服务端UUID>/road-corridor.geojson`、`road-corridor.json`、`road-corridor.png`。示意PNG是本地OSM底图，不是原图配准叠图；JSON/GeoJSON带地图与假设哈希、节点/边way_id、有序分段、未确认起终点与限制。所有结果 `verified=false`、`original_gps=false`，`status=candidate_needs_review`；任务 `needs_confirmation` 也不代表已验证。重提取/修正颜色裁剪/更换OSM会使旧候选失效，网页保留审计链接而不当作当前预览。
 
 真实交付仍需：可读地名的原图、对应地区获授权且节点引用完整的本地WGS84 OSM XML、有依据的道路顺序/转折点/重复行进假设；若要严格截图定位或误差估计，还需独立真实控制点和检查点，不能拿本模式替代。当前回归为合成夹具及mock API动作链，不代表两张用户真实图已跑通或原始GPS已恢复。
+
+### 行政区父子层级查询修复
+
+`query_map` 支持保守解析中文省/市/区/县拼接名称，以及显式 `area_hierarchy`（2–3级且拼接等于原始名称）。一次QL先验证父对象唯一，再限定父范围与 `subarea` 成员查询子行政relation；不猜选全国同名区县、不扩大范围。仍最多两次固定Overpass请求，合计30秒，每响应2MB，无自动重试。失败主结果直接展示原始名称、查询层级及安全候选ID；旧任务不会被自动重跑。归属数据不足会保守停止，不能解释为真实行政区不存在。详见 [层级查询、授权预算与未验证边界](docs/ADMIN_AREA_QUERY.md)。

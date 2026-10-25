@@ -12,6 +12,7 @@ import http.client
 import json
 import math
 import os
+from admin_area import levels_for, resolve as resolve_admin_area
 from pathlib import Path
 import socket
 import tempfile
@@ -35,8 +36,9 @@ MAX_REFERENCES = 400_000
 class MapFetchError(ValueError):
     """安全结构化错误；诊断不使用远端正文或异常字符串。"""
 
-    def __init__(self, message, *, code='response_invalid', http_status=None):
+    def __init__(self, message, *, code='response_invalid', http_status=None, area_resolution=None):
         super().__init__(message)
+        self.area_resolution = area_resolution
         self.code = code if code in REASONS else 'response_invalid'
         self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
 
@@ -46,12 +48,16 @@ class MapFetchError(ValueError):
                   'retry_advice': retry, 'automatic_retry': False}
         if self.http_status is not None:
             result['http_status'] = self.http_status
+        if self.area_resolution is not None:
+            result['area_resolution'] = self.area_resolution
         return result
 
 
 # 固定文案独立于异常/响应正文，避免密钥、URL或服务端内容回显。
 REASONS = {
     'area_ambiguous': ('行政区名称匹配多个对象，无法安全选择。', '请补充原图可见的城市/区县上下文；不会自动扩大地域。'),
+    'area_parent_required': ('行政区层级无法保守解析或父级不明确。', '请提供有图文依据的明确父/子行政区结构；不会猜选同名区县。'),
+    'area_membership_unverified': ('行政区缺少可验证的父子归属证据。', '需父 relation 的 subarea 成员及父范围内匹配；不会扩大范围或猜选。'),
     'area_not_found': ('未找到该精确行政区。', '请核对行政区全称及 OSM 收录情况；重复授权不会修正名称。'),
     'roads_not_found': ('该行政区内未找到请求的精确道路。', '请核对道路文字和所属行政区；不会模糊搜索或扩大范围。'),
     'roads_partial': ('该行政区仅找到部分请求道路，不能当作完整查询成功。', '请逐项核对道路文字及所属行政区；不会丢弃未找到的道路或扩大范围。'),
@@ -278,11 +284,13 @@ def _exact_text(value):
     return value.strip()
 
 
-def fetch_named_roads(area_name, names, output_path, *, consent_download=False):
+def _fetch_named_roads(area_name, names, output_path, *, consent_download=False, area_hierarchy=None, resolution=None):
     """本次授权下查询具体行政区内最多3个精确道路名；最多两次请求，无重试。"""
     if consent_download is not True:
         raise MapFetchError('Fresh explicit map query consent required', code='consent_required')
     area_name = _exact_text(area_name)
+    levels = levels_for(area_name, area_hierarchy, MapFetchError)
+    resolution.update(original_name=area_name, query_levels=levels, candidates=[])
     if not isinstance(names, list) or not 1 <= len(names) <= 3:
         raise MapFetchError('Expected 1..3 exact road names', code='invalid_input')
     names = [_exact_text(n) for n in names]
@@ -296,33 +304,40 @@ def fetch_named_roads(area_name, names, output_path, *, consent_download=False):
         raise MapFetchError('Output must be a file in an existing directory', code='output_error')
     quote = lambda v: json.dumps(v, ensure_ascii=False)
     deadline = time.monotonic() + TIMEOUT_SECONDS
-    area_query = ('[out:json][timeout:10][maxsize:2097152];'
-                  f'area["name"={quote(area_name)}]["boundary"="administrative"];out tags 3;')
-    area_raw = _download(area_query, deadline=deadline, max_bytes=2000000)
-    try:
-        data = json.loads(area_raw.decode('utf-8'), parse_constant=_reject_constant)
-        areas = data['elements']
-        if not isinstance(areas, list):
-            raise ValueError()
-        if data.get('remark'):
-            raise MapFetchError('Incomplete area response', code='response_incomplete')
-        if not areas:
-            raise MapFetchError('No administrative area', code='area_not_found')
-        # 校验全部返回对象后再判断唯一性；非法/重复对象不是地域歧义证据。
-        if any(not isinstance(a, dict) or a.get('type') != 'area'
-               or not _identifier(a.get('id')) or not isinstance(a.get('tags'), dict)
-               or a['tags'].get('name') != area_name
-               or a['tags'].get('boundary') != 'administrative' for a in areas):
-            raise ValueError()
-        if len({a['id'] for a in areas}) != len(areas):
-            raise ValueError()
-        if len(areas) > 1:
-            raise MapFetchError('Ambiguous administrative area', code='area_ambiguous')
-    except MapFetchError:
-        raise
-    except (ValueError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError) as exc:
-        raise MapFetchError('Invalid administrative area response') from exc
-    area_id = areas[0]['id']
+    if len(levels) > 1:
+        area_id, area_raw, hierarchy_result = resolve_admin_area(
+            levels, _download, deadline, MapFetchError, _identifier, _reject_constant)
+        resolution.update(hierarchy_result)
+    else:
+        area_query = ('[out:json][timeout:10][maxsize:2097152];'
+                      f'area["name"={quote(area_name)}]["boundary"="administrative"];out tags 3;')
+        area_raw = _download(area_query, deadline=deadline, max_bytes=2000000)
+        try:
+            data = json.loads(area_raw.decode('utf-8'), parse_constant=_reject_constant)
+            areas = data['elements']
+            if not isinstance(areas, list):
+                raise ValueError()
+            if data.get('remark'):
+                raise MapFetchError('Incomplete area response', code='response_incomplete')
+            if not areas:
+                raise MapFetchError('No administrative area', code='area_not_found')
+            # 校验全部返回对象后再判断唯一性；非法/重复对象不是地域歧义证据。
+            if any(not isinstance(a, dict) or a.get('type') != 'area'
+                   or not _identifier(a.get('id')) or not isinstance(a.get('tags'), dict)
+                   or a['tags'].get('name') != area_name
+                   or a['tags'].get('boundary') != 'administrative' for a in areas):
+                raise ValueError()
+            if len({a['id'] for a in areas}) != len(areas):
+                raise ValueError()
+            resolution['candidates'] = [{'name': levels[0], 'area_ids': [a['id'] for a in areas]}]
+            if len(areas) > 1:
+                raise MapFetchError('Ambiguous administrative area', code='area_ambiguous')
+        except MapFetchError:
+            raise
+        except (ValueError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError) as exc:
+            raise MapFetchError('Invalid administrative area response') from exc
+        area_id = areas[0]['id']
+        resolution['candidates'] = [{'name': levels[0], 'area_ids': [a['id'] for a in areas]}]
     clauses = ''.join(f'way(area.scope)["highway"]["name"={quote(n)}];' for n in names)
     query = (f'[out:json][timeout:15][maxsize:2097152];area({area_id})->.scope;'
              f'({clauses})->.roads;.roads out body 33;node(w.roads);out skel;')
@@ -359,10 +374,22 @@ def fetch_named_roads(area_name, names, output_path, *, consent_download=False):
             os.unlink(temporary)
     return {'endpoint': ENDPOINT, 'source_urls': [ENDPOINT] +
             [f'https://www.openstreetmap.org/way/{w.get("id")}' for w in root.findall('way')],
-            'area_name': area_name, 'names': names, 'area_id': area_id,
+            'area_name': area_name, 'names': names, 'area_id': area_id, 'area_resolution': resolution,
             'query_sha256': hashlib.sha256(query.encode()).hexdigest(),
             'area_response_sha256': hashlib.sha256(area_raw).hexdigest(),
             'response_sha256': hashlib.sha256(raw).hexdigest(),
             'osm_sha256': hashlib.sha256(xml).hexdigest(),
             'node_count': nodes, 'way_count': ways, 'response_bytes': len(raw),
             'verified': False, 'original_gps': False, 'status': 'needs_confirmation'}
+
+
+def fetch_named_roads(area_name, names, output_path, *, consent_download=False, area_hierarchy=None):
+    """本次授权最多两次固定端点请求；所有阶段保留安全层级诊断。"""
+    resolution = {}
+    try:
+        return _fetch_named_roads(area_name, names, output_path, consent_download=consent_download,
+                                  area_hierarchy=area_hierarchy, resolution=resolution)
+    except MapFetchError as exc:
+        if exc.area_resolution is None and resolution:
+            exc.area_resolution = resolution
+        raise

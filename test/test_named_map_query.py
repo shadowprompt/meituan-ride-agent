@@ -145,12 +145,12 @@ class QueryEscapingTests(unittest.TestCase):
     def test_quoted_name_is_literal_not_overpass_program(self):
         with tempfile.TemporaryDirectory() as d:
             name='x"];way(1);["'
-            area=json.loads(json.dumps(AREA));area['elements'][0]['tags']['name']=name
+            area=json.loads(json.dumps(AREA));area['elements'][0]['tags']['name']='合成区'
             fixture=json.loads(json.dumps(FIXTURE));fixture['elements'][2]['tags']['name']=name
             with patch('map_fetch._download',side_effect=[json.dumps(area).encode(),json.dumps(fixture).encode()]) as transport:
-                map_fetch.fetch_named_roads(name,[name],Path(d)/'map.osm',consent_download=True)
+                map_fetch.fetch_named_roads('合成区',[name],Path(d)/'map.osm',consent_download=True)
             expected='["name"='+json.dumps(name,ensure_ascii=False)+']'
-            self.assertIn(expected,transport.call_args_list[0].args[0])
+            self.assertNotIn(name,transport.call_args_list[0].args[0])
             self.assertIn(expected,transport.call_args_list[1].args[0])
             self.assertEqual(transport.call_args_list[1].kwargs['max_bytes'],2000000)
 

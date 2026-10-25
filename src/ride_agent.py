@@ -67,7 +67,7 @@ PROMPT += """
 没有本地OSM时，先读原图提出精确行政区名及道路名，调用：
 {"action":"query_map","area_name":"图中或对话有依据的行政区名","names":["原图可读道路名"],"evidence":"具体可见文字及地域依据、不确定性"}
 query_map仅在CURRENT_STAGE_STATE.map_query_authorized=true时可联网；没有授权就ask用户勾选本次地图查询授权，不能以旧授权继续。
-每轮最多一次query_map（内部最多两次固定Overpass请求）；歧义或失败ask澄清，不自动重试。不接受URL、坐标、QL或路径。拿到地图后inspect_roads再build_corridor。行政区不明、文字不清就问具体位置/更清晰原图，不能硬猜城市；不要求用户填写道路假设或OSM。
+可选 area_hierarchy=["父行政区全称","子行政区全称"]（2–3级，拼接必须等于area_name）；仅在图文有依据时提供，不猜父级。中文省/市/区/县拼接可保守拆分；其他复杂名称应显式提供结构。每轮最多一次query_map（内部最多两次固定Overpass请求：一次行政层级查询、一次精确道路查询；总计30秒，各响应2MB）；歧义或失败ask澄清，不自动重试。不接受URL、坐标、QL或路径。拿到地图后inspect_roads再build_corridor。行政区不明、文字不清就问具体位置/更清晰原图，不能硬猜城市；不要求用户填写道路假设或OSM。
 缺少地名/节点证据就ask；重复行进需显式重复via或legs。build后deliver仅表示未确认道路候选，
 不能称恢复真实GPS、截图已配准或路线已验证。禁止为此目标fetch_map；query_map是独立有界精确对象查询。本地OSM只查询所需道路，查询结果随本次授权对话发送给配置模型API。整个OSM文件不会上传。
 """
@@ -134,6 +134,8 @@ def map_query_diagnostic(state, folder, action, outcome, **summary):
                'names': [text(n, 80) for n in names[:3]] if isinstance(names, list) else [],
                'evidence': text(action.get('evidence'), 2000),
                'evidence_source': 'model_visible_text_unverified'}
+    if isinstance(action.get('area_hierarchy'), list):
+        request['area_hierarchy'] = [text(n, 80) for n in action['area_hierarchy'][:3]]
     previous = state.get('map_query_diagnostic', {})
     attempt_id = (previous['attempt_id'] if outcome != 'started' and previous.get('outcome') == 'started'
                   else str(uuid.uuid4()))
@@ -705,7 +707,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 stage = name
                 if state.get('goal') != 'corridor':
                     raise ValueError('query_map requires corridor goal')
-                if set(action) != {'action', 'area_name', 'names', 'evidence'}:
+                if (set(action) - {'action', 'area_name', 'names', 'evidence', 'area_hierarchy'}
+                        or not {'action', 'area_name', 'names', 'evidence'}.issubset(action)):
                     raise ValueError('query_map accepts exact names and visible evidence only')
                 if not isinstance(action['evidence'], str) or not 1 <= len(action['evidence'].strip()) <= 2000:
                     raise ValueError('Visible locality and road evidence required')
@@ -717,19 +720,23 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 planner.map_query_authorized = False
                 map_query_diagnostic(state, folder, action, 'started')
                 try:
-                    result = fetch_named_roads(action['area_name'], action['names'], Path(folder)/'map.osm', consent_download=True)
+                    result = fetch_named_roads(action['area_name'], action['names'], Path(folder)/'map.osm', consent_download=True,
+                                               **({'area_hierarchy': action['area_hierarchy']} if 'area_hierarchy' in action else {}))
                 except MapFetchError as exc:
                     diagnostic = map_query_diagnostic(state, folder, action, 'failed', **exc.diagnostic())
                     request = diagnostic['request']
                     state.update(status='waiting_for_user', question=(
                         f"地图查询失败 [{diagnostic['reason_code']}]：{diagnostic['message']} "
                         f"查询行政区：{request['area_name']}；道路：{'、'.join(n or '（非法名称）' for n in request['names'])}。"
+                        + (' 实际查询层级：' + ' → '.join(diagnostic['area_resolution']['query_levels'])
+                           + '；候选：' + json.dumps(diagnostic['area_resolution']['candidates'], ensure_ascii=False) + '。'
+                           if diagnostic.get('area_resolution') else '')
                         + diagnostic['retry_advice']))
                     save(state, folder)
                     return state
                 map_query_diagnostic(state, folder, action, 'succeeded',
                                      result_summary={k: result[k] for k in (
-                                         'area_id', 'node_count', 'way_count', 'response_bytes', 'osm_sha256', 'status')})
+                                         'area_id', 'area_resolution', 'node_count', 'way_count', 'response_bytes', 'osm_sha256', 'status')})
                 invalidate_corridor(state)
                 state.pop('artifacts', None)
                 state.pop('summary', None)

@@ -662,7 +662,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <label>模式 <select id="mode"><option value="api">真实视觉 API（需要本次授权）</option><option value="demo">离线 Demo（固定演示）</option></select></label>
 <label>手动目标 <select id="goal"><option value="corridor">读图识路 → 地图道路候选（默认）</option><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">严格配准后道路匹配</option></select></label></details>
 <label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（含本地OSM道路查询结果，不含完整地图文件；创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
-<label class="consent"><input id="queryMapConsent" type="checkbox">仅本次同意向固定 Overpass 发送模型从原图识别的行政区名及精确道路名（最多一次对象查询、两次请求；不发送截图）。与模型上传授权独立，创建/继续后自动取消。</label>
+<label class="consent"><input id="queryMapConsent" type="checkbox">仅本次同意向固定 Overpass 发送模型从原图识别的行政区名及精确道路名（最多一次对象查询、两次请求：一次受父级约束的行政层级查询及一次精确道路查询；总计30秒，各响应上限2MB；不发送截图）。与模型上传授权独立，创建/继续后自动取消。</label>
 <button id="create">开始识别</button><button id="continueMap">授权后继续识路 / 查询地图</button></fieldset>
 <section class="result" aria-labelledby="resultTitle"><h2 id="resultTitle">2. 结果 / 具体缺口</h2><p id="resultSummary" role="status" aria-live="polite">尚未开始。请选择截图，确认本次上传授权后点击“开始识别”。</p></section>
 <details id="taskRecovery"><summary>恢复已有任务（只读取，不自动重跑）</summary><fieldset><legend>任务恢复与执行详情</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><p id="executionNotice" role="status" style="font-weight:bold;border:2px solid #b66;padding:12px"></p><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset></details>
@@ -713,7 +713,7 @@ function lockRunning(){if(executionBusy)for(const b of document.querySelectorAll
 function resultSummary(d){
  if(['queued','running'].includes(d.execution_state))return '正在识别，请稍候；只刷新状态，不会重复上传或重跑任务。本轮仅在明确地图查询授权下联网，不保证输出经纬度。';
  const q=d.map_query_diagnostic;
- if(d.goal==='corridor'&&!d.corridor_complete&&!d.error_category&&d.execution_state!=='failed'&&q&&['failed','started'].includes(q.outcome))return '本轮尚未交付经纬度。'+(q.outcome==='failed'?'地图查询失败 ['+q.reason_code+']：'+q.message:'上次地图查询未记录最终结果；不能断言是否发送成功。')+' 查询行政区：'+(q.request?.area_name||'（非法或缺失）')+'；道路：'+(q.request?.names||[]).join('、')+'。'+(q.retry_advice||'请先核对任务状态，不要盲目重复授权。')+' 后台本轮结束不等于业务完成；未自动重试。';
+ if(d.goal==='corridor'&&!d.corridor_complete&&!d.error_category&&d.execution_state!=='failed'&&q&&['failed','started'].includes(q.outcome))return '本轮尚未交付经纬度。'+(q.outcome==='failed'?'地图查询失败 ['+q.reason_code+']：'+q.message:'上次地图查询未记录最终结果；不能断言是否发送成功。')+' 查询行政区：'+(q.request?.area_name||'（非法或缺失）')+'；道路：'+(q.request?.names||[]).join('、')+'。'+(q.area_resolution?' 实际查询层级：'+q.area_resolution.query_levels.join(' → ')+'；候选：'+JSON.stringify(q.area_resolution.candidates)+'。':'')+(q.retry_advice||'请先核对任务状态，不要盲目重复授权。')+' 后台本轮结束不等于业务完成；未自动重试。';
  if(d.status==='waiting_for_user'&&typeof d.question==='string')return '等待用户确认：'+d.question+' 本轮未完成经纬度交付；刷新不会重跑。';
  if(d.execution_state==='failed'||d.error_category)return '本轮未完成。'+(d.recovery_hint||d.web_execution?.recovery_hint||'请查看任务详情中的安全提示；不会自动重试上传。')+(d.goal==='corridor'&&!d.map_available?' 本任务尚无地图证据；可核对问题后重新授权具体对象查询，未交付经纬度。':'');
  if(d.corridor_complete)return '已生成道路走廊经纬度候选，请在下方查看产物。尚未确认起终点、经过顺序及完整性，非原始 GPS，不可导航。';
