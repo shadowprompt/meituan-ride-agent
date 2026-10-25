@@ -54,8 +54,9 @@ class SimplePageTests(unittest.TestCase):
         self.assertEqual(page.options['mode'][0], 'api')
         for identity in ('uploadConsent', 'reviewConsent', 'mapConsent'):
             self.assertNotIn('checked', page.attrs[identity])
-        self.assertIn('尚未接通', PAGE)
-        self.assertIn('未补齐自动地图能力', PAGE)
+        self.assertEqual(page.parents['queryMapConsent'], ())
+        self.assertIn('固定 Overpass', PAGE)
+        self.assertIn('具体对象', PAGE)
 
     @unittest.skipUnless(shutil.which('node'), '需要本地 Node')
     def test_summary_create_and_restore_do_not_inject_evidence(self):
@@ -66,12 +67,12 @@ global.document={getElementById:id=>nodes[id]||(nodes[id]={checked:false,value:'
 global.FileReader=class{readAsDataURL(){this.result='data:image/png;base64,c2NyZWVuc2hvdA==';this.onload()}};
 """ + script + r"""
 assert.equal(calls.length,0); // 加载页面不恢复、更不重跑旧任务。
-assert(resultSummary({goal:'corridor',map_available:false}).includes('仍缺地图能力'));
+assert(resultSummary({goal:'corridor',map_available:false}).includes('地图证据'));
 assert(!resultSummary({goal:'corridor',map_available:false}).includes('JSON'));
 assert(resultSummary({goal:'corridor',map_available:true}).includes('已有本地地图'));
 assert(resultSummary({corridor_complete:true}).includes('不可导航'));
 assert(resultSummary({execution_state:'failed',recovery_hint:'配置未就绪'}).includes('配置未就绪'));
-assert(resultSummary({execution_state:'failed',goal:'corridor',map_available:false}).includes('仍缺地图能力'));
+assert(resultSummary({execution_state:'failed',goal:'corridor',map_available:false}).includes('地图证据'));
 action=async fn=>fn();render=d=>{};request=async(path,data)=>{calls.push({path,data});return {}};
 $('image').files=[{size:12}];$('mode').value='api';$('goal').value='corridor';
 $('uploadConsent').checked=true;$('roadNames').value='stale road';$('fetch').checked=true;
@@ -81,6 +82,9 @@ $('uploadConsent').checked=true;$('roadNames').value='stale road';$('fetch').che
  $('task').value='11111111-1111-4111-8111-111111111111';
  await nodes.refresh.onclick();assert.equal(calls.length,2);
  assert.equal(calls[1].path,'/api/tasks/'+nodes.task.value);assert.equal(calls[1].data,undefined);
+ $('queryMapConsent').checked=true;await nodes.continueMap.onclick();
+ assert.deepEqual(calls[2].data,{consent_upload:true,consent_map:true});
+ assert(!('road_names' in calls[2].data));assert(!('fetch_map' in calls[2].data));
 })().catch(e=>{console.error(e);process.exitCode=1});
 """
         subprocess.run(['node', '-e', harness], check=True, capture_output=True)

@@ -22,7 +22,7 @@ from centerline import process
 from register_pixels import register, fit_registration
 from approximate_location import approximate, fit_approximation
 from road_match import match, _load_segments
-from map_fetch import fetch_roads
+from map_fetch import fetch_roads, fetch_named_roads, MapFetchError
 from inspect_colors import inspect_colors
 from ride_errors import TaskFailure, failure_category, api_diagnostic
 import route_review
@@ -57,15 +57,19 @@ API候选歧义不再强制先问用户。必须先observe_candidates并在后�
 """
 
 
-# 道路走廊是独立目标：不借用像素配准/语义复核成功标记，也不允许下载。
+# 道路走廊独立于配准；地图查询只接受本次明确授权。
 PROMPT += """
 独立goal=corridor：先自己阅读原图地名、道路和行进顺序，再查询已授权本地OSM。
 此目标不要求extract/centerline/register/review_route，不是严格像素配准；旧目标的门禁不变。
 {"action":"inspect_roads","names":["原图可读的精确道路名"]}
 {"action":"build_corridor","hypothesis":{"schema_version":1,"coordinate_system":"WGS84","source":{"kind":"model","evidence":"原图具体道路顺序依据与不确定处"},"legs":[{"road":{"name":"已查询道路名"},"via":[{"node_id":1},{"node_id":2}]}]}}
 模型只能提出可审计假设；node_id必须来自本轮当前地图inspect_roads的返回，不得编造节点、坐标或任意路径。
-缺少地名/OSM/节点证据就ask；重复行进需显式重复via或legs。build后deliver仅表示未确认道路候选，
-不能称恢复真实GPS、截图已配准或路线已验证。禁止为此目标fetch_map；本地OSM只查询所需道路，查询结果随本次授权对话发送给配置模型API。整个OSM文件不会上传。
+没有本地OSM时，先读原图提出精确行政区名及道路名，调用：
+{"action":"query_map","area_name":"图中或对话有依据的行政区名","names":["原图可读道路名"],"evidence":"具体可见文字及地域依据、不确定性"}
+query_map仅在CURRENT_STAGE_STATE.map_query_authorized=true时可联网；没有授权就ask用户勾选本次地图查询授权，不能以旧授权继续。
+每轮最多一次query_map（内部最多两次固定Overpass请求）；歧义或失败ask澄清，不自动重试。不接受URL、坐标、QL或路径。拿到地图后inspect_roads再build_corridor。行政区不明、文字不清就问具体位置/更清晰原图，不能硬猜城市；不要求用户填写道路假设或OSM。
+缺少地名/节点证据就ask；重复行进需显式重复via或legs。build后deliver仅表示未确认道路候选，
+不能称恢复真实GPS、截图已配准或路线已验证。禁止为此目标fetch_map；query_map是独立有界精确对象查询。本地OSM只查询所需道路，查询结果随本次授权对话发送给配置模型API。整个OSM文件不会上传。
 """
 
 
@@ -224,6 +228,7 @@ class APIPlanner:
         review_version = route_review.version(state, folder)
         current = {k:state.get(k,False) for k in ('extracted','centerlined','registered','registration_gate_passed','match_attempted')}
         if state.get('goal') == 'corridor':
+            current['map_query_authorized'] = bool(getattr(self, 'map_query_authorized', False))
             current['corridor_complete'] = bool(state.get('corridor_complete'))
             current['corridor_inspection'] = state.get('corridor_inspection')
         current['review_version'] = review_version
@@ -309,7 +314,9 @@ class ConsentedPlanner:
     local_pipeline = True
 
     def decide(self, state, folder):
-        return APIPlanner().decide(state, folder)
+        planner = APIPlanner()
+        planner.map_query_authorized = getattr(self, 'map_query_authorized', False)
+        return planner.decide(state, folder)
 
 
 class DemoPlanner:
@@ -491,6 +498,16 @@ def delivery_requirements(state, folder):
 
 def run(state, folder, planner, budget=12, consent_map=False):
     delivery_corrections = 0
+    map_query_used = False
+    inspection = state.get('corridor_inspection')
+    osm = Path(folder)/'map.osm'
+    if inspection and (not osm.is_file() or inspection.get('osm_sha256') != hashlib.sha256(osm.read_bytes()).hexdigest()):
+        invalidate_corridor(state)
+        state.pop('artifacts', None)
+        state.pop('summary', None)
+    if state.get('map_query') and (not osm.is_file() or state['map_query'].get('osm_sha256') != hashlib.sha256(osm.read_bytes()).hexdigest()):
+        state.pop('map_query', None)
+    planner.map_query_authorized = consent_map is True
     state.update(verified=False, original_gps=False)
     state.pop('error_diagnostic', None)
     state['semantic_review_required'] = bool(getattr(planner, 'semantic_review', False))
@@ -655,6 +672,32 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 tool_result = {'tool':'centerline', **{k:result[k] for k in ('status','component_count','cycle_rank','skeleton_pixels','warnings')},
                                'endpoint_count':len(result['endpoints_xy']), 'junction_pixel_count':len(result['junction_pixels_xy']),
                                'has_geometric_order':result['ordered_path_xy'] is not None}
+            elif name == 'query_map':
+                stage = name
+                if state.get('goal') != 'corridor':
+                    raise ValueError('query_map requires corridor goal')
+                if set(action) != {'action', 'area_name', 'names', 'evidence'}:
+                    raise ValueError('query_map accepts exact names and visible evidence only')
+                if not isinstance(action['evidence'], str) or not 1 <= len(action['evidence'].strip()) <= 2000:
+                    raise ValueError('Visible locality and road evidence required')
+                if not consent_map or map_query_used:
+                    state.update(status='waiting_for_user', question='本轮地图查询未授权或预算已用。请勾选本次地图查询授权及模型上传授权后继续；只向固定 Overpass 发送图中行政区/道路名，不发送截图，不自动重试。')
+                    save(state, folder)
+                    return state
+                map_query_used = True
+                planner.map_query_authorized = False
+                try:
+                    result = fetch_named_roads(action['area_name'], action['names'], Path(folder)/'map.osm', consent_download=True)
+                except MapFetchError:
+                    state.update(status='waiting_for_user', question='具体地图对象查询失败（地域歧义、无结果、预算或网络错误）。未自动重试；请核对原图地域/文字，必要时重新授权继续。')
+                    save(state, folder)
+                    return state
+                invalidate_corridor(state)
+                state.pop('artifacts', None)
+                state.pop('summary', None)
+                state['map_query'] = {**result, 'evidence': action['evidence']}
+                (Path(folder)/'map-query.json').write_text(json.dumps(state['map_query'], ensure_ascii=False), encoding='utf-8')
+                tool_result = {'tool':name, **result}
             elif name in ('inspect_roads', 'build_corridor'):
                 if state.get('goal') != 'corridor':
                     raise ValueError('Explicit corridor goal required')
@@ -802,6 +845,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                     state['artifacts'] = list(state['corridor_artifacts'])
                     if state.get('corridor_inspection'):
                         state['artifacts'].append('corridor-inspection.json')
+                    if state.get('map_query'):
+                        state['artifacts'].append('map-query.json')
                     state['road_notice'] = '未确认道路走廊；非截图配准、非原始GPS、不可导航。'
                 state['question'] = None
                 save(state,folder)
@@ -874,7 +919,8 @@ def main():
     resume.add_argument('--review-continue', action='store_true', help='本次授权后复核当前证据，不要求新回答、不重提取或重选')
     resume.add_argument('--local-only', action='store_true', help='仅用已有证据本地继续，不上传截图，不调用模型 API')
     resume.add_argument('--fetch-map', action='store_true', help='Download roads for checked registration bounds; requires --consent-map')
-    resume.add_argument('--consent-map', action='store_true', help='Allow this invocation to send route bounds to Overpass (not screenshot)')
+    begin.add_argument('--consent-map', action='store_true', help='仅本次允许向固定Overpass查询原图具体行政区和道路名')
+    resume.add_argument('--consent-map', action='store_true', help='仅本次允许向固定Overpass发送范围或具体行政区/道路名，不发送截图')
     resume.add_argument('--road-corridor', action='store_true', help='明确选择独立道路假设候选，不要求严格像素配准')
     resume.add_argument('--road-names', nargs='+', help='查询本地OSM精确道路名')
     resume.add_argument('--road-hypothesis-file', help='有依据的有序道路/OSM节点JSON；不能提供自由坐标')
@@ -922,9 +968,9 @@ def main():
                     raise ValueError('Choose fetch-map or osm-file, not both')
                 if args.fetch_map and not args.consent_map:
                     raise ValueError('--fetch-map requires explicit --consent-map each invocation')
-                if not args.answer and not args.answer_file and not args.controls_file and not args.approximate_anchors_file and not args.osm_file and not args.road_names and not args.road_hypothesis_file and not args.road_corridor and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue:
+                if not args.answer and not args.answer_file and not args.controls_file and not args.approximate_anchors_file and not args.osm_file and not args.road_names and not args.road_hypothesis_file and not args.road_corridor and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue and not args.consent_map:
                     raise ValueError('Provide answer, answer-file, controls-file or osm-file')
-                answer = args.answer or ('用户本次明确授权上传当前任务截图、派生预览、诊断和对话，继续复核当前已保存证据；保留用户候选选择，不重新提取。' if review_continue else 'User supplied local evidence file.')
+                answer = args.answer or ('用户本次明确授权上传当前任务截图、派生预览、诊断和对话，继续复核当前已保存证据；保留用户候选选择，不重新提取。' if review_continue else ('用户本次明确授权向固定Overpass查询原图可见行政区与精确道路对象；请依据原图自行识别，缺少地域或文字时提出具体问题。' if args.consent_map else 'User supplied local evidence file.'))
                 if args.color is not None or args.crop is not None:
                     if args.reset_extraction:
                         raise ValueError('Choose structured color/crop correction or reset-extraction')
@@ -950,6 +996,7 @@ def main():
                         state['goal'] = 'roads'
                     state['map_download_requested'] = False
                     state.pop('map_download', None)
+                    state.pop('map_query', None)
                     state['match_attempted'] = False
                     # 地图已替换就立即落盘失效；后续假设校验失败也不能展示旧地图候选。
                     save(state, args.task_dir)

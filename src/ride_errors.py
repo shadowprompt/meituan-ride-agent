@@ -38,7 +38,7 @@ def failure_category(exc, stage=None):
     return {'extract':'extraction_failed', 'inspect_colors':'inspection_failed',
             'centerline':'centerline_failed', 'register':'registration_failed',
             'inspect_roads':'corridor_failed', 'build_corridor':'corridor_failed',
-            'match':'road_processing_failed', 'fetch_map':'road_processing_failed',
+            'query_map':'model_action_invalid', 'match':'road_processing_failed', 'fetch_map':'road_processing_failed',
             'action':'model_action_invalid'}.get(stage, 'task_processing_failed')
 
 # 诊断仅使用异常类型/HTTP整数，不读取异常正文、URL或响应body。

@@ -4,7 +4,7 @@
 
 > **无需 API 的第一阶段入口：** `python3 src/ride_web.py` 后访问 `http://127.0.0.1:8765/pixel-route`。可在原图上按经过顺序人工点击、方向预览、保存/重开及导出有序像素 JSON；保留重复经过，明确人工近似、未验证、非 GPS。操作和真实浏览器验收见 [PIXEL_ROUTE_ACCEPTANCE.md](PIXEL_ROUTE_ACCEPTANCE.md)。自动图段排序尚未实现。
 
-> **当前交付入口：[本地试用与验收说明](DELIVERY.md)。** 运行 `python src/ride_web.py` 使用本地网页；运行 `python src/ride_doctor.py` 检查本机条件。当前是待真实模型验收的试用版，仍需人工配准，未实现自动定位。下面早期 OCR／指标目标属于规划，不能视作当前已实现功能。
+> **当前交付入口：[本地试用与验收说明](DELIVERY.md)。** 运行 `python src/ride_web.py` 使用本地网页；运行 `python src/ride_doctor.py` 检查本机条件。当前是待真实模型验收的试用版。独立道路走廊目标已接通“模型读图 → 本次授权具体地图对象查询 → 节点检查 → 经纬度候选”；严格截图配准目标仍需人工控制点，不等于通用自动定位。详见 [有界地图查询链路](docs/NAMED_MAP_QUERY.md)。下面早期 OCR／指标目标属于规划，不能视作当前已实现功能。
 
 ## 源码目录与运行方式
 

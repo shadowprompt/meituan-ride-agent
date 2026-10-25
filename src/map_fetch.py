@@ -7,6 +7,7 @@ The response is validated as Overpass JSON and saved atomically as OSM XML,
 which is the format currently accepted by road_match._load_osm (not JSON).
 Data is unverified OSM road data, not navigation guidance or original GPS.
 """
+import hashlib
 import http.client
 import json
 import math
@@ -61,7 +62,11 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise MapFetchError('Overpass redirect refused; only the fixed HTTPS endpoint is permitted')
 
 
-def _download(query):
+def _download(query, *, deadline=None, max_bytes=None):
+    max_bytes = MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
+    remaining = min(TIMEOUT_SECONDS, deadline - time.monotonic()) if deadline else TIMEOUT_SECONDS
+    if remaining <= 0:
+        raise MapFetchError("Map query deadline exceeded; no automatic retry")
     request = urllib.request.Request(
         ENDPOINT, data=urllib.parse.urlencode({'data': query}).encode('ascii'),
         headers={'Content-Type': 'application/x-www-form-urlencoded',
@@ -71,7 +76,7 @@ def _download(query):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     start = time.monotonic()
     try:
-        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
+        with opener.open(request, timeout=remaining) as response:
             if response.status != 200:
                 raise MapFetchError(f'Overpass HTTP {response.status}; no automatic retry')
             if response.headers.get('Content-Encoding', 'identity').lower() != 'identity':
@@ -82,20 +87,20 @@ def _download(query):
                     length = int(length)
                 except (ValueError, TypeError) as exc:
                     raise MapFetchError('Invalid Overpass Content-Length') from exc
-                if length < 0 or length > MAX_RESPONSE_BYTES:
+                if length < 0 or length > max_bytes:
                     raise MapFetchError('Overpass response exceeds byte limit')
             chunks, size = [], 0
             while True:
-                if time.monotonic() - start > TIMEOUT_SECONDS:
+                if time.monotonic() - start > remaining:
                     raise MapFetchError('Overpass download deadline exceeded; no automatic retry')
-                chunk = response.read(min(65536, MAX_RESPONSE_BYTES + 1 - size))
+                chunk = response.read(min(65536, max_bytes + 1 - size))
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > MAX_RESPONSE_BYTES:
+                if size > max_bytes:
                     raise MapFetchError('Overpass response exceeds byte limit')
                 chunks.append(chunk)
-            if time.monotonic() - start > TIMEOUT_SECONDS:
+            if time.monotonic() - start > remaining:
                 raise MapFetchError('Overpass download deadline exceeded; no automatic retry')
             return b''.join(chunks)
     except urllib.error.HTTPError as exc:
@@ -222,3 +227,85 @@ def fetch_roads(bounds, output_path, *, consent_download=False):
             'output_bytes': len(xml), 'output_path': str(target), 'format': 'osm_xml',
             'endpoint': ENDPOINT, 'verified': False, 'original_gps': False,
             'status': 'needs_confirmation' if ways else 'no_roads'}
+
+
+# 只允许精确行政区和道路对象查询，不接受模型URL、坐标、QL或输出路径。
+MAX_QUERY_WAYS = 32
+MAX_QUERY_NODES = 10000
+
+
+def _exact_text(value):
+    if (not isinstance(value, str) or not 1 <= len(value.strip()) <= 80
+            or any(ord(c) < 32 for c in value) or len(value.encode('utf-8')) > 240):
+        raise MapFetchError('Expected a short exact map name')
+    return value.strip()
+
+
+def fetch_named_roads(area_name, names, output_path, *, consent_download=False):
+    """本次授权下查询具体行政区内最多3个精确道路名；最多两次请求，无重试。"""
+    if consent_download is not True:
+        raise MapFetchError('Fresh explicit map query consent required')
+    area_name = _exact_text(area_name)
+    if not isinstance(names, list) or not 1 <= len(names) <= 3:
+        raise MapFetchError('Expected 1..3 exact road names')
+    names = [_exact_text(n) for n in names]
+    if len(set(names)) != len(names):
+        raise MapFetchError('Duplicate road names')
+    target = Path(output_path)
+    if not target.parent.is_dir() or target.is_dir():
+        raise MapFetchError('Output must be a file in an existing directory')
+    quote = lambda v: json.dumps(v, ensure_ascii=False)
+    deadline = time.monotonic() + TIMEOUT_SECONDS
+    area_query = ('[out:json][timeout:10][maxsize:2097152];'
+                  f'area["name"={quote(area_name)}]["boundary"="administrative"];out tags 3;')
+    area_raw = _download(area_query, deadline=deadline, max_bytes=2000000)
+    try:
+        data = json.loads(area_raw.decode('utf-8'), parse_constant=_reject_constant)
+        areas = data['elements']
+        if (data.get('remark') or not isinstance(areas, list) or len(areas) != 1
+                or areas[0].get('type') != 'area' or not _identifier(areas[0].get('id'))
+                or areas[0].get('tags', {}).get('name') != area_name
+                or areas[0].get('tags', {}).get('boundary') != 'administrative'):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError) as exc:
+        raise MapFetchError('Administrative area missing or ambiguous; clarify visible locality, no retry') from exc
+    area_id = areas[0]['id']
+    clauses = ''.join(f'way(area.scope)["highway"]["name"={quote(n)}];' for n in names)
+    query = (f'[out:json][timeout:15][maxsize:2097152];area({area_id})->.scope;'
+             f'({clauses})->.roads;.roads out body 33;node(w.roads);out skel;')
+    raw = _download(query, deadline=deadline, max_bytes=2000000)
+    if len(raw) > 2_000_000:
+        raise MapFetchError('Named map response exceeds 2 MB')
+    xml, nodes, ways, references = _convert(raw)
+    if ways > MAX_QUERY_WAYS or nodes > MAX_QUERY_NODES or references > 20000:
+        raise MapFetchError('Named map object budget exceeded; narrow exact names')
+    root = ET.fromstring(xml)
+    if any(not any(t.get('k') == 'name' and t.get('v') in names for t in w.findall('tag'))
+           for w in root.findall('way')):
+        raise MapFetchError('Unexpected road outside requested exact names')
+    if not ways:
+        raise MapFetchError('No exact highway objects found; clarify visible road name')
+    # 有界查询得到完整way节点，原子发布；失败时旧地图不受影响。
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.named-map-', delete=False) as stream:
+            temporary = stream.name
+            stream.write(xml)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        temporary = None
+    except OSError as exc:
+        raise MapFetchError('Could not save named map evidence') from exc
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+    return {'endpoint': ENDPOINT, 'source_urls': [ENDPOINT] +
+            [f'https://www.openstreetmap.org/way/{w.get("id")}' for w in root.findall('way')],
+            'area_name': area_name, 'names': names, 'area_id': area_id,
+            'query_sha256': hashlib.sha256(query.encode()).hexdigest(),
+            'area_response_sha256': hashlib.sha256(area_raw).hexdigest(),
+            'response_sha256': hashlib.sha256(raw).hexdigest(),
+            'osm_sha256': hashlib.sha256(xml).hexdigest(),
+            'node_count': nodes, 'way_count': ways, 'response_bytes': len(raw),
+            'verified': False, 'original_gps': False, 'status': 'needs_confirmation'}
