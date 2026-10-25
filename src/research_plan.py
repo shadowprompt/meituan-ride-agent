@@ -54,6 +54,7 @@ def checkpoint(state, reason, action=None):
         'network_requests_remaining': max(0, 8-state.get('research_budget_used', {}).get('requests', 0)),
         'version': state.get('research_version'), 'object_count': state.get('research_object_count', 0),
         'hypotheses': focus.get('hypotheses', []), 'ordered_hypothesis':state.get('research_hypothesis'),
+        'review':state.get('research_review'), 'recovery':state.get('research_recovery'),
         'last_outcome':state.get('research_last_outcome'), 'failures':state.get('research_failures', []),
         'unresolved':['screenshot correspondence', 'ordered traversal', 'unknown legs'],
         'next_local_action':next_action, 'can_resume':plan['model_calls'] < MAX_MODEL_CALLS and plan['counts']['closure'] < LIMITS['closure'],

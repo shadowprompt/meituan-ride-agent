@@ -131,7 +131,10 @@ never screenshot. Search returns discovery IDs (relations cannot be inspected); 
 or road membership is proven by a search hit. inspect_map_object on a returned way fetches
 way/full; on a returned member node fetches node/ways and validates EVERY parent membership.
 Use only IDs from actual search/returned members. Search misses are real no-results, not
-archive misses. Object facts change research_version and invalidate earlier hypotheses/builds;
+archive misses. Object facts change research_version and invalidate earlier hypotheses/builds
+and localized image presentations. Missing review prerequisites return rejected/missing_tools,
+not approval: follow observe_region then review or checkpoint within unchanged budgets.
+ambiguous/needs_revision are normal unresolved outcomes, never permission to deliver;
 For a returned node, inspect node/ways to discover connecting parent ways, then inspect each relevant returned way/full to obtain actual member coordinates. Do not assume node/ways contains member coordinates. For a returned way, inspect way/full first, then relevant member node/ways and connecting way/full.
 Finish gathering evidence, record hypothesis, inspect_roads/build_corridor, observe_region
 for localized original-image comparison, revise and review_research before deliver. Preserve
@@ -775,6 +778,34 @@ def delivery_requirements(state, folder):
             'verified':False, 'message':'No delivery occurred. Run missing tools or ask for necessary user input; do not claim completion.'}
 
 
+# Only these explicit protocol prerequisites are recoverable. Never classify arbitrary
+# ValueError text, archive/hash faults, unsafe parameters or authorization as repairable.
+RESEARCH_PREREQUISITES = {
+    'observation_required': (['inspect_map_object'], 'Inspect an already returned object ID with fresh map consent, or research_checkpoint; never repeat a sent request.'),
+    'version_required': (['research_hypothesis'], 'Use CURRENT research_version and retain unknown legs; record the current hypothesis before review.'),
+    'hypothesis_required': (['research_hypothesis'], 'Record a hypothesis bound to CURRENT research_version; retain null unknowns and repeats.'),
+    'observe_region_required': (['observe_region'], 'Call observe_region for the disputed original-image region, then review_research after the next successful model presentation. If observation/model budget is exhausted, research_checkpoint. No map request is needed.'),
+    'unknown_legs': (['research_hypothesis'], 'Do not build or deliver with unknown legs. Compare existing image/object evidence, revise only with evidence, or research_checkpoint retaining nulls.'),
+    'road_inspection_required': (['inspect_roads'], 'Inspect current saved OSM roads/nodes locally before building; no new map request is needed.'),
+}
+
+
+class ResearchPrerequisiteRejected(ValueError):
+    def __init__(self, reason):
+        if reason not in RESEARCH_PREREQUISITES:
+            raise ValueError('Unknown research prerequisite')
+        self.reason = reason
+        super().__init__(reason)
+
+
+def research_rejection(state, action, reason):
+    missing, next_step = RESEARCH_PREREQUISITES[reason]
+    return {'tool':action['action'], 'status':'rejected', 'reason_code':reason,
+            'missing_tools':missing, 'version':state.get('research_version'),
+            'next_step':next_step, 'verified':False, 'original_gps':False,
+            'notice':'No review approval or delivery occurred. Existing evidence and budgets are preserved.'}
+
+
 def research_failure_question(state, question):
     """失败请求与当前可用证据分开；即使模型泛问，也保留具体查询供用户核对。"""
     failures = [item for item in state.get('research_failures', []) if not item.get('resolved')]
@@ -814,7 +845,8 @@ def run(state, folder, planner, budget=None, consent_map=False):
         state.pop('map_query', None)
     planner.map_query_authorized = consent_map is True
     state.update(verified=False, original_gps=False)
-    state.pop('error_diagnostic', None)
+    for key in ('error','error_category','error_stage','error_diagnostic'):
+        state.pop(key, None)
     state.pop('research_diagnostic', None)
     if not planned_research:
         state['research_failures'] = []
@@ -1034,11 +1066,12 @@ def run(state, folder, planner, budget=None, consent_map=False):
                                'endpoint_count':len(result['endpoints_xy']), 'junction_pixel_count':len(result['junction_pixels_xy']),
                                'has_geometric_order':result['ordered_path_xy'] is not None}
             elif name == 'research_focus':
+                stage = name
                 if state.get('map_provider') != 'research' or set(action) != {'action','region','hypotheses','next_query','falsifier'}:
                     raise ValueError('Research focus schema required')
                 region = route_review.region_box(action['region'], state['image_size'])
                 if region != state.get('review_region',{}).get('region_original_xyxy'):
-                    raise ValueError('Observe disputed original region before focus')
+                    raise ResearchPrerequisiteRejected('observe_region_required')
                 hypotheses = action['hypotheses']
                 if not isinstance(hypotheses,list) or not 1 <= len(hypotheses) <= 8:
                     raise ValueError('Bounded competing hypotheses required')
@@ -1134,11 +1167,15 @@ def run(state, folder, planner, budget=None, consent_map=False):
                         tool_result['spatial_evidence'] = research_decision.spatial(archive, state.get('research_discoveries', []), state.get('research_requests', []))
                     state['research_observed_version'] = archive['version']
                 else:
+                    expected = ({'action','version','ordered_roads','evidence','limitations'} if name == 'research_hypothesis'
+                                else {'action','version','result','evidence','limitations'})
+                    if set(action) != expected:
+                        raise TaskFailure('research_action_invalid')
                     if state.get('research_observed_version') != archive['version']:
-                        raise ValueError('Inspect actual archive evidence before hypothesis/review')
+                        raise ResearchPrerequisiteRejected('observation_required')
                     if name == 'research_hypothesis':
-                        if set(action) != {'action','version','ordered_roads','evidence','limitations'} or action['version'] != archive['version']:
-                            raise ValueError('Current research version required')
+                        if action['version'] != archive['version']:
+                            raise ResearchPrerequisiteRejected('version_required')
                         roads = action['ordered_roads']
                         if not isinstance(roads,list) or not 1<=len(roads)<=64 or any(n is not None and (not isinstance(n,str) or not 1<=len(n)<=100) for n in roads):
                             raise ValueError('Ordered hypotheses must retain repeats and null unknowns')
@@ -1150,17 +1187,25 @@ def run(state, folder, planner, budget=None, consent_map=False):
                         state.pop('research_review',None)
                         invalidate_corridor(state)
                     else:
-                        if (set(action) != {'action','version','result','evidence','limitations'} or action['version'] != archive['version']
-                                or action['result'] not in ('consistent','needs_revision','ambiguous') or not state.get('research_hypothesis')):
-                            raise ValueError('Current hypothesis and explicit uncertainty review required')
+                        if action['result'] not in ('consistent','needs_revision','ambiguous'):
+                            raise TaskFailure('research_action_invalid')
+                        if action['version'] != archive['version']:
+                            raise ResearchPrerequisiteRejected('version_required')
+                        if (state.get('research_hypothesis') or {}).get('version') != archive['version']:
+                            raise ResearchPrerequisiteRejected('hypothesis_required')
                         route_review.text(action['evidence'],2000)
                         route_review.text(action['limitations'],2000)
                         if state.get('research_online') and state.get('research_presented_version') != archive['version']:
-                            raise ValueError('Current localized original image must be presented to model after object lookup')
+                            raise ResearchPrerequisiteRejected('observe_region_required')
                         state['research_review'] = action
                         if action['result'] != 'consistent':
                             invalidate_corridor(state)
                     tool_result = {'tool':name,'status':'recorded','verified':False,'original_gps':False}
+                    if name == 'review_research':
+                        tool_result.update(result=action['result'], version=archive['version'],
+                            unresolved=action['result'] != 'consistent',
+                            next_step=('Continue only through delivery gates.' if action['result'] == 'consistent' else
+                                       'Retain unknown legs. Compare existing local image/object evidence and revise hypothesis, or research_checkpoint with the specific unresolved comparison. No automatic map request.'))
             elif name == 'search_places':
                 stage = name
                 if state.get('map_provider') != 'amap' or state.get('goal') != 'corridor':
@@ -1317,11 +1362,11 @@ def run(state, folder, planner, budget=None, consent_map=False):
                     hypothesis = action['hypothesis']
                     road_corridor._validate(hypothesis)
                     if state.get('map_provider') == 'research':
-                        ordered = state.get('research_hypothesis',{}).get('ordered_roads')
-                        if ordered != [leg['road'].get('name') for leg in hypothesis['legs']] or not ordered or None in ordered:
-                            raise ValueError('Resolve unknown legs with observed evidence; preserve hypothesis order and repeats')
                         if hypothesis['source']['kind'] != 'model':
                             raise ValueError('Research candidate is a model hypothesis, never user confirmation')
+                        ordered = (state.get('research_hypothesis') or {}).get('ordered_roads')
+                        if ordered != [leg['road'].get('name') for leg in hypothesis['legs']] or not ordered or None in ordered:
+                            raise ResearchPrerequisiteRejected('unknown_legs')
                         state.pop('research_review',None)
                         if state.get('research_online'):
                             state.pop('research_presented_version',None)
@@ -1334,6 +1379,8 @@ def run(state, folder, planner, budget=None, consent_map=False):
                         known = {n['node_id'] for n in inspection.get('nodes', [])}
                         if inspection.get('osm_sha256') != digest or not all(
                             point['node_id'] in known for leg in hypothesis['legs'] for point in leg['via']):
+                            if state.get('map_provider') == 'research':
+                                raise ResearchPrerequisiteRejected('road_inspection_required')
                             raise ValueError('Inspect current OSM nodes before proposing model hypothesis')
                     state['corridor_complete'] = False
                     state.pop('corridor_artifacts', None)
@@ -1470,6 +1517,22 @@ def run(state, folder, planner, budget=None, consent_map=False):
             state.pop('error_category',None)
             state.pop('error_stage',None)
             save(state,folder)
+        except ResearchPrerequisiteRejected as exc:
+            rejection = research_rejection(state, action, exc.reason)
+            state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps(rejection,ensure_ascii=False)})
+            state['research_recovery'] = rejection
+            for key in ('error','error_category','error_stage','error_diagnostic'):
+                state.pop(key, None)
+            # Shared persistent correction ledger: resume never grants another retry budget.
+            if not planned_research or not research_plan.charge(state, 'correction'):
+                research_plan.checkpoint(state, 'research_prerequisite_limit', action)
+                state['question'] += ' 复核前置条件未满足：'+exc.reason+'；下一步：'+rejection['next_step']
+                save(state, folder)
+                return state
+            state.update(status='analyzing')
+            state.pop('question', None)
+            save(state, folder)
+            continue
         except (ValueError, KeyError, TypeError, OSError) as exc:
             # 只保存固定代码与步骤，不持久化可能带密钥/路径/远端正文的异常文本。
             category = failure_category(exc, stage)

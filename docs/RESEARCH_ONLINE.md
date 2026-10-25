@@ -115,3 +115,39 @@ Node 执行普通页面完整脚本及新增局部失败摘要断言通过（不
 本变更仅使用真实报告形状的 Mock HTTP 回归（成功搜索→含 region 且缺 evidence
 的动作→schema修正→限定地域搜索→inspect对象→模型继续），没有重放原任务、
 调用真实模型或公开地图服务，也没有上传用户图像。
+
+### review_research 前置条件有限恢复（task16ee2db4 同形故障）
+
+根因不是地图预算耗尽：对象归档更新会改变 `research_version`，失效旧假说、
+走廊及局部图呈现；模型重建含 `null` 的假说后，未重新 `observe_region` 就
+发出 `review_research ambiguous`。原代码把“当前局部图未呈现”直接抛为
+`ValueError`，外层统一落入 `task_processing_failed`，把可恢复协议缺步当作整个任务失败。
+
+现在保留原复核门禁，但该缺步返回 `LOCAL_TOOL_RESULT status=rejected`、
+`reason_code=observe_region_required`、`missing_tools=[observe_region]` 和明确下一动作。
+使用既有持久化 correction 预算（总上限2）及总模型上限28，不重置网络/阶段计数；
+到限保存 checkpoint，公开固定前置条件代码及安全说明，不打印异常正文、密钥或路径。
+同类白名单仅覆盖缺归档观察、过期版本、缺当前假说、缺局部观察、未知段/顺序不符、
+缺本地道路节点观察。没有通用 ValueError 恢复、异常文本匹配或权限放宽；
+hash/内部故障、无授权、危险参数和未知网络对象ID仍走原失败边界。
+
+`ambiguous` / `needs_revision` 是正常未决结果：已完成当前图呈现时记录其明确版本、
+证据、限制与本地下一步，checkpoint 同时保留该 review；未呈现时仅记录拒绝，不能
+伪造复核。只有当前版本 `consistent` 且其他走廊/未知段门禁通过才可能交付。
+旧任务从 messages 与累计请求迁移预算；继续错误任务时清除陈旧 error 字段，
+新的实际错误仍重新记录固定类别/步骤。网页已有 progress 通道展示具体恢复原因。
+
+新增测试 `test_research_review_recovery.py`：合成对象更新→含 null 假说→未重新看图
+的 ambiguous→拒绝→observe→成功 Mock 模型图像传输→ambiguous→checkpoint；
+本轮只增加1个预期 Mock 对象请求，网络累计6→7，模型累计12→18，不重试；
+新/旧落盘错误任务继续、预算不重置、缺步白名单、未知异常不吞、needs_revision，
+以及真实 loopback 网页HTTP→CLI→Agent 的新/旧任务继续均覆盖。
+全部图像是合成白图/对象；没有读取或重放真实 task16ee2db4、真实模型/地图外呼，
+没有原图上传，未进行真实路线识别验收。没有重启服务；8766 如需重启由父代理先查活动任务。
+
+本补丁验证命令及结果：研究专项70项通过；网页/异步/提示/恢复专项25项通过，
+含现有 Node 实际执行的前端逻辑 harness；全部源码内联 JS 3段 `node --check`
+通过；修改模块 `py_compile` 与 `git diff --check` 通过。全量最终结果见同次提交
+记录下方，不将 Mock 编排通过写作真实原图验收。
+最终全量：`PYTHONPATH=src:test python3 -m unittest discover -s test -q`，
+467项，457通过、10项既有环境条件跳过，0失败；不是新增跳过。
