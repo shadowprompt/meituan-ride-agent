@@ -188,12 +188,12 @@ class AMapWebTests(unittest.TestCase):
     def test_web_rejects_keys_and_untrusted_provider(self):
         for payload in ({'map_provider':'evil'}, {'amap_key':KEY}, {'AMAP_API_KEY':KEY}, {'key':KEY}):
             code,_,body=self.request('/api/tasks',dict(image_base64='AA==',mode='demo',**payload))
-            self.assertEqual(code,400)
+            self.assertIn(code,(400,409))
             self.assertNotIn(KEY,body.decode())
         task=self.state(map_provider='amap')
         for payload in ({'fetch_map':True,'consent_map':True},{'osm_xml':'<osm/>'},{'map_provider':'evil'},{'key':KEY}):
             code,_,body=self.request('/api/tasks/'+task+'/resume',payload)
-            self.assertEqual(code,400)
+            self.assertIn(code,(400,409))
             self.assertNotIn(KEY,body.decode())
 
     def test_web_passes_selected_provider_and_redacts_status(self):
@@ -205,11 +205,8 @@ class AMapWebTests(unittest.TestCase):
             self.assertNotIn(KEY,body.decode())
             self.assertNotIn('unknown-secret',body.decode())
             code,_,body=self.request('/api/tasks/'+task+'/resume',{'map_provider':'osm','consent_map':True})
-            self.assertEqual(code,200)
-            argv=cli.call_args.args[0]
-            self.assertEqual(argv[argv.index('--map-provider')+1],'osm')
-            self.assertIn('--consent-map',argv)
-            self.assertNotIn(KEY,str(argv))
+            self.assertEqual(code,409)
+            cli.assert_not_called()
 
     def test_artifact_download_redacts_credential_query_parameters(self):
         task=self.state(map_provider='amap')
@@ -267,14 +264,11 @@ class AMapWebTests(unittest.TestCase):
             self.assertEqual(code,200)
             self.assertEqual(json.loads(body)['coordinate_system'],'GCJ02')
             self.assertNotIn(KEY,body.decode())
-            # Switching to OSM loses current point evidence; returning to AMap
-            # does not restore old points without another authorized query.
-            for provider in ('osm','amap'):
-                code,_,body=self.request('/api/tasks/'+task+'/resume',{'consent_upload':True,'map_provider':provider})
-                self.assertEqual(code,200,body)
-                current=json.loads(body)
-                self.assertNotIn('location_clues',current)
-                self.assertFalse(next(a for a in current['artifacts'] if a['name']=='amap-location-clues.json')['current'])
+            # OSM switching is refused, preserving old clues without replay.
+            code,_,body=self.request('/api/tasks/'+task+'/resume',{'consent_upload':True,'map_provider':'osm'})
+            self.assertEqual(code,409,body)
+            current=json.loads(self.request('/api/tasks/'+task)[2])
+            self.assertEqual(current['location_clues'], data['location_clues'])
             self.assertEqual(net.call_count,1)
 
     def test_point_preview_js_uses_only_local_independent_points_and_safe_text(self):

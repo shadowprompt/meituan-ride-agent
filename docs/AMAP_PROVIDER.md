@@ -1,14 +1,18 @@
-# 地图服务切换：OSM 与高德定位线索
+# 默认且唯一联网地图服务：高德定位线索
 
-主界面直接选择地图服务，分别勾选**本次模型上传授权**与**本次地图查询授权**，再开始识别或继续查询。普通用户不需要填写道路 JSON、道路名或 OSM。模型从原图读取有依据的行政区和道路/地点文字；文字或地域不清应提问，不猜城市。
+主界面默认且仅提供高德地图服务，分别勾选**本次模型上传授权**与**本次地图查询授权**，再开始识别或继续查询。普通用户不需要填写道路 JSON、道路名或 OSM。模型从原图读取有依据的行政区和道路/地点文字；文字或地域不清应提问，不猜城市。
 
 ## 实际交付边界
 
-- **OSM / Overpass**：原有精确行政区/道路查询及 OSM way/node 的 WGS84 道路走廊候选流程。
+- **OSM / Overpass**：所有联网入口已停用（`osm_network_disabled`），包括旧 `fetch_map` 和精确道路对象查询。只保留CLI `--local-only --map-provider osm` 只读本地文件调试；不调用模型，不作失败回退。
 - **高德 / amap**：本次实现的是可执行的 **Web服务地理编码适配**（GET `https://restapi.amap.com/v3/geocode/geo`）。以行政区文字 + 道路/地点文字构成结构化地址。返回的只是 **GCJ-02 位置线索**，不是完整道路几何、道路连通节点或 WGS84 轨迹；**不支持 corridor 构建**，不声称完全替代 OSM。
 - 地理编码可能多解、无结果、地域不符或返回粗略中心点；即使仅一个点也未验证道路精确匹配/行政区归属。不会把候选点连成骑行轨迹，不进行坐标转换或静默吸附。
 - 不调用骑行/驾车/步行规划，不把规划路线当作历史路线；高德授权不允许访问 OSM，失败也不回退到 OSM。不会自动重试或扩大地域/权限。
 - 切换 provider 时失效旧地图查询、道路检查、走廊、匹配状态及旧对话中的地图证据（旧对话另存本地审计，不作为当前证据；用户锁定的提取约束仍保留）；原 OSM 文件改名保留在任务目录作本地审计，不会在切回 OSM 时自动恢复使用。须重新授权查询或重新上传获授权地图。
+
+## 旧任务迁移（不自动重放）
+
+只读恢复/刷新保留旧产物，不联网。旧provider=osm或无provider字段的任务，普通CLI/API继续拒绝并提示显式迁移。用户选择amap并同时给予本次 `consent_map` 与 `consent_upload`（CLI两项对应旗标）后才允许迁移；任一缺失不修改任务、不启动模型、不外呼。网页唯一高德选项配合双授权明确迁移。迁移使旧道路证据失效、地图与旧对话留审计文件；不会删除原产物。旧fetch_map即使有授权仍拒绝，不能将范围自动改成高德上传请求。
 
 ## 管理员配置（勿向网页或群聊提供 Key）
 
@@ -32,10 +36,10 @@ PYTHONPATH=src python3 src/ride_agent.py start --image examples/input.png \
   --task-dir outputs/amap-demo --goal corridor --map-provider amap \
   --consent-upload --consent-map
 PYTHONPATH=src python3 src/ride_agent.py resume --task-dir outputs/amap-demo \
-  --map-provider osm --consent-upload --consent-map
+  --map-provider amap --consent-upload --consent-map
 ```
 
-以上图片路径仅为使用形式示例，请替换成本地获授权的截图。高德模式下 `--fetch-map` 或 OSM 上传被拒绝，须显式切换 OSM；provider 由用户选择，模型动作无 provider/key/URL 参数。
+以上图片路径仅为使用形式示例，请替换成本地获授权的截图。高德模式下 `--fetch-map` 或 OSM 上传被拒绝，不允许切换至OSM联网；本地文件调试仅限CLI --local-only --map-provider osm；provider 由用户明确选择，模型动作无 provider/key/URL 参数。
 
 ## 限额、结果与诊断
 

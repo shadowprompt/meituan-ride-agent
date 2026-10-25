@@ -1,11 +1,8 @@
-"""Explicit-consent, bounded Overpass download; no retries or import-time I/O.
+"""Retired OSM network helpers plus shared safe map error/local parsing utilities.
 
-fetch_roads([west, south, east, north], output_path, consent_download=True)
-transmits ONLY the bounding box to the fixed HTTPS endpoint. It does not upload
-screenshots, logs, routes or credentials. Consent is per invocation (not stored).
-The response is validated as Overpass JSON and saved atomically as OSM XML,
-which is the format currently accepted by road_match._load_osm (not JSON).
-Data is unverified OSM road data, not navigation guidance or original GPS.
+All former Overpass entry points unconditionally reject without I/O, including
+calls with consent. Network map queries use amap_fetch only; offline OSM parsing
+remains available for explicit local debug and existing artifact compatibility.
 """
 import hashlib
 import http.client
@@ -22,6 +19,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
+# Historical identifier only; no OSM transport is implemented.
 ENDPOINT = 'https://overpass-api.de/api/interpreter'
 TIMEOUT_SECONDS = 30
 MAX_RESPONSE_BYTES = 10_000_000
@@ -58,6 +56,7 @@ class MapFetchError(ValueError):
 
 # 固定文案独立于异常/响应正文，避免密钥、URL或服务端内容回显。
 REASONS = {
+    'osm_network_disabled': ('OSM/Overpass 联网已停用；唯一联网地图服务为高德。', '请显式选择 map_provider=amap，并重新给予本次地图查询及模型上传授权；旧任务不会自动迁移或重放。'),
     'amap_key_missing': ('服务器未配置 AMAP_API_KEY，未发送高德请求。', '请管理员在服务器私密环境配置新的高德 Web服务 Key；不要在网页或群聊粘贴密钥。已公开的 Key 应立即撤销并轮换。'),
     'amap_credentials_rejected': ('高德凭证或服务权限校验未通过。', '请管理员私下检查 Web服务 Key 与服务权限；不要公开密钥，不会自动扩大权限。'),
     'amap_quota': ('高德服务调用配额或频率受限。', '请管理员检查配额，稍后由用户决定是否重新授权；不会自动重试。'),
@@ -110,102 +109,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _download(query, *, deadline=None, max_bytes=None):
-    start = time.monotonic()
-    state = {'phase': 'connect', 'response_received': False, 'bytes_received': 0,
-             'connection_established': False}
-    def evidence():
-        return dict(state, elapsed_seconds=round(max(0, time.monotonic()-start), 3))
-    max_bytes = MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
-    remaining = min(TIMEOUT_SECONDS, deadline - time.monotonic()) if deadline else TIMEOUT_SECONDS
-    if remaining <= 0:
-        raise MapFetchError("Map query deadline exceeded; no automatic retry", code='timeout', transport=dict(evidence(), phase='total_budget'))
-    request = urllib.request.Request(
-        ENDPOINT, data=urllib.parse.urlencode({'data': query}).encode('ascii'),
-        headers={'Content-Type': 'application/x-www-form-urlencoded',
-                 'Accept': 'application/json', 'Accept-Encoding': 'identity',
-                 'User-Agent': 'meituan-ride-agent-map-fetch/1.0'}, method='POST')
-    # Do not forward bounding boxes to environment-configured HTTP proxies.
-    # 区分DNS/TCP/TLS连接与等待响应头；不保存主机异常或远端正文。
-    class Connection(http.client.HTTPSConnection):
-        def connect(self):
-            super().connect()
-            state.update(connection_established=True, phase='response_headers')
-            left = remaining - (time.monotonic()-start)
-            if left <= 0:
-                raise MapFetchError('Map total deadline exceeded', code='timeout',
-                                    transport=dict(evidence(), phase='total_budget'))
-            if self.sock is not None:
-                self.sock.settimeout(left)
-    class HTTPS(urllib.request.HTTPSHandler):
-        def https_open(self, req):
-            return self.do_open(Connection, req, context=self._context)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), HTTPS())
-    try:
-        with opener.open(request, timeout=remaining) as response:
-            state.update(phase='read_response', response_received=True, connection_established=True)
-            if response.status != 200:
-                raise MapFetchError(f'Overpass HTTP {response.status}; no automatic retry', code='http_429' if response.status == 429 else 'http_error', http_status=response.status)
-            if response.headers.get('Content-Encoding', 'identity').lower() != 'identity':
-                raise MapFetchError('Unexpected compressed Overpass response')
-            length = response.headers.get('Content-Length')
-            if length is not None:
-                try:
-                    length = int(length)
-                except (ValueError, TypeError) as exc:
-                    raise MapFetchError('Invalid Overpass Content-Length') from exc
-                if length < 0 or length > max_bytes:
-                    raise MapFetchError('Overpass response exceeds byte limit', code='response_limit')
-            chunks, size = [], 0
-            while True:
-                if time.monotonic() - start > remaining:
-                    raise MapFetchError('Overpass download deadline exceeded; no automatic retry', code='timeout', transport=dict(evidence(), phase='total_budget'))
-                # 每次读取前收紧socket剩余时间；read1避免单次内部循环越过总预算。
-                if isinstance(response, http.client.HTTPResponse):
-                    if response.fp is not None and response.fp.raw is not None:
-                        response.fp.raw._sock.settimeout(max(.001, remaining-(time.monotonic()-start)))
-                    read = response.read1
-                else:
-                    read = response.read
-                chunk = read(min(65536, max_bytes + 1 - size))
-                if not chunk:
-                    break
-                size += len(chunk)
-                state['bytes_received'] = size
-                if size > max_bytes:
-                    raise MapFetchError('Overpass response exceeds byte limit', code='response_limit')
-                chunks.append(chunk)
-            if time.monotonic() - start > remaining:
-                raise MapFetchError('Overpass download deadline exceeded; no automatic retry', code='timeout', transport=dict(evidence(), phase='total_budget'))
-            raw = b''.join(chunks)
-            # remark仅分类；不回显正文，未完整接收不得报告无候选。
-            try:
-                parsed = json.loads(raw)
-                remark = parsed.get('remark') if isinstance(parsed, dict) else None
-            except (ValueError, UnicodeError, RecursionError):
-                remark = None
-            if remark:
-                state['phase'] = 'server_execution'
-                raise MapFetchError('Overpass incomplete response',
-                                    code='server_timeout' if isinstance(remark, str) and 'timed out' in remark.lower() else 'response_incomplete',
-                                    transport=evidence())
-            return raw
-    except MapFetchError as exc:
-        if exc.transport is None:
-            exc.transport = evidence()
-        raise
-    except urllib.error.HTTPError as exc:
-        state.update(response_received=True, connection_established=True, phase='response_headers')
-        # Deliberately exclude URLs, server body and query from error messages.
-        exc.close()
-        raise MapFetchError(f'Overpass HTTP {exc.code}; no automatic retry', code='http_429' if exc.code == 429 else 'http_error', http_status=exc.code, transport=evidence()) from exc
-    except (TimeoutError, socket.timeout) as exc:
-        state['budget_exhausted'] = time.monotonic()-start >= remaining
-        raise MapFetchError('Overpass timeout; no automatic retry', code='timeout', transport=evidence()) from exc
-    except (urllib.error.URLError, OSError,
-            http.client.HTTPException) as exc:
-        state['budget_exhausted'] = time.monotonic()-start >= remaining
-        raise MapFetchError('Overpass network failure; no automatic retry',
-                            code='timeout' if isinstance(getattr(exc, 'reason', None), TimeoutError) else 'network_error', transport=evidence()) from exc
+    """Retired network entry point: reject even with consent or mocked transport."""
+    raise MapFetchError(REASONS['osm_network_disabled'][0], code='osm_network_disabled')
 
 
 def _identifier(value):
@@ -281,48 +186,8 @@ def _convert(raw):
 
 
 def fetch_roads(bounds, output_path, *, consent_download=False):
-    """Download one local box after explicit consent; return counts/bounds metadata.
-
-    Raises MapFetchError without retry. Keeps existing output unchanged on any
-    pre-publication failure. Uses a sibling temporary file and os.replace.
-    Whole selected ways may extend beyond the bbox; no clipping or GPS inference.
-    Caller must ask permission to disclose the bbox before passing consent=True.
-    """
-    bounds, area = _bounds(bounds)
-    # 地理范围也是敏感信息：同意仅针对本次调用，不能从旧任务状态继承。
-    if consent_download is not True:
-        raise MapFetchError('Explicit consent_download=True required to send bounding box to Overpass', code='consent_required')
-    try:
-        target = Path(output_path)
-        if not target.parent.is_dir() or target.is_dir():
-            raise MapFetchError('Output must be a file in an existing directory', code='output_error')
-    except TypeError as exc:
-        raise MapFetchError('Invalid output path', code='output_error') from exc
-    west, south, east, north = bounds
-    query = (f'[out:json][timeout:20][maxsize:16777216];'
-             f'way["highway"]({south:.12f},{west:.12f},{north:.12f},{east:.12f});'
-             '(._;>;);out body;')
-    raw = _download(query)
-    xml, nodes, ways, references = _convert(raw)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.map-fetch-', suffix='.tmp', delete=False) as stream:
-            temporary = stream.name
-            stream.write(xml)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-        temporary = None
-    except OSError as exc:
-        raise MapFetchError('Could not atomically save OSM output', code='output_error') from exc
-    finally:
-        if temporary is not None:
-            os.unlink(temporary)
-    return {'bounds': bounds, 'area_km2_upper_bound': area, 'node_count': nodes,
-            'way_count': ways, 'reference_count': references, 'response_bytes': len(raw),
-            'output_bytes': len(xml), 'output_path': str(target), 'format': 'osm_xml',
-            'endpoint': ENDPOINT, 'verified': False, 'original_gps': False,
-            'status': 'needs_confirmation' if ways else 'no_roads'}
+    """Retired network entry point: reject even with consent or mocked transport."""
+    raise MapFetchError(REASONS['osm_network_disabled'][0], code='osm_network_disabled')
 
 
 # 只允许精确行政区和道路对象查询，不接受模型URL、坐标、QL或输出路径。
@@ -339,116 +204,10 @@ def _exact_text(value):
 
 
 def _fetch_named_roads(area_name, names, output_path, *, consent_download=False, area_hierarchy=None, resolution=None):
-    """本次授权下查询具体行政区内最多3个精确道路名；最多两次请求，无重试。"""
-    if consent_download is not True:
-        raise MapFetchError('Fresh explicit map query consent required', code='consent_required')
-    area_name = _exact_text(area_name)
-    levels = levels_for(area_name, area_hierarchy, MapFetchError)
-    resolution.update(original_name=area_name, query_levels=levels, candidates=[])
-    if not isinstance(names, list) or not 1 <= len(names) <= 3:
-        raise MapFetchError('Expected 1..3 exact road names', code='invalid_input')
-    names = [_exact_text(n) for n in names]
-    if len(set(names)) != len(names):
-        raise MapFetchError('Duplicate road names', code='invalid_input')
-    try:
-        target = Path(output_path)
-    except TypeError as exc:
-        raise MapFetchError('Invalid output path', code='output_error') from exc
-    if not target.parent.is_dir() or target.is_dir():
-        raise MapFetchError('Output must be a file in an existing directory', code='output_error')
-    quote = lambda v: json.dumps(v, ensure_ascii=False)
-    deadline = time.monotonic() + TIMEOUT_SECONDS
-    if len(levels) > 1:
-        area_id, area_raw, hierarchy_result = resolve_admin_area(
-            levels, _download, deadline, MapFetchError, _identifier, _reject_constant)
-        resolution.update(hierarchy_result)
-    else:
-        area_query = ('[out:json][timeout:10][maxsize:2097152];'
-                      f'area["name"={quote(area_name)}]["boundary"="administrative"];out tags 3;')
-        area_raw = _download(area_query, deadline=deadline, max_bytes=2000000)
-        try:
-            data = json.loads(area_raw.decode('utf-8'), parse_constant=_reject_constant)
-            areas = data['elements']
-            if not isinstance(areas, list):
-                raise ValueError()
-            if data.get('remark'):
-                raise MapFetchError('Incomplete area response', code='response_incomplete')
-            if not areas:
-                raise MapFetchError('No administrative area', code='area_not_found')
-            # 校验全部返回对象后再判断唯一性；非法/重复对象不是地域歧义证据。
-            if any(not isinstance(a, dict) or a.get('type') != 'area'
-                   or not _identifier(a.get('id')) or not isinstance(a.get('tags'), dict)
-                   or a['tags'].get('name') != area_name
-                   or a['tags'].get('boundary') != 'administrative' for a in areas):
-                raise ValueError()
-            if len({a['id'] for a in areas}) != len(areas):
-                raise ValueError()
-            resolution['candidates'] = [{'name': levels[0], 'area_ids': [a['id'] for a in areas]}]
-            if len(areas) > 1:
-                raise MapFetchError('Ambiguous administrative area', code='area_ambiguous')
-        except MapFetchError:
-            raise
-        except (ValueError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError) as exc:
-            raise MapFetchError('Invalid administrative area response') from exc
-        area_id = areas[0]['id']
-        resolution['candidates'] = [{'name': levels[0], 'area_ids': [a['id'] for a in areas]}]
-        resolution['status'] = 'resolved'
-    clauses = ''.join(f'way(area.scope)["highway"]["name"={quote(n)}];' for n in names)
-    query = (f'[out:json][timeout:15][maxsize:2097152];area({area_id})->.scope;'
-             f'({clauses})->.roads;.roads out body 33;node(w.roads);out skel;')
-    raw = _download(query, deadline=deadline, max_bytes=2000000)
-    if len(raw) > 2_000_000:
-        raise MapFetchError('Named map response exceeds 2 MB', code='response_limit')
-    xml, nodes, ways, references = _convert(raw)
-    if ways > MAX_QUERY_WAYS or nodes > MAX_QUERY_NODES or references > 20000:
-        raise MapFetchError('Named map object budget exceeded; narrow exact names', code='response_limit')
-    root = ET.fromstring(xml)
-    if any(not any(t.get('k') == 'name' and t.get('v') in names for t in w.findall('tag'))
-           for w in root.findall('way')):
-        raise MapFetchError('Unexpected road outside requested exact names')
-    if not ways:
-        raise MapFetchError('No exact highway objects found; clarify visible road name', code='roads_not_found')
-    returned_names = {tag.get('v') for way in root.findall('way')
-                      for tag in way.findall('tag') if tag.get('k') == 'name'}
-    if not set(names).issubset(returned_names):
-        raise MapFetchError('Only some requested exact roads found', code='roads_partial')
-    # 有界查询得到完整way节点，原子发布；失败时旧地图不受影响。
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.named-map-', delete=False) as stream:
-            temporary = stream.name
-            stream.write(xml)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-        temporary = None
-    except OSError as exc:
-        raise MapFetchError('Could not save named map evidence', code='output_error') from exc
-    finally:
-        if temporary is not None:
-            os.unlink(temporary)
-    return {'endpoint': ENDPOINT, 'source_urls': [ENDPOINT] +
-            [f'https://www.openstreetmap.org/way/{w.get("id")}' for w in root.findall('way')],
-            'area_name': area_name, 'names': names, 'area_id': area_id, 'area_resolution': resolution,
-            'query_sha256': hashlib.sha256(query.encode()).hexdigest(),
-            'area_response_sha256': hashlib.sha256(area_raw).hexdigest(),
-            'response_sha256': hashlib.sha256(raw).hexdigest(),
-            'osm_sha256': hashlib.sha256(xml).hexdigest(),
-            'node_count': nodes, 'way_count': ways, 'response_bytes': len(raw),
-            'verified': False, 'original_gps': False, 'status': 'needs_confirmation'}
+    """Retired network entry point: reject even with consent or mocked transport."""
+    raise MapFetchError(REASONS['osm_network_disabled'][0], code='osm_network_disabled')
 
 
 def fetch_named_roads(area_name, names, output_path, *, consent_download=False, area_hierarchy=None):
-    """本次授权最多两次固定端点请求；所有阶段保留安全层级诊断。"""
-    resolution = {}
-    start = time.monotonic()
-    try:
-        return _fetch_named_roads(area_name, names, output_path, consent_download=consent_download,
-                                  area_hierarchy=area_hierarchy, resolution=resolution)
-    except MapFetchError as exc:
-        if exc.transport is not None:
-            exc.transport['query_stage'] = 'roads' if resolution.get('status') == 'resolved' else 'admin_area'
-            exc.transport['total_elapsed_seconds'] = round(max(0, time.monotonic()-start), 3)
-        if exc.area_resolution is None and resolution:
-            exc.area_resolution = resolution
-        raise
+    """Retired network entry point: reject even with consent or mocked transport."""
+    raise MapFetchError(REASONS['osm_network_disabled'][0], code='osm_network_disabled')

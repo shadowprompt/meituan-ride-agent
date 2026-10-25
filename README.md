@@ -4,9 +4,25 @@
 
 > **无需 API 的第一阶段入口：** `python3 src/ride_web.py` 后访问 `http://127.0.0.1:8765/pixel-route`。可在原图上按经过顺序人工点击、方向预览、保存/重开及导出有序像素 JSON；保留重复经过，明确人工近似、未验证、非 GPS。操作和真实浏览器验收见 [PIXEL_ROUTE_ACCEPTANCE.md](PIXEL_ROUTE_ACCEPTANCE.md)。自动图段排序尚未实现。
 
-> **当前交付入口：[本地试用与验收说明](DELIVERY.md)。** 运行 `python src/ride_web.py` 使用本地网页；运行 `python src/ride_doctor.py` 检查本机条件。当前是待真实模型验收的试用版。独立道路走廊目标已接通“模型读图 → 本次授权具体地图对象查询 → 节点检查 → 经纬度候选”；严格截图配准目标仍需人工控制点，不等于通用自动定位。详见 [有界地图查询链路](docs/NAMED_MAP_QUERY.md)。下面早期 OCR／指标目标属于规划，不能视作当前已实现功能。
+> **当前交付入口：[本地试用与验收说明](DELIVERY.md)。** 运行 `python src/ride_web.py` 使用本地网页；运行 `python src/ride_doctor.py` 检查本机条件。当前是待真实模型验收的试用版。默认且唯一联网地图服务为高德：“模型读图 → 本次授权 → GCJ-02独立位置线索”；OSM/Overpass联网与旧fetch_map已停用，无失败回退，不支持联网道路走廊；严格截图配准目标仍需人工控制点，不等于通用自动定位。详见 [有界地图查询链路](docs/NAMED_MAP_QUERY.md)。下面早期 OCR／指标目标属于规划，不能视作当前已实现功能。
 
-> **高德测试入口：**主界面“地图服务”选择高德，分别勾选本次模型上传和地图查询授权后开始，无需路名 JSON。服务器缺 `AMAP_API_KEY` 时先预检阻断，不浪费模型调用；成功后仅显示 GCJ-02 独立位置点预览并提供 JSON 下载，**不是道路走廊或完整骑行轨迹**。配置、最短测试步骤及“mock 回归 / 独立真实地理编码实测”的区别见 [高德定位线索说明](docs/AMAP_PROVIDER.md)。
+> **高德测试入口：**主界面唯一地图服务为高德（默认），分别勾选本次模型上传和地图查询授权后开始，无需路名 JSON。服务器缺 `AMAP_API_KEY` 时先预检阻断，不浪费模型调用；成功后仅显示 GCJ-02 独立位置点预览并提供 JSON 下载，**不是道路走廊或完整骑行轨迹**。配置、最短测试步骤及“mock 回归 / 独立真实地理编码实测”的区别见 [高德定位线索说明](docs/AMAP_PROVIDER.md)。
+
+## 当前地图默认与旧任务迁移
+
+- **默认且唯一联网 provider=amap**；网页不提供OSM联网选择。所有旧 `fetch_map`、OSM范围下载、行政区/道路对象联网查询均拒绝，无OSM回退。高德失败只安全停止，不会重试或扩大权限。
+- 服务器私下配置 `AMAP_API_KEY`；不向网页、代码、聊天或命令参数提供真实Key。公开过的Key应立即撤销轮换。
+- 新任务使用网页默认高德，分别勾选本次模型上传和地图查询授权。返回仅GCJ-02位置点，不是WGS84道路或历史轨迹，不构建走廊。
+- 旧任务先只读刷新/`status`查看产物。确认迁移后用网页“授权后继续识路 / 查询地图”（服务固定高德，重新勾选双授权），或：
+
+```sh
+python3 src/ride_agent.py resume --task-dir outputs/旧任务 \
+  --map-provider amap --consent-map --consent-upload
+```
+
+迁移前任一授权缺失直接拒绝，不上传、不查询、不修改任务。迁移后旧地图/对话保留审计文件，旧道路证据失效；原始产物不删除。恢复或服务端重启不自动迁移/重放。旧任务未指定provider时保持旧标记并拒绝联网，不静默改为高德。
+
+离线OSM仅作为专家本地文件调试：CLI明确 `--map-provider osm --local-only --osm-file /本地/获授权地图.osm`（已有任务的resume），不调用模型、不发地图请求；不会修改源OSM文件。网页不接收OSM文件。旧章节中涉及OSM网络或模型路线链的描述仅为历史记录，以上当前限制优先。详见 [高德说明](docs/AMAP_PROVIDER.md)。
 
 ## 源码目录与运行方式
 
@@ -24,7 +40,7 @@ PYTHONPATH=src python -m unittest discover -s test -v
 - `test/`：回归测试；`examples/`：合成示例；`training-demo/`：独立训练演示。
 - `outputs/`、`local-data/`：本地任务与私有数据，仍在原位置，不会迁入 `src/`。
 - Web 创建/继续采用后台异步任务协议：HTTP 快速返回 **202** 和任务编号，网页轮询状态；不再把完整多轮流程压在一个 HTTP 请求内。模型 API 单次超时仍为 **300 秒**，后台一轮 CLI 默认总预算 **4500 秒（75 分钟）**。地图下载、HTTP 请求读取等安全限时不变；不自动重试或重放上传授权。详见下方“异步 Web 协议”。
-- 旧命令 `python ride_web.py` 改为 `python src/ride_web.py`；其他业务脚本同理。已有 `outputs/web` 任务可直接继续，无需重传。
+- 旧命令 `python ride_web.py` 改为 `python src/ride_web.py`；其他业务脚本同理。已有 `outputs/web` 任务及产物保留；OSM旧任务只读恢复无需重传，但联网继续必须显式迁移至高德并给予本次双授权，不能直接重放。
 
 ## 目标
 
@@ -239,7 +255,7 @@ python3 src/ride_agent.py resume --task-dir outputs/my-task --local-only \
 - 近似候选不能进入道路匹配或地图下载；道路读取器也拒绝带近似标记的 GeoJSON。原有上传同意、地图同意、候选选择、当前裁剪有效性、语义复核要求不被放宽。
 - 自动化测试使用明确标注的合成锚点；即使对真实图片测试提线，也不代表真实地理位置或真实轨迹精度已经验收。
 
-## 独立道路走廊：原图读地名 → 本地 OSM 证据 → 经纬度候选
+## 离线 OSM 只读文件调试（非默认流程，禁止联网和模型上传）
 
 `corridor` 与 `registration`/`roads` 严格配准目标隔离：无需先提线、控制点或像素配准即可查询本地道路。旧目标的配准独立误差门槛和视觉复核门禁不变。本模式**不下载地图、不生成控制点、不接收模型自由坐标**，也不证明截图真实位置或骑行路线。
 
@@ -247,7 +263,7 @@ python3 src/ride_agent.py resume --task-dir outputs/my-task --local-only \
 # 离线起步，不上传；截图是真实用户输入，而非按文件名猜城市
 python3 src/ride_agent.py start --demo --goal corridor --image /path/original.png --task-dir outputs/corridor-demo
 # 已获授权的本地 WGS84 OSM XML（不是GCJ-02地图截图）
-python3 src/ride_agent.py resume --task-dir outputs/corridor-demo --local-only --osm-file /path/local.osm --road-names '真实道路名A' '真实道路名B'
+python3 src/ride_agent.py resume --task-dir outputs/corridor-demo --local-only --map-provider osm --osm-file /path/local.osm --road-names '真实道路名A' '真实道路名B'
 # 查看 outputs/corridor-demo/corridor-inspection.json 中的way/node与交叉口
 python3 src/ride_agent.py resume --task-dir outputs/corridor-demo --local-only --road-hypothesis-file /path/hypothesis.json
 ```
@@ -258,12 +274,12 @@ python3 src/ride_agent.py resume --task-dir outputs/corridor-demo --local-only -
 {"schema_version":1,"coordinate_system":"WGS84","source":{"kind":"user","evidence":"实际原图可读地名、道路顺序及节点选择依据；说明不确定部分"},"legs":[{"road":{"name":"真实道路名"},"via":[{"node_id":111},{"node_id":222}]}]}
 ```
 
-真实视觉API路径：按既有配置设置 `RIDE_API_BASE`/`RIDE_API_KEY`/`RIDE_MODEL`，创建时不用 `--demo` 并明确 `--consent-upload`；继续上传本地OSM时同样须本次 `--consent-upload`。模型读取原图地名，调用 `inspect_roads` 查询证据，再提出 `build_corridor` 假设；地名不可读或证据不足应询问，不编造节点。**每次API调用会上传原图、派生预览、诊断与历史对话，其中包含查询到的本地OSM道路名、节点和坐标；不会上传完整OSM文件。** `--local-only` 不调用模型，不上传。已有API任务也可本地继续并导出候选，缺少用户假设则暂停。
+历史实现说明（已停用，不可按此联网或上传OSM证据）：按既有配置设置 `RIDE_API_BASE`/`RIDE_API_KEY`/`RIDE_MODEL`，创建时不用 `--demo` 并明确 `--consent-upload`；继续上传本地OSM时同样须本次 `--consent-upload`。模型读取原图地名，调用 `inspect_roads` 查询证据，再提出 `build_corridor` 假设；地名不可读或证据不足应询问，不编造节点。**每次API调用会上传原图、派生预览、诊断与历史对话，其中包含查询到的本地OSM道路名、节点和坐标；不会上传完整OSM文件。** `--local-only` 不调用模型，不上传。已有API任务也可本地继续并导出候选，缺少用户假设则暂停。
 
-网页创建目标选择“读地名→本地OSM道路走廊”；已有任务勾选“明确切换独立道路走廊目标”。上传本地OSM、按行输入精确道路名即可先查询；查看查询JSON后上传有依据的道路假设JSON继续。仅本地继续不需要API；需要模型自己读图时每次重新同意上传。不要同时上传控制点/近似锚点或勾选下载。网页产物含 `corridors/<服务端UUID>/road-corridor.geojson`、`road-corridor.json`、`road-corridor.png`。示意PNG是本地OSM底图，不是原图配准叠图；JSON/GeoJSON带地图与假设哈希、节点/边way_id、有序分段、未确认起终点与限制。所有结果 `verified=false`、`original_gps=false`，`status=candidate_needs_review`；任务 `needs_confirmation` 也不代表已验证。重提取/修正颜色裁剪/更换OSM会使旧候选失效，网页保留审计链接而不当作当前预览。
+历史网页流程已停用，当前不提供OSM入口。以下仅为旧产物格式说明：已有任务勾选“明确切换独立道路走廊目标”。上传本地OSM、按行输入精确道路名即可先查询；查看查询JSON后上传有依据的道路假设JSON继续。仅本地继续不需要API；需要模型自己读图时每次重新同意上传。不要同时上传控制点/近似锚点或勾选下载。网页产物含 `corridors/<服务端UUID>/road-corridor.geojson`、`road-corridor.json`、`road-corridor.png`。示意PNG是本地OSM底图，不是原图配准叠图；JSON/GeoJSON带地图与假设哈希、节点/边way_id、有序分段、未确认起终点与限制。所有结果 `verified=false`、`original_gps=false`，`status=candidate_needs_review`；任务 `needs_confirmation` 也不代表已验证。重提取/修正颜色裁剪/更换OSM会使旧候选失效，网页保留审计链接而不当作当前预览。
 
 真实交付仍需：可读地名的原图、对应地区获授权且节点引用完整的本地WGS84 OSM XML、有依据的道路顺序/转折点/重复行进假设；若要严格截图定位或误差估计，还需独立真实控制点和检查点，不能拿本模式替代。当前回归为合成夹具及mock API动作链，不代表两张用户真实图已跑通或原始GPS已恢复。
 
 ### 行政区父子层级查询修复
 
-`query_map` 支持保守解析中文省/市/区/县拼接名称，以及显式 `area_hierarchy`（2–3级且拼接等于原始名称）。一次QL先验证父对象唯一，再限定父范围与 `subarea` 成员查询子行政relation；不猜选全国同名区县、不扩大范围。仍最多两次固定Overpass请求，合计30秒，每响应2MB，无自动重试。失败主结果直接展示原始名称、查询层级及安全候选ID；旧任务不会被自动重跑。归属数据不足会保守停止，不能解释为真实行政区不存在。详见 [层级查询、授权预算与未验证边界](docs/ADMIN_AREA_QUERY.md)。
+`query_map` 支持保守解析中文省/市/区/县拼接名称，以及显式 `area_hierarchy`（2–3级且拼接等于原始名称）。一次QL先验证父对象唯一，再限定父范围与 `subarea` 成员查询子行政relation；不猜选全国同名区县、不扩大范围。此OSM层级联网实现已停用，当前一律返回 osm_network_disabled，不进行请求或回退。失败主结果直接展示原始名称、查询层级及安全候选ID；旧任务不会被自动重跑。归属数据不足会保守停止，不能解释为真实行政区不存在。详见 [层级查询、授权预算与未验证边界](docs/ADMIN_AREA_QUERY.md)。

@@ -55,7 +55,8 @@ class SimplePageTests(unittest.TestCase):
         for identity in ('uploadConsent', 'reviewConsent', 'mapConsent'):
             self.assertNotIn('checked', page.attrs[identity])
         self.assertEqual(page.parents['queryMapConsent'], ())
-        self.assertIn('固定 Overpass', PAGE)
+        self.assertEqual(page.options['mapProvider'], ['amap'])
+        self.assertIn('OSM/Overpass联网已停用', PAGE)
         self.assertIn('具体对象', PAGE)
 
     @unittest.skipUnless(shutil.which('node'), '需要本地 Node')

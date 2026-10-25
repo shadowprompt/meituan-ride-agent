@@ -17,7 +17,7 @@ from ride_web import ARTIFACTS, MAX_BODY, MAX_IMAGE, RideServer, WebError
 
 class WebTests(unittest.TestCase):
     def setUp(self):
-        environment = patch.dict('os.environ', {'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-vision'})
+        environment = patch.dict('os.environ', {'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-vision','AMAP_API_KEY':'synthetic-map-key-only'})
         environment.start()
         self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
@@ -72,7 +72,7 @@ class WebTests(unittest.TestCase):
         (folder/'task').mkdir(parents=True)
         (folder/'inputs').mkdir()
         state = {'version': 1, 'mode': 'demo', 'goal': 'pixels', 'status': 'waiting_for_user',
-                 'question': '请选择颜色', 'messages': [], 'verified': False}
+                 'question': '请选择颜色', 'messages': [], 'verified': False, 'map_provider':'amap'}
         state.update(fields)
         (folder/'task'/'task.json').write_text(json.dumps(state), encoding='utf-8')
         return task_id
@@ -86,7 +86,7 @@ class WebTests(unittest.TestCase):
         if argv[2] == 'start':
             target.mkdir()
             (target/'task.json').write_text(json.dumps({
-                'version': 1, 'mode': 'demo' if '--demo' in argv else 'api',
+                'version': 1, 'map_provider':'amap', 'mode': 'demo' if '--demo' in argv else 'api',
                 'goal': argv[argv.index('--goal')+1], 'status': 'waiting_for_user',
                 'question': '<img src=x onerror=alert(1)>', 'messages': ['secret'],
             }))
