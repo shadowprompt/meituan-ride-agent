@@ -23,6 +23,7 @@ from register_pixels import register, fit_registration
 from approximate_location import approximate, fit_approximation
 from road_match import match, _load_segments
 from map_fetch import fetch_roads, fetch_named_roads, MapFetchError
+from amap_fetch import fetch_location_clues
 from inspect_colors import inspect_colors
 from ride_errors import TaskFailure, failure_category, api_diagnostic
 import route_review
@@ -73,6 +74,37 @@ query_map仅在CURRENT_STAGE_STATE.map_query_authorized=true时可联网；没�
 """
 
 
+PROMPT += """
+地图 provider 由用户选择，模型不得更改。CURRENT_STAGE_STATE.map_provider=amap 时，
+query_map 改为高德结构化地址定位线索查询：最多3次固定HTTPS地理编码请求，共享30秒预算，单响应512KB。
+返回仅 GCJ02 点，不是WGS84、OSM way/node或道路几何；不能inspect_roads/build_corridor/fetch_map/match，
+不能使用旧OSM证据、不能自动调用骑行规划或OSM补齐，不能把规划路线当历史轨迹。
+定位结果可能歧义、无结果或行政区不符；保留不确定性。普通用户不需要准备道路JSON。
+"""
+
+
+def select_map_provider(state, folder, provider):
+    if provider not in ('osm', 'amap'):
+        raise ValueError('Invalid map provider')
+    if provider != state.get('map_provider', 'osm'):
+        # Preserve old evidence as audit files, never let a provider switch adopt it.
+        osm = Path(folder)/'map.osm'
+        if osm.is_file():
+            osm.rename(Path(folder)/('map-audit-' + str(uuid.uuid4()) + '.osm'))
+        invalidate_corridor(state)
+        for key in ('map_query', 'map_query_diagnostic', 'location_clues', 'artifacts', 'summary',
+                    'road_notice', 'map_download', 'corridor_names', 'road_match_status'):
+            state.pop(key, None)
+        state.update(match_attempted=False, map_download_requested=False)
+        # Keep prior conversation for local audit, never as current map evidence.
+        history = redact_credentials(state.get('messages', []))
+        if history:
+            (Path(folder)/('map-history-audit-' + str(uuid.uuid4()) + '.json')).write_text(
+                json.dumps(history, ensure_ascii=False), encoding='utf-8')
+        state['messages'] = []
+    state['map_provider'] = provider
+
+
 def invalidate_corridor(state):
     """换图、重提取或更换地图后，旧道路证据只保留为审计文件。"""
     state.update(corridor_complete=False)
@@ -81,6 +113,8 @@ def invalidate_corridor(state):
 
 
 def corridor_local_action(state, folder):
+    if state.get('map_provider', 'osm') == 'amap':
+        return {'action':'ask', 'question':'高德仅支持 GCJ-02 定位线索，不支持道路走廊。若需读图查询，请明确本次模型上传与高德查询授权；不需要道路JSON。'}
     if not (Path(folder)/'map.osm').is_file():
         return {'action':'ask', 'question':'请上传获授权的本地 OSM XML；本模式不下载地图，也不要求控制点。'}
     if state.get('corridor_names'):
@@ -114,7 +148,27 @@ def crop_diagnostics(crop, image_size):
             'warnings':warnings}
 
 
+def redact_credentials(value):
+    # Also remove URL query credential values, including model-echoed URLs.
+    import re
+    if isinstance(value, str):
+        for name in ('RIDE_API_KEY', 'AMAP_API_KEY'):
+            key = os.environ.get(name)
+            if key:
+                value = value.replace(key, '[已隐藏]')
+                value = value.replace(urllib.parse.quote(key, safe=''), '[已隐藏]')
+        return re.sub(r'(?i)([?&](?:key|api_key|apikey|token)=)[^&\s\"<>]*', r'\1[已隐藏]', value)
+    if isinstance(value, list):
+        return [redact_credentials(v) for v in value]
+    if isinstance(value, dict):
+        return {k: redact_credentials(v) for k, v in value.items()}
+    return value
+
+
 def save(state, folder):
+    safe = redact_credentials(state)
+    state.clear()
+    state.update(safe)
     path = Path(folder)/'task.json'
     temp = path.with_suffix('.tmp')
     temp.write_text(json.dumps(state, ensure_ascii=False, indent=2, allow_nan=False)+'\n', encoding='utf-8')
@@ -123,11 +177,10 @@ def save(state, folder):
 
 def map_query_diagnostic(state, folder, action, outcome, **summary):
     """每次尝试留安全审计；请求仅保存有界文字，不保存远端正文/配置。"""
-    key = os.environ.get('RIDE_API_KEY')
     def text(value, limit):
         if not isinstance(value, str):
             return None
-        value = value.replace(key, '[已隐藏]') if key else value
+        value = redact_credentials(value)
         return ''.join(c for c in value if ord(c) >= 32 and not 0xD800 <= ord(c) <= 0xDFFF)[:limit]
     names = action.get('names')
     request = {'area_name': text(action.get('area_name'), 80),
@@ -140,7 +193,7 @@ def map_query_diagnostic(state, folder, action, outcome, **summary):
     attempt_id = (previous['attempt_id'] if outcome != 'started' and previous.get('outcome') == 'started'
                   else str(uuid.uuid4()))
     diagnostic = {'attempt_id': attempt_id, 'outcome': outcome,
-                  'request': request, 'verified': False, 'original_gps': False, **summary}
+                  'provider': state.get('map_provider', 'osm'), 'request': request, 'verified': False, 'original_gps': False, **summary}
     state['map_query_diagnostic'] = diagnostic
     # 在开始网络请求前落盘；即使没有map.osm或进程被中止也可定位本次输入。
     save(state, folder)
@@ -246,7 +299,7 @@ class APIPlanner:
         messages = [{'role':'system','content':PROMPT}, {'role':'user','content':[
             {'type':'text','text':f'Analyze screenshot. Oriented size: {state["image_size"]}. All results must stay unverified.'},
             {'type':'image_url','image_url':{'url':'data:image/png;base64,'+image}}]}]
-        messages.append({'role':'user','content':json.dumps({'corridor_complete':state.get('corridor_complete',False), 'goal':state.get('goal','pixels'), 'controls_available':controls_current(state,folder), 'registered':state.get('registered',False), 'osm_available':(Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
+        messages.append({'role':'user','content':json.dumps({'corridor_complete':state.get('corridor_complete',False), 'goal':state.get('goal','pixels'), 'controls_available':controls_current(state,folder), 'registered':state.get('registered',False), 'osm_available':state.get('map_provider', 'osm') == 'osm' and (Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
         messages.extend(state['messages'])
         # Append current evidence AFTER history: old reports are historical, not current state.
         feedback = visual_feedback(state, folder)
@@ -258,6 +311,9 @@ class APIPlanner:
         review_version = route_review.version(state, folder)
         current = {k:state.get(k,False) for k in ('extracted','centerlined','registered','registration_gate_passed','match_attempted')}
         if state.get('goal') == 'corridor':
+            current['map_provider'] = state.get('map_provider', 'osm')
+            current['supports_corridor'] = current['map_provider'] == 'osm'
+            current['location_clues'] = state.get('location_clues')
             current['map_query_authorized'] = bool(getattr(self, 'map_query_authorized', False))
             current['corridor_complete'] = bool(state.get('corridor_complete'))
             current['corridor_inspection'] = state.get('corridor_inspection')
@@ -494,6 +550,9 @@ MAX_DELIVERY_CORRECTIONS = 3
 def delivery_requirements(state, folder):
     """Current evidence only; never promote missing tools to success."""
     if state.get('goal') == 'corridor':
+        if state.get('map_provider', 'osm') == 'amap':
+            return {'tool':'deliver', 'status':'rejected', 'reason':'amap_location_clues_only',
+                    'missing_tools':[], 'next_step':'高德仅GCJ-02定位线索，不支持道路走廊；请说明限制并ask，不得声称交付WGS84轨迹。', 'verified':False}
         if state.get('corridor_complete'):
             return None
         return {'tool':'deliver', 'status':'rejected', 'missing_tools':['build_corridor'], 'next_step':'inspect authorized local OSM then build an evidenced hypothesis', 'verified':False}
@@ -528,6 +587,8 @@ def delivery_requirements(state, folder):
 
 
 def run(state, folder, planner, budget=12, consent_map=False):
+    if state.get('map_provider', 'osm') not in ('osm', 'amap'):
+        raise ValueError('Invalid map provider')
     delivery_corrections = 0
     map_query_used = False
     inspection = state.get('corridor_inspection')
@@ -713,15 +774,21 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 if not isinstance(action['evidence'], str) or not 1 <= len(action['evidence'].strip()) <= 2000:
                     raise ValueError('Visible locality and road evidence required')
                 if not consent_map or map_query_used:
-                    state.update(status='waiting_for_user', question='本轮地图查询未授权或预算已用。请勾选本次地图查询授权及模型上传授权后继续；只向固定 Overpass 发送图中行政区/道路名，不发送截图，不自动重试。')
+                    state.update(status='waiting_for_user', question='本轮地图查询未授权或预算已用。请勾选本次地图查询授权及模型上传授权后继续；只向本次选择的地图服务发送图中行政区/道路名，不发送截图，不自动重试。')
                     save(state, folder)
                     return state
                 map_query_used = True
                 planner.map_query_authorized = False
+                state.pop('location_clues', None)
                 map_query_diagnostic(state, folder, action, 'started')
                 try:
-                    result = fetch_named_roads(action['area_name'], action['names'], Path(folder)/'map.osm', consent_download=True,
-                                               **({'area_hierarchy': action['area_hierarchy']} if 'area_hierarchy' in action else {}))
+                    options = {'consent_download': True}
+                    if 'area_hierarchy' in action:
+                        options['area_hierarchy'] = action['area_hierarchy']
+                    if state.get('map_provider', 'osm') == 'amap':
+                        result = redact_credentials(fetch_location_clues(action['area_name'], action['names'], **options))
+                    else:
+                        result = fetch_named_roads(action['area_name'], action['names'], Path(folder)/'map.osm', **options)
                 except MapFetchError as exc:
                     diagnostic = map_query_diagnostic(state, folder, action, 'failed', **exc.diagnostic())
                     request = diagnostic['request']
@@ -734,6 +801,23 @@ def run(state, folder, planner, budget=12, consent_map=False):
                               else '；候选：' + json.dumps(diagnostic['area_resolution']['candidates'], ensure_ascii=False) + '。')
                            if diagnostic.get('area_resolution') else '')
                         + diagnostic['retry_advice']))
+                    save(state, folder)
+                    return state
+                if state.get('map_provider', 'osm') == 'amap':
+                    map_query_diagnostic(state, folder, action, 'succeeded', result_summary={
+                        'status': result['status'], 'coordinate_system': 'GCJ02', 'supports_corridor': False,
+                        'candidate_counts': [len(c['candidates']) for c in result['clues']]})
+                    invalidate_corridor(state)
+                    state.pop('artifacts', None)
+                    state.pop('summary', None)
+                    state['location_clues'] = result
+                    (Path(folder)/'amap-location-clues.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
+                    state['messages'].append({'role':'user', 'content':'LOCAL_TOOL_RESULT '+json.dumps({'tool':name, **result}, ensure_ascii=False)})
+                    state.update(status='waiting_for_user', question=(
+                        '高德查询完成，仅取得 GCJ-02 定位线索；不支持道路走廊或WGS84轨迹。'
+                        + ' 查询行政区：'+result['area_name']+'；道路/地点：'+'、'.join(result['names'])+'。'
+                        + '；'.join(c['query_name']+'：'+str(len(c['candidates']))+'个未验证候选' for c in result['clues'])
+                        + '。'+result['warning']))
                     save(state, folder)
                     return state
                 map_query_diagnostic(state, folder, action, 'succeeded',
@@ -749,6 +833,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 if state.get('goal') != 'corridor':
                     raise ValueError('Explicit corridor goal required')
                 stage = name
+                if state.get('map_provider', 'osm') != 'osm':
+                    raise ValueError('AMap location clues cannot construct or inspect OSM roads')
                 osm = Path(folder)/'map.osm'
                 if name == 'inspect_roads':
                     if set(action) != {'action','names'}:
@@ -810,6 +896,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 state['registration_gate_passed'] = result['independent_error_gate_passed']
                 tool_result = {'tool':'register', **{k:result[k] for k in ('fit_rmse_m','check_rmse_m','independent_error_gate_passed','warnings')}}
             elif name == 'fetch_map':
+                if state.get('map_provider', 'osm') != 'osm':
+                    raise ValueError('AMap consent never authorizes Overpass')
                 if state.get('goal') == 'corridor':
                     raise ValueError('Corridor uses authorized local OSM only')
                 if not state.get('map_download_requested') or not consent_map:
@@ -822,6 +910,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 result = download_task_map(state, folder)
                 tool_result = {'tool':'fetch_map', **result}
             elif name == 'match':
+                if state.get('map_provider', 'osm') != 'osm':
+                    raise ValueError('AMap clues cannot be used as WGS84 road matching evidence')
                 if state.get('goal') == 'corridor':
                     raise ValueError('Corridor is not registered pixel matching')
                 if state.get('goal') == 'approximate' or state.get('approximate_complete'):
@@ -983,6 +1073,8 @@ def main():
     answers.add_argument('--answer-file', help='UTF-8 text/JSON file; avoids Windows quoting issues')
     sub.add_parser('status')
     for command in sub.choices.values():
+        if command in (begin, resume):
+            command.add_argument('--map-provider', choices=['osm', 'amap'], default=None, help='本次地图服务；高德仅GCJ02定位线索，Key仅服务器环境配置')
         command.add_argument('--task-dir',required=True)
         command.add_argument('--consent-upload',action='store_true')
     args = parser.parse_args()
@@ -1002,6 +1094,10 @@ def main():
                 raise ValueError('复核继续不接受修改或文件，使用当前已保存证据')
             planner = LocalPlanner() if local_only else (DemoPlanner() if demo else ConsentedPlanner())
             state = start(args.image,args.task_dir,demo,args.goal) if args.command=='start' else load(args.task_dir)
+            provider = args.map_provider or state.get('map_provider', 'osm')
+            if provider != 'osm' and (getattr(args, 'fetch_map', False) or getattr(args, 'osm_file', None)):
+                raise ValueError('高德不支持Overpass范围下载或OSM上传，请显式切换OSM')
+            select_map_provider(state, args.task_dir, provider)
             if args.command=='resume':
                 if args.road_corridor:
                     if args.fetch_map or args.controls_file or args.approximate_anchors_file:
@@ -1015,9 +1111,9 @@ def main():
                     raise ValueError('Choose fetch-map or osm-file, not both')
                 if args.fetch_map and not args.consent_map:
                     raise ValueError('--fetch-map requires explicit --consent-map each invocation')
-                if not args.answer and not args.answer_file and not args.controls_file and not args.approximate_anchors_file and not args.osm_file and not args.road_names and not args.road_hypothesis_file and not args.road_corridor and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue and not args.consent_map:
+                if not args.answer and not args.answer_file and not args.controls_file and not args.approximate_anchors_file and not args.osm_file and not args.road_names and not args.road_hypothesis_file and not args.road_corridor and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue and not args.consent_map and not args.map_provider:
                     raise ValueError('Provide answer, answer-file, controls-file or osm-file')
-                answer = args.answer or ('用户本次明确授权上传当前任务截图、派生预览、诊断和对话，继续复核当前已保存证据；保留用户候选选择，不重新提取。' if review_continue else ('用户本次明确授权向固定Overpass查询原图可见行政区与精确道路对象；请依据原图自行识别，缺少地域或文字时提出具体问题。' if args.consent_map else 'User supplied local evidence file.'))
+                answer = args.answer or ('用户本次明确授权上传当前任务截图、派生预览、诊断和对话，继续复核当前已保存证据；保留用户候选选择，不重新提取。' if review_continue else ('用户本次明确授权向所选地图服务查询原图可见行政区与道路定位线索；请依据原图自行识别，缺少地域或文字时提出具体问题。' if args.consent_map else 'User supplied local evidence file.'))
                 if args.color is not None or args.crop is not None:
                     if args.reset_extraction:
                         raise ValueError('Choose structured color/crop correction or reset-extraction')

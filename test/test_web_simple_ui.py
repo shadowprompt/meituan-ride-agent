@@ -74,16 +74,16 @@ assert(resultSummary({corridor_complete:true}).includes('不可导航'));
 assert(resultSummary({execution_state:'failed',recovery_hint:'配置未就绪'}).includes('配置未就绪'));
 assert(resultSummary({execution_state:'failed',goal:'corridor',map_available:false}).includes('地图证据'));
 action=async fn=>fn();render=d=>{};request=async(path,data)=>{calls.push({path,data});return {}};
-$('image').files=[{size:12}];$('mode').value='api';$('goal').value='corridor';
+$('image').files=[{size:12}];$('mode').value='api';$('goal').value='corridor';$('mapProvider').value='osm';
 $('uploadConsent').checked=true;$('roadNames').value='stale road';$('fetch').checked=true;
 (async()=>{
  await nodes.create.onclick();
- assert.deepEqual(calls[0],{path:'/api/tasks',data:{image_base64:'c2NyZWVuc2hvdA==',mode:'api',goal:'corridor',consent_upload:true}});
+ assert.deepEqual(calls[0],{path:'/api/tasks',data:{image_base64:'c2NyZWVuc2hvdA==',mode:'api',map_provider:'osm',goal:'corridor',consent_upload:true}});
  $('task').value='11111111-1111-4111-8111-111111111111';
  await nodes.refresh.onclick();assert.equal(calls.length,2);
  assert.equal(calls[1].path,'/api/tasks/'+nodes.task.value);assert.equal(calls[1].data,undefined);
  $('queryMapConsent').checked=true;await nodes.continueMap.onclick();
- assert.deepEqual(calls[2].data,{consent_upload:true,consent_map:true});
+ assert.deepEqual(calls[2].data,{consent_upload:true,consent_map:true,map_provider:'osm'});
  assert(!('road_names' in calls[2].data));assert(!('fetch_map' in calls[2].data));
 })().catch(e=>{console.error(e);process.exitCode=1});
 """

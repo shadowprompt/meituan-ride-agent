@@ -33,7 +33,7 @@ BASE = SOURCE_DIR.parent
 MAX_IMAGE = 20_000_000
 MAX_BODY = 44_000_000  # 30 MB OSM XML plus JSON overhead
 ARTIFACTS = frozenset((
-    'corridor-inspection.json', 'map-query.json', 'map-query-diagnostic.json',
+    'corridor-inspection.json', 'map-query.json', 'map-query-diagnostic.json', 'amap-location-clues.json',
     'inspection/colors.json', 'inspection/color-preview.png',
     'extraction/question-source.png', 'extraction/question-overlay.png',
     'extraction/mask.png', 'extraction/overlay.png', 'extraction/extraction.json',
@@ -68,6 +68,8 @@ def artifact_current(state, name):
     prefix = name.split('/')[0]
     if prefix == 'corridors':
         return state.get('goal') == 'corridor' and bool(state.get('corridor_complete')) and name in state.get('corridor_artifacts', [])
+    if name == 'amap-location-clues.json':
+        return state.get('map_provider') == 'amap' and bool(state.get('location_clues'))
     if name == 'map-query-diagnostic.json':
         return bool(state.get('map_query_diagnostic'))
     if name == 'map-query.json':
@@ -367,7 +369,7 @@ class RideServer(ThreadingHTTPServer):
             state = load(folder/'task')
         except (ValueError, OSError, TypeError, KeyError):
             raise WebError('任务状态尚未生成或无法读取', 409) from None
-        fields = ('map_query_diagnostic', 'candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
+        fields = ('map_provider', 'location_clues', 'map_query_diagnostic', 'candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
                   'registration_notice', 'corridor_complete', 'approximate_complete', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
@@ -404,7 +406,8 @@ class RideServer(ThreadingHTTPServer):
                                'api_responses':execution.get('api_responses', 0)}
         result['review_status'] = (review.get('result', 'not_reviewed') if current_version and review.get('version') == current_version else 'not_reviewed')
         # 只公开是否具备当前本地地图，不公开路径，也不触发下载。
-        result['map_available'] = (folder/'task'/'map.osm').is_file()
+        result['map_available'] = state.get('map_provider', 'osm') == 'osm' and (folder/'task'/'map.osm').is_file()
+        result['map_provider'] = state.get('map_provider', 'osm')
         result['centerlined'] = bool(state.get('centerlined'))
         result['user_components_applied'] = 'component_ids' in state.get('user_extraction_constraints', {})
         result['task_id'] = task_id
@@ -439,25 +442,32 @@ class RideServer(ThreadingHTTPServer):
         result['artifacts'] = available
         result['artifact_notice'] = '产物可能来自先前步骤，修改颜色/裁剪后旧文件可能失效；仅为未验证候选，不可导航。'
         # 纵使模型意外复述了环境密钥，也不能显示给浏览器。
-        key = os.environ.get('RIDE_API_KEY')
+        keys = [os.environ.get(n) for n in ('RIDE_API_KEY', 'AMAP_API_KEY')]
         def redact(value):
             if isinstance(value, str):
-                return value.replace(key, '[已隐藏]') if key else value
+                for key in keys:
+                    if key:
+                        value = value.replace(key, '[已隐藏]')
+                return value
             if isinstance(value, list):
                 return [redact(item) for item in value]
             if isinstance(value, dict):
                 return {name: redact(item) for name, item in value.items()}
             return value
-        return redact(result)
+        from ride_agent import redact_credentials
+        return redact_credentials(redact(result))
 
     def create(self, data, *, asynchronous=False):
-        allowed = {'image_base64', 'mode', 'goal', 'consent_upload', 'consent_map'}
+        allowed = {'image_base64', 'mode', 'goal', 'consent_upload', 'consent_map', 'map_provider'}
         if data.keys() - allowed:
             raise WebError('未知创建参数（不接受文件路径）')
         mode = data.get('mode', 'demo')
         goal = data.get('goal', 'pixels')
         if mode not in ('demo', 'api') or goal not in ('pixels', 'registration', 'roads', 'approximate', 'corridor'):
             raise WebError('模式或目标无效')
+        provider = data.get('map_provider', 'osm')
+        if provider not in ('osm', 'amap'):
+            raise WebError('地图服务须为 OSM 或高德')
         consent_map = flag(data, 'consent_map')
         consent = flag(data, 'consent_upload')
         if mode == 'api' and not consent:
@@ -486,7 +496,7 @@ class RideServer(ThreadingHTTPServer):
         inputs.mkdir(mode=0o700)
         source = inputs/'source-image'
         source.write_bytes(image)
-        args = ['start', '--image', str(source), '--task-dir', str(folder/'task'), '--goal', goal]
+        args = ['start', '--image', str(source), '--task-dir', str(folder/'task'), '--goal', goal, '--map-provider', provider]
         if mode == 'demo':
             args.append('--demo')
         if consent:
@@ -505,7 +515,7 @@ class RideServer(ThreadingHTTPServer):
     def resume(self, task_id, data, *, asynchronous=False):
         self.idle(task_id)
         allowed = {'road_corridor', 'road_names', 'road_hypothesis_json', 'component_ids', 'answer', 'color', 'crop', 'controls_json', 'approximate_anchors_json', 'osm_xml',
-                   'fetch_map', 'consent_map', 'consent_upload', 'local_only', 'review_continue'}
+                   'fetch_map', 'consent_map', 'consent_upload', 'local_only', 'review_continue', 'map_provider'}
         if data.keys() - allowed:
             raise WebError('未知继续参数（不接受文件路径）')
         folder = self.folder(task_id)
@@ -521,6 +531,11 @@ class RideServer(ThreadingHTTPServer):
                 raise WebError('模型复核仅用于 API 任务，不可同时选择仅本地', 409)
             if data.keys() - {'review_continue', 'consent_upload', 'consent_map'}:
                 raise WebError('复核使用当前已保存证据，不接受同时修改参数或选择')
+        provider = data.get('map_provider', state.get('map_provider', 'osm'))
+        if provider not in ('osm', 'amap'):
+            raise WebError('地图服务须为 OSM 或高德')
+        if provider == 'amap' and (flag(data, 'fetch_map') or 'osm_xml' in data):
+            raise WebError('高德仅提供GCJ-02定位线索；OSM上传或范围下载须显式切换OSM')
         consent_map = flag(data, 'consent_map')
         fetch_map = flag(data, 'fetch_map')
         if state['mode'] == 'api' and not upload and not local_only:
@@ -529,7 +544,7 @@ class RideServer(ThreadingHTTPServer):
             raise WebError('下载地图须明确同意发送范围坐标', 403)
         if fetch_map and 'osm_xml' in data:
             raise WebError('地图下载与本地 OSM 不能同时选择')
-        args = ['resume', '--task-dir', str(folder/'task')]
+        args = ['resume', '--task-dir', str(folder/'task'), '--map-provider', provider]
         if local_only:
             args.append('--local-only')
         if review_continue:
@@ -609,7 +624,7 @@ class RideServer(ThreadingHTTPServer):
                 raise WebError('OSM XML 为空或含禁止的 DTD/实体')
             pending['osm-upload.xml'] = osm.encode('utf-8')
             args += ['--osm-file', str(folder/'inputs'/'osm-upload.xml')]
-        if not any(k in data for k in ('road_corridor', 'road_names', 'road_hypothesis_json', 'component_ids', 'answer', 'color', 'crop', 'controls_json', 'approximate_anchors_json', 'osm_xml')) and not fetch_map and not local_only and not review_continue and not consent_map:
+        if not any(k in data for k in ('road_corridor', 'road_names', 'road_hypothesis_json', 'component_ids', 'answer', 'color', 'crop', 'controls_json', 'approximate_anchors_json', 'osm_xml')) and not fetch_map and not local_only and not review_continue and not consent_map and 'map_provider' not in data:
             raise WebError('请提供回答、修正或证据文件')
         if upload:
             args.append('--consent-upload')
@@ -656,13 +671,16 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <style>body{max-width:950px;margin:2em auto;padding:0 1em;font-family:system-ui;line-height:1.6}fieldset{margin:1em 0}label{display:block;margin:.5em 0}textarea{width:95%;height:6em}button{padding:.5em 1em}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1em}img{max-width:100%;max-height:420px}input[type=text]{width:70%}details{margin:1em 0;border:1px solid #ccc;padding:.6em}summary{cursor:pointer;font-weight:bold}.result{border:2px solid #397b68;padding:1em;background:#f3faf7}.consent{border:2px solid #855400;background:#fff4cf;padding:1em;font-weight:bold}</style>
 <h1>上传骑行截图，识别道路线索</h1>
 <p>上传截图 → 本次授权 → 开始识别 → 查看结果或具体缺口。所有坐标只是未验证候选，非原始 GPS，不可导航。</p>
-<p id="capabilityNotice">模型可读取原图地名与道路线索；本次单独授权后可向固定 Overpass 查询具体行政区内的精确道路对象，再生成经纬度候选。文字或地域不清会询问，不保证识别成功。不会静默下载地图或上传图片；无需为尝试识别先填道路名、控制点或技术文件。</p>
+<p id="capabilityNotice">模型可读取原图地名与道路线索；选择 OSM 并本次单独授权后可查询道路几何生成未验证走廊候选；高德仅可查 GCJ-02 定位线索，不支持道路走廊或 WGS84 轨迹。文字或地域不清会询问，不保证识别成功。不会静默下载地图或上传图片；无需为尝试识别先填道路名、控制点或技术文件。</p>
 <fieldset><legend>1. 上传截图并授权</legend><label>截图（PNG/JPEG/WebP，≤20 MB、≤400万像素） <input id="image" type="file" accept="image/png,image/jpeg,image/webp"></label>
 <details id="startAdvanced"><summary>高级选项：运行模式与手动目标</summary><p>默认使用真实视觉 API 识别道路线索；需要管理员预先配置模型服务。离线 Demo 是固定演示，并非自动识路。道路查询仅限本次授权的具体对象，不下载大范围路网。</p>
 <label>模式 <select id="mode"><option value="api">真实视觉 API（需要本次授权）</option><option value="demo">离线 Demo（固定演示）</option></select></label>
 <label>手动目标 <select id="goal"><option value="corridor">读图识路 → 地图道路候选（默认）</option><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">严格配准后道路匹配</option></select></label></details>
-<label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（含本地OSM道路查询结果，不含完整地图文件；创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
-<label class="consent"><input id="queryMapConsent" type="checkbox">仅本次同意向固定 Overpass 发送模型从原图识别的行政区名及精确道路名（最多一次对象查询、两次请求：一次受父级约束的行政层级查询及一次精确道路查询；总计30秒，各响应上限2MB；不发送截图）。与模型上传授权独立，创建/继续后自动取消。</label>
+<label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（含所选服务地图查询结果，不含完整地图文件；创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
+<label>地图服务 <select id="mapProvider"><option value="osm">OSM / Overpass（道路几何候选）</option><option value="amap">高德（仅GCJ-02定位线索，不支持道路走廊）</option></select></label>
+<p id="providerNotice">OSM 仅向固定 Overpass 查询。本次授权不继承，切换服务会失效不兼容地图证据。</p>
+<p>高德 Key 仅由管理员通过服务器 AMAP_API_KEY 配置，不在网页输入。曾在群聊公开的 Key 请立即撤销并轮换；勿再次粘贴。高德查询不调用骑行规划、不访问OSM、不恢复历史轨迹。</p>
+<label class="consent"><input id="queryMapConsent" type="checkbox">仅本次同意向上方所选地图服务发送模型从原图识别的行政区及道路/地点文字（OSM：最多两次请求、各2MB；高德：最多三次地理编码、各512KB；共享30秒预算，不自动重试，不发送截图）。与模型上传授权独立，创建/继续后自动取消。</label>
 <button id="create">开始识别</button><button id="continueMap">授权后继续识路 / 查询地图</button></fieldset>
 <section class="result" aria-labelledby="resultTitle"><h2 id="resultTitle">2. 结果 / 具体缺口</h2><p id="resultSummary" role="status" aria-live="polite">尚未开始。请选择截图，确认本次上传授权后点击“开始识别”。</p></section>
 <details id="taskRecovery"><summary>恢复已有任务（只读取，不自动重跑）</summary><fieldset><legend>任务恢复与执行详情</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><p id="executionNotice" role="status" style="font-weight:bold;border:2px solid #b66;padding:12px"></p><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset></details>
@@ -691,7 +709,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <p>近似模式不做严格验证，不恢复原始GPS，不可导航/道路匹配；请提供真实来源及不确定度，不能用图名猜坐标。</p><label>定位模式 <select id="locationMode"><option value="strict">严格控制点</option><option value="approximate">近似证据锚点（仅本地）</option></select></label>
 <label>对应点 JSON（按上方模式） <input id="controls" type="file" accept=".json,application/json"></label><label>本地 OSM XML <input id="osm" type="file" accept=".osm,.xml"></label>
 <p id="roadsNotice">注意：勾选下载地图或上传本地 OSM 后，点击“继续处理”会将任务目标自动切换为 roads（道路候选匹配），即使原目标为像素提取或配准。下载须先完成配准并通过独立检查；下载授权与 API 上传授权相互独立，未勾选不会下载。</p>
-<label><input id="fetch" type="checkbox">下载当前配准范围的地图（不可同时上传 OSM）</label><label><input id="mapConsent" type="checkbox">仅本次同意向 Overpass 发送地理范围（不发送截图）</label>
+<label><input id="fetch" type="checkbox">下载当前配准范围的地图（不可同时上传 OSM）</label><label><input id="mapConsent" type="checkbox">仅本次同意向所选地图服务发送行政区/道路文字；OSM 范围下载另发送配准范围（高德不支持范围下载；不发送截图）</label>
 <label><input id="localOnly" type="checkbox">仅本地继续（已有颜色/裁剪或有效掩码；不上传、不调用模型，可恢复中心线；地图下载仍单独授权）</label>
 <p>道路走廊不要求像素配准。可使用本地OSM，或在本次地图查询授权后查询具体道路；模型可在本次上传授权后读原图并提出道路/节点假设，不恢复原始GPS。</p><label><input id="corridorMode" type="checkbox">明确切换独立道路走廊目标</label><label>精确道路名（每行一个，可先查询节点）<textarea id="roadNames"></textarea></label><label>有依据的道路假设 JSON <input id="roadHypothesis" type="file" accept=".json"></label><button id="resume">继续处理</button></details></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。structure-diagnostics.png 黄框仅表示被保守保护的间隙总范围，不表示已识别折返；同路往返次数和先后须人工确认。</p><div id="artifacts"></div>
 <p><a href="/pixel-route">无需 API：本地人工有序像素路线标注、保存与导出</a></p>
@@ -713,6 +731,7 @@ function lockRunning(){if(executionBusy)for(const b of document.querySelectorAll
 function resultSummary(d){
  if(['queued','running'].includes(d.execution_state))return '正在识别，请稍候；只刷新状态，不会重复上传或重跑任务。本轮仅在明确地图查询授权下联网，不保证输出经纬度。';
  const q=d.map_query_diagnostic;
+ if(d.map_provider==='amap'&&d.location_clues&&(!q||q.outcome==='succeeded'))return (d.question||d.location_clues.warning)+' 定位线索：'+d.location_clues.clues.map(c=>c.query_name+'：'+(c.candidates.map(p=>p.location.join(',')+'（GCJ-02，未验证）').join(' / ')||'无结果')).join('；')+'。不是道路几何，不是WGS84轨迹，不可导航。';
  if(d.goal==='corridor'&&!d.corridor_complete&&!d.error_category&&d.execution_state!=='failed'&&q&&['failed','started'].includes(q.outcome))return '本轮尚未交付经纬度。'+(q.outcome==='failed'?'地图查询失败 ['+q.reason_code+']：'+q.message:'上次地图查询未记录最终结果；不能断言是否发送成功。')+' 查询行政区：'+(q.request?.area_name||'（非法或缺失）')+'；道路：'+(q.request?.names||[]).join('、')+'。'+(q.area_resolution?' 实际查询层级：'+q.area_resolution.query_levels.join(' → ')+'；'+(q.area_resolution.status==='unavailable'||(!q.area_resolution.candidates?.length&&['timeout','network_error','server_timeout'].includes(q.reason_code))?'候选尚未取得，不能判断无候选或层级成功':'候选：'+JSON.stringify(q.area_resolution.candidates))+'。':'')+(q.transport?' 查询阶段：'+q.transport.query_stage+' / '+q.transport.phase+'；耗时：'+q.transport.elapsed_seconds+'秒；收到响应：'+(q.transport.response_received?'是':'否')+'。':'')+(q.retry_advice||'请先核对任务状态，不要盲目重复授权。')+' 后台本轮结束不等于业务完成；未自动重试。';
  if(d.status==='waiting_for_user'&&typeof d.question==='string')return '等待用户确认：'+d.question+' 本轮未完成经纬度交付；刷新不会重跑。';
  if(d.execution_state==='failed'||d.error_category)return '本轮未完成。'+(d.recovery_hint||d.web_execution?.recovery_hint||'请查看任务详情中的安全提示；不会自动重试上传。')+(d.goal==='corridor'&&!d.map_available?' 本任务尚无地图证据；可核对问题后重新授权具体对象查询，未交付经纬度。':'');
@@ -722,7 +741,7 @@ function resultSummary(d){
  if(d.approximate_complete)return '已生成近似定位候选，请查看下方产物；未验证、非原始 GPS，不可导航。';
  return '当前任务尚不能证明经纬度交付已完成。请查看下方已有产物；像素与中心线不等于 GPS。需要时展开任务详情或高级工具，刷新不会自动重跑。';
 }
-function render(d){schedulePoll(d);$('resultSummary').textContent=resultSummary(d);$('candidatePanel').open=!!d.component_selection?.candidates?.length;for(const b of document.querySelectorAll('button'))b.disabled=false;$('reviewEntry').hidden=d.mode!=='api';$('reviewConsent').checked=false;const source={local:'本地执行',api:'API复核流程',unknown:'历史执行来源未知'}[d.execution?.source]||'执行来源未知';const review={not_reviewed:'尚未模型复核',consistent:'模型已报告当前版本可见一致（非真值验证）',needs_revision:'模型发现当前版本需要修正',ambiguous:'模型报告当前版本存在歧义'}[d.review_status]||'尚未模型复核';$('executionNotice').textContent='后台执行：'+({queued:'排队中',running:'运行中',succeeded:'本轮已结束（非真值验证）',failed:'本轮失败',idle:'历史任务待继续'}[d.execution_state]||'待查询')+'。'+(d.web_execution?.recovery_hint||'')+(d.execution?.source==='local'&&d.centerlined&&d.user_components_applied?'候选已应用、本地中心线已生成，':'')+review+'。本轮来源：'+source+'；成功模型响应：'+(d.execution?.api_responses||0)+'。成功响应为0不代表未发送原图（可能已发送但未收到有效响应）；mode仅为任务配置；始终未验证、非原始GPS。';$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}$('previewHoles').disabled=!!$('proposalAck');lockRunning();}
+function render(d){if(d.map_provider){if($('mapProvider').value!==d.map_provider){$('queryMapConsent').checked=false;$('mapConsent').checked=false;}$('mapProvider').value=d.map_provider;providerNotice();}schedulePoll(d);$('resultSummary').textContent=resultSummary(d);$('candidatePanel').open=!!d.component_selection?.candidates?.length;for(const b of document.querySelectorAll('button'))b.disabled=false;$('reviewEntry').hidden=d.mode!=='api';$('reviewConsent').checked=false;const source={local:'本地执行',api:'API复核流程',unknown:'历史执行来源未知'}[d.execution?.source]||'执行来源未知';const review={not_reviewed:'尚未模型复核',consistent:'模型已报告当前版本可见一致（非真值验证）',needs_revision:'模型发现当前版本需要修正',ambiguous:'模型报告当前版本存在歧义'}[d.review_status]||'尚未模型复核';$('executionNotice').textContent='后台执行：'+({queued:'排队中',running:'运行中',succeeded:'本轮已结束（非真值验证）',failed:'本轮失败',idle:'历史任务待继续'}[d.execution_state]||'待查询')+'。'+(d.web_execution?.recovery_hint||'')+(d.execution?.source==='local'&&d.centerlined&&d.user_components_applied?'候选已应用、本地中心线已生成，':'')+review+'。本轮来源：'+source+'；成功模型响应：'+(d.execution?.api_responses||0)+'。成功响应为0不代表未发送原图（可能已发送但未收到有效响应）；mode仅为任务配置；始终未验证、非原始GPS。';$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}$('previewHoles').disabled=!!$('proposalAck');lockRunning();}
 // 所有预览只读本地白名单产物；编号逐像素解码，不把重叠包围框当成候选。
 let componentView=null, componentEpoch=0;
 function selectedComponentIds(){return Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));}
@@ -816,12 +835,14 @@ $('applyHoles').onclick=()=>action(async()=>{
 async function action(fn){$('error').textContent='处理中，请稍候（提交后后台运行；单次模型限时300秒，整轮最多75分钟）';for(const b of document.querySelectorAll('button'))b.disabled=true;try{await fn();$('error').textContent='';}catch(e){$('error').textContent=e.message;}finally{for(const b of document.querySelectorAll('button'))b.disabled=false;$('applyComponents').disabled=!componentView||!selectedComponentIds().length;$('applyHoles').disabled=!!$('proposalAck')||!holeView||!holeSelection().length||!$('holeAck').checked;$('previewHoles').disabled=!!$('proposalAck');const approve=document.querySelector('[data-proposal-approve]');if(approve)approve.disabled=!$('proposalAck').checked;$('uploadConsent').checked=false;$('reviewConsent').checked=false;$('mapConsent').checked=false;$('queryMapConsent').checked=false;lockRunning();}}
 function taskPath(){const id=$('task').value.trim();if(!/^[0-9a-f-]{36}$/.test(id))throw Error('请先创建任务或填写编号');return '/api/tasks/'+id;}
 async function fileText(id,max){const f=$(id).files[0];if(!f)return undefined;if(f.size>max)throw Error('上传文件过大');return await f.text();}
-$('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked,...($('queryMapConsent').checked?{consent_map:true}:{})}));});
-$('continueMap').onclick=()=>action(async()=>{if(!$('uploadConsent').checked||!$('queryMapConsent').checked)throw Error('请先勾选本次模型上传及地图查询授权');render(await request(taskPath()+'/resume',{consent_upload:true,consent_map:true}));});
+function providerNotice(){$('providerNotice').textContent=$('mapProvider').value==='amap'?'高德：只向固定 restapi.amap.com 查询结构化地址，返回GCJ-02位置线索；Key缺失会安全停止。最多3请求，各512KB，共享30秒；不自动重试、不构建道路走廊。':'OSM：只向固定 Overpass 查询行政区和道路对象；最多2请求，各2MB，共享30秒。切换服务使旧地图证据失效。';}
+$('mapProvider').onchange=()=>{$('queryMapConsent').checked=false;$('mapConsent').checked=false;providerNotice();};
+$('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.size>20000000)throw Error('请选择 ≤20 MB 截图');const b64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result.split(',')[1]);r.onerror=reject;r.readAsDataURL(f);});render(await request('/api/tasks',{image_base64:b64,mode:$('mode').value,map_provider:$('mapProvider').value,goal:$('goal').value,consent_upload:$('uploadConsent').checked,...($('queryMapConsent').checked?{consent_map:true}:{})}));});
+$('continueMap').onclick=()=>action(async()=>{if(!$('uploadConsent').checked||!$('queryMapConsent').checked)throw Error('请先勾选本次模型上传及地图查询授权');render(await request(taskPath()+'/resume',{consent_upload:true,consent_map:true,map_provider:$('mapProvider').value}));});
 // 专用继续入口只提交本次授权；不读取localOnly、回答、颜色/裁剪等可能陈旧的表单。
 $('continueReview').onclick=()=>action(async()=>{if(!$('reviewConsent').checked)throw Error('请先勾选本次模型复核上传授权；尚未上传');render(await request(taskPath()+'/resume',{review_continue:true,consent_upload:true}));});
 $('refresh').onclick=()=>action(async()=>render(await request(taskPath())));
-$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined){if($('locationMode').value==='approximate'){if(!d.local_only)throw Error('近似模式须勾选仅本地继续');d.approximate_anchors_json=controls;}else d.controls_json=controls;}if(osm!==undefined)d.osm_xml=osm;if($('corridorMode').checked)d.road_corridor=true;const names=$('roadNames').value.split('\n').map(x=>x.trim()).filter(Boolean);if(names.length)d.road_names=names;const hypothesis=await fileText('roadHypothesis',256000);if(hypothesis!==undefined)d.road_hypothesis_json=hypothesis;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('roadNames').value='';$('roadHypothesis').value='';$('fetch').checked=false;});
+$('resume').onclick=()=>action(async()=>{const d={map_provider:$('mapProvider').value,local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined){if($('locationMode').value==='approximate'){if(!d.local_only)throw Error('近似模式须勾选仅本地继续');d.approximate_anchors_json=controls;}else d.controls_json=controls;}if(osm!==undefined)d.osm_xml=osm;if($('corridorMode').checked)d.road_corridor=true;const names=$('roadNames').value.split('\n').map(x=>x.trim()).filter(Boolean);if(names.length)d.road_names=names;const hypothesis=await fileText('roadHypothesis',256000);if(hypothesis!==undefined)d.road_hypothesis_json=hypothesis;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('roadNames').value='';$('roadHypothesis').value='';$('fetch').checked=false;});
 </script></html>'''
 
 
@@ -910,7 +931,11 @@ class Handler(BaseHTTPRequestHandler):
                     if target.stat().st_size > 30_000_000:
                         raise WebError('产物过大', 413)
                     mime = 'image/png' if name.endswith('.png') else 'application/json; charset=utf-8'
-                    self.send_content(200, target.read_bytes(), mime)
+                    payload = target.read_bytes()
+                    if name.endswith(('.json', '.geojson')):
+                        from ride_agent import redact_credentials
+                        payload = json.dumps(redact_credentials(json.loads(payload)), ensure_ascii=False).encode('utf-8')
+                    self.send_content(200, payload, mime)
                     return
             raise WebError('页面不存在', 404)
         except WebError as exc:
