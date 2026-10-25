@@ -97,11 +97,33 @@ class OnlineTests(unittest.TestCase):
         self.assertEqual(state['research_diagnostic']['reason_code'],'consent_required')
 
     def test_agent_real_action_loop_dynamic_versions(self):
+        self.run_corridor_loop(False)
+
+    def test_two_searches_then_timeout_still_inspects_and_builds_corridor(self):
+        self.run_corridor_loop(True)
+
+    def run_corridor_loop(self, partial_failure):
         class Planner:
             semantic_review=True
             index=0
             def decide(inner,state,folder):
                 inner.index+=1
+                step = inner.index
+                if partial_failure:
+                    if step == 2:
+                        return {**self.search,'names':['Alternate visible road hypothesis']}
+                    if step == 3:
+                        return {**self.search,'names':['Uncertain visible landmark']}
+                    if step == 4:
+                        failure = state['research_failures'][0]
+                        self.assertFalse(failure['terminal'])
+                        self.assertEqual(failure['budget']['requests'],3)
+                        self.assertEqual(failure['budget']['searches'],3)
+                        self.assertIn(['way',5],failure['available_evidence']['discovery_ids'])
+                        self.assertEqual(failure['available_evidence']['object_count'],0)
+                        self.assertIn('unavailable',state['messages'][-1]['content'])
+                    if step > 3:
+                        step -= 2
                 actions={1:self.search,2:{'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Search ID'},
                     3:{'action':'inspect_map_object','object_type':'node','object_id':1,'evidence':'Actual way member'},
                     4:{'action':'research_hypothesis','version':state['research_version'],'ordered_roads':['Fixture Road','Fixture Road'],'evidence':'Unit repeated legs','limitations':'Fixture only'},
@@ -110,19 +132,30 @@ class OnlineTests(unittest.TestCase):
                     7:{'action':'observe_region','region':[0,0,60,60],'hypothesis':'repeated_order','reason':'Unit crop comparison'},
                     8:{'action':'review_research','version':state['research_version'],'result':'consistent','evidence':'Mock presented crop only','limitations':'Not real E2E'},
                     9:{'action':'deliver','summary':'Unit unverified candidate'}}
-                if inner.index==8:
+                if step==8:
                     # Script planner模拟成功模型传输标记；真实API分支单独测试，不将脚本称为视觉验收。
                     state['research_presented_version']=state['research_version']
-                return actions[inner.index]
+                return actions[step]
         bodies=[[{'osm_type':'way','osm_id':5,'display_name':'Fixture Road'}],{'elements':[self.way]+self.nodes},{'elements':[self.way]}]
-        with patch.object(live,'_get',side_effect=[json.dumps(b).encode() for b in bodies]) as get:
-            state=ride_agent.run(self.state,self.folder,Planner(),budget=9,consent_map=True)
-        self.assertEqual(get.call_count,3)
+        responses = [json.dumps(b).encode() for b in bodies]
+        if partial_failure:
+            responses[1:1] = [responses[0],MapFetchError('remote body withheld',code='timeout')]
+        with patch.object(live,'_get',side_effect=responses) as get:
+            state=ride_agent.run(self.state,self.folder,Planner(),budget=11 if partial_failure else 9,consent_map=True)
+        self.assertEqual(get.call_count,5 if partial_failure else 3)
         self.assertEqual(state['status'],'needs_confirmation')
         audit=json.loads((self.folder/'research-audit.json').read_text())
         self.assertTrue(audit['network_used'])
-        self.assertEqual(len(audit['requests']),3)
+        self.assertEqual(len(audit['requests']),5 if partial_failure else 3)
+        self.assertEqual(audit['requests'][2]['outcome'],'failed' if partial_failure else 'succeeded')
         self.assertFalse(audit['verified'])
+        self.assertEqual(audit['source_sha256'],self.state['source_sha256'])
+        if partial_failure:
+            self.assertEqual(state['research_budget_used']['requests'],5)
+            self.assertEqual(state['research_budget_used']['searches'],3)
+            self.assertNotIn('remote body withheld',(self.folder/'task.json').read_text())
+            # 失败时的证据快照不能被后续对象发现原地改写。
+            self.assertEqual(state['research_failures'][0]['available_evidence']['discovery_ids'],[['way',5]])
 
 
 
@@ -147,6 +180,76 @@ class OnlineTests(unittest.TestCase):
         self.budget={'requests':0,'searches':0}  # 下一次显式授权，而非自动重试。
         self.call(self.search,[])
         self.assertEqual(len(self.state['research_search_queries']),1)
+
+    def test_all_searches_fail_then_specific_image_ambiguity(self):
+        class Planner:
+            semantic_review=True
+            index=0
+            def decide(inner,state,folder):
+                inner.index += 1
+                if inner.index <= 3:
+                    return {**self.search,'names':['Visible hypothesis '+str(inner.index)]}
+                if inner.index == 4:
+                    return {'action':'observe_region','region':[0,0,60,60],'hypothesis':'uncertain','reason':'Check ambiguous visible text, not automatic spelling correction'}
+                return {'action':'ask','question':'Please confirm the uncertain landmark text in the crop.'}
+        with patch.object(live,'_get',side_effect=MapFetchError('secret',code='network_error')) as get:
+            state=ride_agent.run(self.state,self.folder,Planner(),budget=6,consent_map=True)
+        self.assertEqual(get.call_count,3)
+        self.assertEqual(state['status'],'waiting_for_user')
+        self.assertEqual(state['research_object_count'],0)
+        self.assertIn('Visible hypothesis 3',state['question'])
+        self.assertIn('review_region',state)
+        self.assertFalse(state.get('corridor_complete'))
+
+    def test_optional_failure_cannot_retry_same_query_in_invocation(self):
+        class Planner:
+            semantic_review=True
+            def decide(inner,state,folder): return self.search
+        with patch.object(live,'_get',side_effect=MapFetchError('secret',code='timeout')) as get:
+            state=ride_agent.run(self.state,self.folder,Planner(),budget=12,consent_map=True)
+        self.assertEqual(get.call_count,1)
+        self.assertEqual(state['research_budget_used']['requests'],1)
+        self.assertEqual(state['research_diagnostic']['reason_code'],'invalid_input')
+        self.assertEqual(state['status'],'waiting_for_user')
+
+    def test_failed_object_cannot_be_automatically_retried(self):
+        self.discover()
+        action={'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Actual returned ID'}
+        with patch.object(live,'_get',side_effect=MapFetchError('secret',code='timeout')) as get:
+            for attempt in range(2):
+                with self.assertRaises(MapFetchError) as caught:
+                    live.execute(self.state,self.folder,action,self.budget,True)
+                self.assertEqual(caught.exception.code,'timeout' if attempt==0 else 'invalid_input')
+        self.assertEqual(get.call_count,1)
+        self.assertEqual(self.budget['requests'],2)  # 一次发现 + 一次失败对象请求
+
+    def test_hard_total_request_budget_stops_after_failed_eighth_request(self):
+        class Planner:
+            semantic_review=True
+            index=0
+            def decide(inner,state,folder):
+                inner.index+=1
+                if inner.index==1: return self.search
+                return {'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Returned search ID; mock budget test'}
+        responses=[json.dumps([{'osm_type':'way','osm_id':5}]).encode()]+[json.dumps({'elements':[self.way]+self.nodes}).encode()]*6+[MapFetchError('secret',code='timeout')]
+        with patch.object(live,'_get',side_effect=responses) as get:
+            state=ride_agent.run(self.state,self.folder,Planner(),budget=12,consent_map=True)
+        self.assertEqual(get.call_count,8)
+        self.assertEqual(state['research_budget_used']['requests'],8)
+        self.assertTrue(state['research_diagnostic']['terminal'])
+        self.assertEqual(state['research_object_count'],3)
+        self.assertFalse(state.get('corridor_complete'))
+        self.assertEqual(state['status'],'waiting_for_user')
+
+    def test_loop_budget_after_failure_has_query_without_extra_request(self):
+        class Planner:
+            semantic_review=True
+            def decide(inner,state,folder): return self.search
+        with patch.object(live,'_get',side_effect=MapFetchError('secret',code='timeout')) as get:
+            state=ride_agent.run(self.state,self.folder,Planner(),budget=1,consent_map=True)
+        self.assertEqual(get.call_count,1)
+        self.assertIn('Fixture Road',state['question'])
+        self.assertIn('上限',state['question'])
 
     @unittest.skipIf(__import__('os').name == 'nt','POSIX flock contention test')
     def test_lock_wait_is_bounded_and_does_not_send_http(self):
@@ -201,6 +304,8 @@ class OnlineTests(unittest.TestCase):
         self.call({'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Search'}, {'elements':[self.way]+self.nodes})
         ride_agent.route_review.observe(self.state,self.folder,{'action':'observe_region','region':[0,0,60,60],'hypothesis':'uncertain','reason':'Unit local image'})
         self.state['review_region']['research_version']=self.state['research_version']
+        self.state['research_failures']=[{'tool':'search_map_evidence','request':{'names':['Uncertain visible text']},'reason_code':'timeout'}]
+        self.state['research_budget_used']={'requests':3,'searches':3}
         response = unittest.mock.MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({'choices':[{'message':{'content':json.dumps({'action':'ask','question':'Mock only'})}}]}).encode()
         with patch.dict('os.environ',{'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-only'}), patch.object(urllib.request,'build_opener') as opener:
@@ -210,6 +315,11 @@ class OnlineTests(unittest.TestCase):
             request=opener.return_value.open.call_args.args[0]
             body=json.loads(request.data)
             self.assertIn('LOCAL_REVIEW_EVIDENCE',json.dumps(body))
+            snapshot=next(item['text'] for msg in body['messages'] if isinstance(msg.get('content'),list)
+                          for item in msg['content'] if item.get('type')=='text' and item['text'].startswith('CURRENT_STAGE_STATE'))
+            self.assertIn('Uncertain visible text',snapshot)
+            self.assertIn('research_budget_used',snapshot)
+            self.assertIn('timeout',snapshot)
         self.assertEqual(self.state['research_presented_version'],self.state['research_version'])
         self.state.pop('research_presented_version')
         with patch.dict('os.environ',{'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-only'}), patch.object(urllib.request,'build_opener') as opener:

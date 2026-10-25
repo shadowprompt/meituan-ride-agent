@@ -72,6 +72,13 @@ assert(resultSummary({goal:'corridor',map_available:false}).includes('地图证�
 assert(!resultSummary({goal:'corridor',map_available:false}).includes('JSON'));
 assert(resultSummary({goal:'corridor',map_available:true}).includes('已有本地地图'));
 assert(resultSummary({corridor_complete:true}).includes('不可导航'));
+const partial={map_provider:'research',research_online:true,research_diagnostic:{reason_code:'timeout',request:{names:['Uncertain landmark']}},map_available:true};
+assert(resultSummary(partial).includes('Uncertain landmark'));
+assert(resultSummary(partial).includes('已成功证据保留'));
+assert(!resultSummary(partial).includes('实时调研不可用'));
+assert(resultSummary({...partial,status:'needs_confirmation',corridor_complete:true}).includes('不可导航'));
+assert(!resultSummary({...partial,status:'needs_confirmation',corridor_complete:true}).includes('局部调研请求失败'));
+assert(resultSummary({...partial,status:'waiting_for_user',question:'请核对 Uncertain landmark'}).includes('Uncertain landmark'));
 assert(resultSummary({execution_state:'failed',recovery_hint:'配置未就绪'}).includes('配置未就绪'));
 assert(resultSummary({execution_state:'failed',goal:'corridor',map_available:false}).includes('地图证据'));
 action=async fn=>fn();render=d=>{};request=async(path,data)=>{calls.push({path,data});return {}};

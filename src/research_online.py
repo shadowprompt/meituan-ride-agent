@@ -187,7 +187,7 @@ def execute(state, folder, action, budget, consent):
                 name.casefold() for item in state['research_requests']
                 if item.get('tool') == 'search_map_evidence' and item.get('outcome') == 'succeeded'
                 for name in item.get('request',{}).get('names',[]) if isinstance(name,str)))
-        if budget['searches'] >= MAX_SEARCHES or query.casefold() in state.get('research_search_queries',[]):
+        if budget['searches'] >= MAX_SEARCHES or query.casefold() in state.get('research_search_queries',[]) or query.casefold() in budget.get('failed_queries',[]):
             fail('invalid_input')
         budget['searches'] += 1
         host = 'nominatim.openstreetmap.org'
@@ -196,7 +196,7 @@ def execute(state, folder, action, budget, consent):
         if set(action) != {'action','object_type','object_id','evidence'}:
             fail('invalid_input')
         kind, ident = action['object_type'], action['object_id']
-        if kind not in ('node','way') or type(ident) is not int or not 1 <= ident <= 999999999999999 or [kind,ident] not in state.get('research_seen_ids',[]):
+        if [kind,ident] in budget.get('failed_objects',[]) or kind not in ('node','way') or type(ident) is not int or not 1 <= ident <= 999999999999999 or [kind,ident] not in state.get('research_seen_ids',[]):
             fail('invalid_input')
         host = 'api.openstreetmap.org'
         # 节点直接核查父 ways；坐标来自已返回 way/full 中的原始节点，不能伪造。
@@ -251,7 +251,15 @@ def execute(state, folder, action, budget, consent):
         return {'tool':name,'status':'found' if hits else 'no_results','objects':hits,'version':state['research_version'], 'coordinate_system':'WGS84','verified':False,'original_gps':False,'source':source,'budget':dict(budget), 'notice':'Live public evidence. Search is discovery only; relations cannot be inspected. Missing coordinates require way/full. Screenshot identity/traversal remains unverified. © OpenStreetMap contributors https://www.openstreetmap.org/copyright'}
     except MapFetchError as exc:
         record.update(outcome='failed',reason_code=exc.code)
+        if name == 'search_map_evidence':
+            budget.setdefault('failed_queries', []).append(query.casefold())
+        else:
+            budget.setdefault('failed_objects', []).append([kind,ident])
         raise
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
         record.update(outcome='failed',reason_code='response_invalid')
+        if name == 'search_map_evidence':
+            budget.setdefault('failed_queries', []).append(query.casefold())
+        else:
+            budget.setdefault('failed_objects', []).append([kind,ident])
         fail('response_invalid')
