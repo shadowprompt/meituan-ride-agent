@@ -399,6 +399,8 @@ class RideServer(ThreadingHTTPServer):
         result['execution'] = {'source':execution.get('source', 'local' if state.get('semantic_review_required') is False else 'unknown'),
                                'api_responses':execution.get('api_responses', 0)}
         result['review_status'] = (review.get('result', 'not_reviewed') if current_version and review.get('version') == current_version else 'not_reviewed')
+        # 只公开是否具备当前本地地图，不公开路径，也不触发下载。
+        result['map_available'] = (folder/'task'/'map.osm').is_file()
         result['centerlined'] = bool(state.get('centerlined'))
         result['user_components_applied'] = 'component_ids' in state.get('user_extraction_constraints', {})
         result['task_id'] = task_id
@@ -642,16 +644,20 @@ class RideServer(ThreadingHTTPServer):
 
 PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>骑行截图分析（本地）</title>
-<style>body{max-width:950px;margin:2em auto;padding:0 1em;font-family:system-ui;line-height:1.6}fieldset{margin:1em 0}label{display:block;margin:.5em 0}textarea{width:95%;height:6em}button{padding:.5em 1em}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1em}img{max-width:100%;max-height:420px}input[type=text]{width:70%}.consent{border:2px solid #855400;background:#fff4cf;padding:1em;font-weight:bold}</style>
-<h1>骑行截图分析 · 本地网页</h1><p>结果只是未验证候选，不是真实 GPS，不可用于导航。Demo 为固定离线演示，并非模型识别。截图不会通过本网页向外发送；只有明确同意的 API / 地图步骤会访问外部服务。</p>
-<fieldset><legend>1. 创建任务</legend><label>截图（PNG/JPEG/WebP，≤20 MB、≤400万像素） <input id="image" type="file" accept="image/png,image/jpeg,image/webp"></label>
-<label>模式 <select id="mode"><option value="demo">离线 Demo</option><option value="api">真实视觉 API</option></select></label>
-<label>目标 <select id="goal"><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">严格配准后道路匹配</option><option value="corridor">读地名→本地OSM道路走廊（独立未确认候选）</option></select></label>
+<style>body{max-width:950px;margin:2em auto;padding:0 1em;font-family:system-ui;line-height:1.6}fieldset{margin:1em 0}label{display:block;margin:.5em 0}textarea{width:95%;height:6em}button{padding:.5em 1em}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eee;padding:1em}img{max-width:100%;max-height:420px}input[type=text]{width:70%}details{margin:1em 0;border:1px solid #ccc;padding:.6em}summary{cursor:pointer;font-weight:bold}.result{border:2px solid #397b68;padding:1em;background:#f3faf7}.consent{border:2px solid #855400;background:#fff4cf;padding:1em;font-weight:bold}</style>
+<h1>上传骑行截图，识别道路线索</h1>
+<p>上传截图 → 本次授权 → 开始识别 → 查看结果或具体缺口。所有坐标只是未验证候选，非原始 GPS，不可导航。</p>
+<p id="capabilityNotice">当前尚未接通“从截图自动定位并获取地图”的后台能力。可让模型读取图中地名与道路线索，但仅上传截图还不能自动交付经纬度。不会静默下载地图或上传图片；无需为尝试识别先填道路名、控制点或技术文件。</p>
+<fieldset><legend>1. 上传截图并授权</legend><label>截图（PNG/JPEG/WebP，≤20 MB、≤400万像素） <input id="image" type="file" accept="image/png,image/jpeg,image/webp"></label>
+<details id="startAdvanced"><summary>高级选项：运行模式与手动目标</summary><p>默认使用真实视觉 API 识别道路线索；需要管理员预先配置模型服务。离线 Demo 是固定演示，并非自动识路。这里仅简化界面，未补齐自动地图能力。</p>
+<label>模式 <select id="mode"><option value="api">真实视觉 API（需要本次授权）</option><option value="demo">离线 Demo（固定演示）</option></select></label>
+<label>手动目标 <select id="goal"><option value="corridor">读图识路 → 本地地图道路候选（默认）</option><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">严格配准后道路匹配</option></select></label></details>
 <label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（含本地OSM道路查询结果，不含完整地图文件；创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
-<button id="create">创建并开始</button></fieldset>
-<fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><p id="executionNotice" role="status" style="font-weight:bold;border:2px solid #b66;padding:12px"></p><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset>
-<fieldset><legend>3. 回答 / 修正 / 上传证据</legend><label>回答（Demo 首次可填 {"crop":[0,0,80,60],"color":"#00BFA5"}）<textarea id="answer"></textarea></label>
-<fieldset><legend>候选像素区域 · 可视多选</legend>
+<button id="create">开始识别</button></fieldset>
+<section class="result" aria-labelledby="resultTitle"><h2 id="resultTitle">2. 结果 / 具体缺口</h2><p id="resultSummary" role="status" aria-live="polite">尚未开始。请选择截图，确认本次上传授权后点击“开始识别”。</p></section>
+<details id="taskRecovery"><summary>恢复已有任务（只读取，不自动重跑）</summary><fieldset><legend>任务恢复与执行详情</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><p id="executionNotice" role="status" style="font-weight:bold;border:2px solid #b66;padding:12px"></p><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset></details>
+<fieldset><legend>3. 候选查看与必要时修正（可选）</legend><details id="answerAdvanced"><summary>高级选项：回答模型问题</summary><label>回答（Demo 首次可填 {"crop":[0,0,80,60],"color":"#00BFA5"}）<textarea id="answer"></textarea></label><p>回答后在下方高级工具点击“继续处理”；API 任务须重新勾选本次上传授权。</p></details>
+<details id="candidatePanel"><summary>候选像素查看与选择（保留原有本地操作）</summary><fieldset><legend>候选像素区域 · 可视多选</legend>
 <p>原图裁剪与精确候选像素，不是只有包围框。点击像素或“查看”高亮该候选、淡化其余，并查看局部放大。绿色保留，橙色排除；勾选立即本地预览，不请求模型、不计算中心线。选择不是路线真实性确认，不连接断点、不确定路径顺序或 GPS。</p>
 <p id="componentNotice" role="status" aria-live="polite"></p>
 <canvas id="componentCanvas" aria-label="原图裁剪与候选像素总览；也可用下方查看按钮键盘操作" style="max-width:100%;height:auto"></canvas>
@@ -661,13 +667,14 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <p>仅本地提交选中编号并重新生成，不上传、不下载地图；不会提交回答或颜色/裁剪修改。未选区域仍保留审计，空选不可提交。</p>
 <div id="reviewEntry" hidden><p>API 模式不代表每步已调用模型。继续将使用当前任务已保存的候选选择与图像证据，不重新上传文件、不需要回答或重复选择；可能提出歧义问题或待批准补孔提议。</p>
 <label class="consent"><input id="reviewConsent" type="checkbox">仅本次同意上传当前任务截图、派生预览、诊断及对话供模型复核（不继承创建授权；完成或失败后取消）</label>
-<button id="continueReview" type="button">授权模型复核并继续</button></div></fieldset>
-<fieldset><legend>逐孔人工复核 · 当前任务内纠错</legend>
+<button id="continueReview" type="button">授权模型复核并继续</button></div></fieldset></details>
+<details id="holeAdvanced"><summary>高级选项：逐孔纠错</summary><fieldset><legend>逐孔人工复核 · 当前任务内纠错</legend>
 <p>先生成当前原图/掩码绑定预览，默认全部保留。每孔三联图依次为未叠加原图、精确孔洞标红、二值掩码，可点击图片打开原尺寸放大。只有明确的漏选才勾选；真实回转孔、相邻臂间隙、边界混合孔请保留。暂不支持局部画笔，不能整孔安全填时不要选择。不连接图标开放断裂，不按环数最小化自动修复。</p>
 <div id="holeProposal"></div><button id="previewHoles" type="button">生成当前任务逐孔预览</button><p id="holeNotice" role="status"></p><div id="holes"></div>
 <label><input id="holeAck" type="checkbox">我已逐孔对照未叠加原图，所选孔是漏选而非真实间隙</label>
 <button id="applyHoles" type="button" disabled>应用选中补孔并重新生成中心线</button>
-<p>本地操作，不上传、不下载地图。仅增加选中封闭小孔，不删除原前景；前后掩码、原图、选择与中心线独立审计。已应用 mask 修正不代表验证了路线顺序或 GPS。</p></fieldset>
+<p>本地操作，不上传、不下载地图。仅增加选中封闭小孔，不删除原前景；前后掩码、原图、选择与中心线独立审计。已应用 mask 修正不代表验证了路线顺序或 GPS。</p></fieldset></details>
+<details id="toolsAdvanced"><summary>高级选项：控制点、地图、道路假设与本地调试</summary><p>这些是专家补充证据工具，不是普通识别的必填步骤；不会预填真实道路假设或生成控制点。</p>
 <label>修正颜色 <input id="color" type="text" placeholder="#00BFA5，空白不修改"></label>
 <label>修正裁剪 <input id="crop" type="text" placeholder="[左,上,右,下]，空白不修改"></label>
 <p>裁剪变更会使旧控制点失效。控制点必须使用当前裁剪坐标，网页不会自动地理定位。</p>
@@ -676,7 +683,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <p id="roadsNotice">注意：勾选下载地图或上传本地 OSM 后，点击“继续处理”会将任务目标自动切换为 roads（道路候选匹配），即使原目标为像素提取或配准。下载须先完成配准并通过独立检查；下载授权与 API 上传授权相互独立，未勾选不会下载。</p>
 <label><input id="fetch" type="checkbox">下载当前配准范围的地图（不可同时上传 OSM）</label><label><input id="mapConsent" type="checkbox">仅本次同意向 Overpass 发送地理范围（不发送截图）</label>
 <label><input id="localOnly" type="checkbox">仅本地继续（已有颜色/裁剪或有效掩码；不上传、不调用模型，可恢复中心线；地图下载仍单独授权）</label>
-<p>道路走廊不要求像素配准。仅使用用户本地OSM，模型可在本次上传授权后读原图并提出道路/节点假设；不下载地图，不恢复原始GPS。</p><label><input id="corridorMode" type="checkbox">明确切换独立道路走廊目标</label><label>精确道路名（每行一个，可先查询节点）<textarea id="roadNames"></textarea></label><label>有依据的道路假设 JSON <input id="roadHypothesis" type="file" accept=".json"></label><button id="resume">继续处理</button></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。structure-diagnostics.png 黄框仅表示被保守保护的间隙总范围，不表示已识别折返；同路往返次数和先后须人工确认。</p><div id="artifacts"></div>
+<p>道路走廊不要求像素配准。仅使用用户本地OSM，模型可在本次上传授权后读原图并提出道路/节点假设；不下载地图，不恢复原始GPS。</p><label><input id="corridorMode" type="checkbox">明确切换独立道路走廊目标</label><label>精确道路名（每行一个，可先查询节点）<textarea id="roadNames"></textarea></label><label>有依据的道路假设 JSON <input id="roadHypothesis" type="file" accept=".json"></label><button id="resume">继续处理</button></details></fieldset><p id="error" role="alert"></p><h2>产物预览</h2><p>失效产物仅提供审计链接，不显示为当前预览。当前产物也未经路线确认。structure-diagnostics.png 黄框仅表示被保守保护的间隙总范围，不表示已识别折返；同路往返次数和先后须人工确认。</p><div id="artifacts"></div>
 <p><a href="/pixel-route">无需 API：本地人工有序像素路线标注、保存与导出</a></p>
 <script nonce="__TOKEN__">
 'use strict';const token='__TOKEN__';const $=id=>document.getElementById(id);
@@ -692,7 +699,17 @@ function schedulePoll(d){
  pollTimer=setTimeout(async()=>{if($('task').value.trim()!==id){stopPolling();return;}try{const next=await request('/api/tasks/'+id);if($('task').value.trim()===id)render(next);}catch(e){stopPolling();$('error').textContent='状态刷新失败，请手动刷新；不会重试上传。'+e.message;}},1000);
 }
 function lockRunning(){if(executionBusy)for(const b of document.querySelectorAll('button'))if(b.id!=='refresh')b.disabled=true;}
-function render(d){schedulePoll(d);for(const b of document.querySelectorAll('button'))b.disabled=false;$('reviewEntry').hidden=d.mode!=='api';$('reviewConsent').checked=false;const source={local:'本地执行',api:'API复核流程',unknown:'历史执行来源未知'}[d.execution?.source]||'执行来源未知';const review={not_reviewed:'尚未模型复核',consistent:'模型已报告当前版本可见一致（非真值验证）',needs_revision:'模型发现当前版本需要修正',ambiguous:'模型报告当前版本存在歧义'}[d.review_status]||'尚未模型复核';$('executionNotice').textContent='后台执行：'+({queued:'排队中',running:'运行中',succeeded:'本轮已结束（非真值验证）',failed:'本轮失败',idle:'历史任务待继续'}[d.execution_state]||'待查询')+'。'+(d.web_execution?.recovery_hint||'')+(d.execution?.source==='local'&&d.centerlined&&d.user_components_applied?'候选已应用、本地中心线已生成，':'')+review+'。本轮来源：'+source+'；成功模型响应：'+(d.execution?.api_responses||0)+'。成功响应为0不代表未发送原图（可能已发送但未收到有效响应）；mode仅为任务配置；始终未验证、非原始GPS。';$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}$('previewHoles').disabled=!!$('proposalAck');lockRunning();}
+// 用当前服务端事实概括缺口；缺地图时不向普通用户堆叠 JSON 操作要求。
+function resultSummary(d){
+ if(['queued','running'].includes(d.execution_state))return '正在识别，请稍候；只刷新状态，不会重复上传或重跑任务。当前仍缺自动定位与地图获取能力，本轮不保证输出经纬度。';
+ if(d.execution_state==='failed'||d.error_category)return '本轮未完成。'+(d.recovery_hint||d.web_execution?.recovery_hint||'请查看任务详情中的安全提示；不会自动重试上传。')+(d.goal==='corridor'&&!d.map_available?' 同时仍缺地图能力：本任务无本地地图，后台尚未接通自动定位与地图获取，不能交付经纬度。':'');
+ if(d.corridor_complete)return '已生成道路走廊经纬度候选，请在下方查看产物。尚未确认起终点、经过顺序及完整性，非原始 GPS，不可导航。';
+ if(d.goal==='corridor'&&!d.map_available)return '仍缺地图能力：本任务没有可查询的本地地图，后台也尚不能依据截图自动定位并获取地图。模型即使读出道路线索，也不能据此生成可信经纬度。本轮未完成经纬度交付；普通用户无需准备技术文件。已有线索可在任务详情查看，专家可选用高级工具补充证据。';
+ if(d.goal==='corridor')return '已有本地地图，但尚未形成有依据的完整道路候选。请查看任务详情中的识别线索或具体问题；不会猜测坐标，也不会自动继续上传。';
+ if(d.approximate_complete)return '已生成近似定位候选，请查看下方产物；未验证、非原始 GPS，不可导航。';
+ return '当前任务尚不能证明经纬度交付已完成。请查看下方已有产物；像素与中心线不等于 GPS。需要时展开任务详情或高级工具，刷新不会自动重跑。';
+}
+function render(d){schedulePoll(d);$('resultSummary').textContent=resultSummary(d);$('candidatePanel').open=!!d.component_selection?.candidates?.length;for(const b of document.querySelectorAll('button'))b.disabled=false;$('reviewEntry').hidden=d.mode!=='api';$('reviewConsent').checked=false;const source={local:'本地执行',api:'API复核流程',unknown:'历史执行来源未知'}[d.execution?.source]||'执行来源未知';const review={not_reviewed:'尚未模型复核',consistent:'模型已报告当前版本可见一致（非真值验证）',needs_revision:'模型发现当前版本需要修正',ambiguous:'模型报告当前版本存在歧义'}[d.review_status]||'尚未模型复核';$('executionNotice').textContent='后台执行：'+({queued:'排队中',running:'运行中',succeeded:'本轮已结束（非真值验证）',failed:'本轮失败',idle:'历史任务待继续'}[d.execution_state]||'待查询')+'。'+(d.web_execution?.recovery_hint||'')+(d.execution?.source==='local'&&d.centerlined&&d.user_components_applied?'候选已应用、本地中心线已生成，':'')+review+'。本轮来源：'+source+'；成功模型响应：'+(d.execution?.api_responses||0)+'。成功响应为0不代表未发送原图（可能已发送但未收到有效响应）；mode仅为任务配置；始终未验证、非原始GPS。';$('task').value=d.task_id;$('status').textContent=JSON.stringify(d,null,2);$('question').textContent=typeof d.question==='string'?d.question:JSON.stringify(d.question||'无');renderQuestionEvidence(d);$('candidateDecision').textContent=d.candidate_decision?JSON.stringify(d.candidate_decision.decisions,null,2):'暂无模型候选决定；用户选择优先';renderComponents(d);renderHoles(d);renderHoleProposal(d);$('artifacts').replaceChildren();for(const a of d.artifacts||[]){const div=document.createElement('div'),link=document.createElement('a');link.textContent=(a.current?'[当前未验证] ':'[已失效/仅审计] ')+a.name;link.href=a.url;link.target='_blank';link.rel='noopener';div.append(link);if(a.current&&a.name.endsWith('.png')&&!a.name.endsWith('component-ids.png')){const img=document.createElement('img');img.src=a.url;img.alt=a.name;div.append(document.createElement('br'),img);}$('artifacts').append(div);}$('previewHoles').disabled=!!$('proposalAck');lockRunning();}
 // 所有预览只读本地白名单产物；编号逐像素解码，不把重叠包围框当成候选。
 let componentView=null, componentEpoch=0;
 function selectedComponentIds(){return Array.from(document.querySelectorAll('input[name=component]:checked'),b=>Number(b.value));}
