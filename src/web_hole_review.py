@@ -80,7 +80,7 @@ def apply(folder, data):
     Image.fromarray(rgb).save(out/'overlay-after.png')
     # 从此刻起若磁盘写失败，旧下游产物也不能继续冒充当前结果。
     state.update(extracted=False, centerlined=False, registered=False,
-                 registration_gate_passed=False, match_attempted=False, verified=False)
+                 registration_gate_passed=False, match_attempted=False, verified=False, approximate_complete=False)
     state.pop('summary', None)
     for key in ('route_review','review_region','review_presented_version','review_presented_regions'):
         state.pop(key, None)

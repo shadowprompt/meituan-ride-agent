@@ -18,6 +18,7 @@ from PIL import Image, ImageOps
 from extract_route import extract, parse_color
 from centerline import process
 from register_pixels import register, fit_registration
+from approximate_location import approximate, fit_approximation
 from road_match import match, _load_segments
 from map_fetch import fetch_roads
 from inspect_colors import inspect_colors
@@ -292,6 +293,8 @@ class DemoPlanner:
             if not controls_current(state,folder):
                 return {'action':'ask','question':'请用 resume --controls-file 提供 WGS84 控制点及独立检查点文件；不能从像素猜测地理坐标。'}
             return {'action':'register'}
+        if state.get('goal') == 'approximate' and not state.get('approximate_complete'):
+            return {'action':'ask', 'question':'请提供带来源与不确定度的 --approximate-anchors-file'}
         if state.get('goal') == 'roads' and not state.get('match_attempted'):
             if not (Path(folder)/'map.osm').exists():
                 if state.get('map_download_requested'):
@@ -308,6 +311,8 @@ class DemoPlanner:
 
 def download_task_map(state, folder):
     """Bounds come only from checked local registration, never model arguments."""
+    if state.get('goal') == 'approximate' or state.get('approximate_complete'):
+        raise ValueError('Approximate candidates cannot download maps')
     if not state.get('registered') or not state.get('registration_gate_passed'):
         raise ValueError('Checked registration required before map download')
     segments = _load_segments(Path(folder)/'registration/registered-segments.geojson')
@@ -322,6 +327,13 @@ def download_task_map(state, folder):
     return result
 
 
+def anchors_current(state, folder):
+    crop = state.get('extraction_config', {}).get('crop')
+    return (bool(crop) and state.get('anchors_crop') == crop
+            and not state.get('anchors_invalidated', False)
+            and (Path(folder)/'anchors.json').exists())
+
+
 def controls_current(state, folder):
     """文件存在不代表坐标可用；控制点必须显式绑定到当前裁剪坐标系。"""
     crop = state.get('extraction_config',{}).get('crop')
@@ -333,7 +345,7 @@ def controls_current(state, folder):
 def invalidate_extraction(state, invalidate_controls=False):
     """只撤销当前证据标记，旧产物留在磁盘供审计，不再当作有效结果。"""
     state.update(extracted=False, centerlined=False, registered=False,
-                 registration_gate_passed=False, match_attempted=False)
+                 registration_gate_passed=False, match_attempted=False, approximate_complete=False)
     for key in ('route_review', 'review_presented_version', 'review_region', 'review_presented_regions'):
         state.pop(key, None)
     for key in ('candidate_observation', 'candidate_presented', 'candidate_decision', 'question_evidence'):
@@ -348,6 +360,7 @@ def invalidate_extraction(state, invalidate_controls=False):
     if invalidate_controls:
         # 控制点使用裁剪局部像素；裁剪框变化后绝不能继续套用旧坐标。
         state['controls_invalidated'] = True
+        state['anchors_invalidated'] = True
 
 
 def apply_extraction_correction(state, color=None, crop=None):
@@ -405,8 +418,10 @@ MAX_DELIVERY_CORRECTIONS = 3
 def delivery_requirements(state, folder):
     """Current evidence only; never promote missing tools to success."""
     required = ['extract', 'centerline']
+    if state.get('goal') == 'approximate':
+        required.append('approximate')
     flags = {'extract':'extracted', 'centerline':'centerlined',
-             'register':'registered', 'match':'match_attempted'}
+             'register':'registered', 'match':'match_attempted', 'approximate':'approximate_complete'}
     goal = state.get('goal','pixels')
     if goal in ('registration','roads'):
         required.append('register')
@@ -455,6 +470,11 @@ def run(state, folder, planner, budget=12, consent_map=False):
             elif (getattr(planner, 'local_pipeline', False) and state.get('extracted') and not state.get('centerlined')
                   and not state.get('component_selection', {}).get('requires_selection')):
                 action = {'action':'centerline'}
+            elif state.get('centerlined') and state.get('goal') == 'approximate' and not state.get('approximate_complete'):
+                if anchors_current(state, folder):
+                    action = {'action':'approximate'}
+                else:
+                    action = {'action':'ask', 'question':'请上传当前裁剪 local_mask 对应的近似锚点 JSON（至少3个不共线点，WGS84、来源和不确定度）。不会从图名或模型猜测坐标。'}
             elif (getattr(planner, 'local_pipeline', False) and state.get('centerlined')
                   and state.get('goal') in ('registration', 'roads')
                   and controls_current(state, folder) and not state.get('registered')):
@@ -464,8 +484,11 @@ def run(state, folder, planner, budget=12, consent_map=False):
                   and state.get('extracted') and state.get('centerlined')
                   and not state['semantic_review_required']
                   and (state.get('goal','pixels') == 'pixels'
-                       or (state.get('goal') == 'registration' and state.get('registered')))):
+                       or (state.get('goal') == 'registration' and state.get('registered'))
+                       or (state.get('goal') == 'approximate' and state.get('approximate_complete')))):
                 summary = '本地提线及中心线候选已生成，尚未验证完整路线、真实起终点或行进顺序。请检查原图、掩码与骨架；不可导航。'
+                if state.get('goal') == 'approximate':
+                    summary += '已导出近似WGS84分段候选，含来源、锚点不确定度、残差和外推说明；未严格配准、未验证、非原始GPS、不可导航。'
                 if state.get('goal') == 'registration':
                     summary += ('已按用户控制点导出 WGS84 未排序分段经纬度候选；独立误差门槛'
                                 + ('通过' if state.get('registration_gate_passed') else '未通过')
@@ -560,6 +583,7 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 state['extracted'] = result['status'] != 'no_detection'
                 state['centerlined'] = False
                 state['registered'] = False
+                state['approximate_complete'] = False
                 state['match_attempted'] = False
                 # 使用提取器实际返回的定向原图尺寸和裁剪，不从预览猜坐标。
                 coverage = crop_diagnostics(result['crop_xyxy'], result['oriented_image_size'])
@@ -576,17 +600,30 @@ def run(state, folder, planner, budget=12, consent_map=False):
                     raise ValueError('Successful unambiguous extract or explicit component selection required first')
                 for key in ('route_review', 'review_presented_version', 'review_region', 'review_presented_regions'):
                     state.pop(key, None)
-                state.update(centerlined=False,registered=False,match_attempted=False)
+                state.update(centerlined=False,registered=False,match_attempted=False,approximate_complete=False)
                 save(state,folder)
                 stage = 'centerline'
                 result = process(Path(folder)/'extraction/mask.png',Path(folder)/'centerline')
                 state['centerlined'] = result['status'] != 'no_detection'
                 state['registered'] = False
+                state['approximate_complete'] = False
                 state['match_attempted'] = False
                 tool_result = {'tool':'centerline', **{k:result[k] for k in ('status','component_count','cycle_rank','skeleton_pixels','warnings')},
                                'endpoint_count':len(result['endpoints_xy']), 'junction_pixel_count':len(result['junction_pixels_xy']),
                                'has_geometric_order':result['ordered_path_xy'] is not None}
+            elif name == 'approximate':
+                if state.get('goal') != 'approximate' or not state.get('centerlined') or not anchors_current(state, folder):
+                    raise ValueError('Current user/evidence anchors and approximate goal required')
+                if set(action) != {'action'}:
+                    raise ValueError('Approximation accepts no model-generated coordinates')
+                state.update(approximate_complete=False, registered=False, registration_gate_passed=False, match_attempted=False)
+                save(state, folder)
+                result = approximate(Path(folder)/'centerline/pixel-graph.json', Path(folder)/'anchors.json', Path(folder)/'approximation')
+                state['approximate_complete'] = True
+                tool_result = {'tool':'approximate', 'approximate':True, 'verified':False, 'warnings':result['warnings']}
             elif name == 'register':
+                if state.get('goal') == 'approximate' or state.get('approximate_complete'):
+                    raise ValueError('Approximate goal cannot enter strict registration')
                 if not state.get('centerlined'):
                     raise ValueError('Centerline required before registration')
                 if not controls_current(state,folder):
@@ -610,6 +647,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 result = download_task_map(state, folder)
                 tool_result = {'tool':'fetch_map', **result}
             elif name == 'match':
+                if state.get('goal') == 'approximate' or state.get('approximate_complete'):
+                    raise ValueError('Approximate candidates cannot enter road matching')
                 if not state.get('registered'):
                     raise ValueError('Registration required before road matching')
                 if not state.get('registration_gate_passed'):
@@ -660,6 +699,9 @@ def run(state, folder, planner, budget=12, consent_map=False):
                                         'extraction/structure-diagnostics.png'])
                 if state.get('colors_inspected'):
                     state['artifacts'].extend(['inspection/colors.json','inspection/color-preview.png'])
+                if state.get('approximate_complete') and state.get('goal') == 'approximate':
+                    state['artifacts'].extend(['approximation/approximation.json','approximation/approximate-segments.geojson'])
+                    state['registration_notice'] = '近似定位候选：来源未核实，不确定度不代表误差上界；不可导航，不可用于道路匹配。'
                 if state.get('registered'):
                     state['artifacts'].extend(['registration/registration.json','registration/registered-segments.geojson'])
                     state['registration_notice'] = 'Manual registration candidate only; independent gate: '+str(state.get('registration_gate_passed'))
@@ -670,7 +712,7 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 save(state,folder)
                 return state
             else:
-                raise ValueError('Unknown action; only ask/inspect_colors/observe_region/review_route/extract/centerline/register/fetch_map/match/deliver allowed')
+                raise ValueError('Unknown action; only ask/inspect_colors/observe_region/review_route/extract/centerline/register/approximate/fetch_map/match/deliver allowed')
             state['messages'].append({'role':'user','content':'LOCAL_TOOL_RESULT '+json.dumps(tool_result,ensure_ascii=False)})
             state['status'] = 'analyzing'
             state.pop('question',None)
@@ -695,7 +737,7 @@ def run(state, folder, planner, budget=12, consent_map=False):
 
 
 def start(image_path, folder, demo=False, goal="pixels"):
-    if goal not in ('pixels','registration','roads'):
+    if goal not in ('pixels','registration','roads','approximate'):
         raise ValueError('Unknown goal')
     folder = Path(folder)
     if folder.exists() and any(folder.iterdir()):
@@ -732,13 +774,14 @@ def main():
     begin = sub.add_parser('start')
     begin.add_argument('--image',required=True)
     begin.add_argument('--demo',action='store_true')
-    begin.add_argument('--goal',choices=['pixels','registration','roads'],default='pixels')
+    begin.add_argument('--goal',choices=['pixels','registration','roads','approximate'],default='pixels')
     resume = sub.add_parser('resume')
     resume.add_argument('--review-continue', action='store_true', help='本次授权后复核当前证据，不要求新回答、不重提取或重选')
     resume.add_argument('--local-only', action='store_true', help='仅用已有证据本地继续，不上传截图，不调用模型 API')
     resume.add_argument('--fetch-map', action='store_true', help='Download roads for checked registration bounds; requires --consent-map')
     resume.add_argument('--consent-map', action='store_true', help='Allow this invocation to send route bounds to Overpass (not screenshot)')
     resume.add_argument('--osm-file',help='Local OSM XML only; model cannot choose filesystem paths')
+    resume.add_argument('--approximate-anchors-file', help='明确选择近似模式；带来源和不确定度的WGS84锚点JSON，不通过严格配准')
     resume.add_argument('--controls-file',help='User supplied WGS84 landmark JSON; never produced by model')
     resume.add_argument('--component-ids', nargs='+', type=int, help='用户选择当前候选分量编号（可多个）；仅几何候选，非路线验证')
     resume.add_argument('--color',help='用户修正轨迹颜色，如 #00BFA5；保留已知裁剪框')
@@ -764,7 +807,7 @@ def main():
             review_continue = getattr(args, 'review_continue', False)
             if review_continue and (demo or local_only or not args.consent_upload):
                 raise ValueError('模型复核继续仅限API任务且须本次上传授权，不能同时仅本地')
-            if review_continue and any((args.answer, args.answer_file, args.color, args.crop, args.component_ids, args.controls_file, args.osm_file, args.fetch_map, args.reset_extraction)):
+            if review_continue and any((args.answer, args.answer_file, args.color, args.crop, args.component_ids, args.controls_file, args.approximate_anchors_file, args.osm_file, args.fetch_map, args.reset_extraction)):
                 raise ValueError('复核继续不接受修改或文件，使用当前已保存证据')
             planner = LocalPlanner() if local_only else (DemoPlanner() if demo else ConsentedPlanner())
             state = start(args.image,args.task_dir,demo,args.goal) if args.command=='start' else load(args.task_dir)
@@ -773,7 +816,7 @@ def main():
                     raise ValueError('Choose fetch-map or osm-file, not both')
                 if args.fetch_map and not args.consent_map:
                     raise ValueError('--fetch-map requires explicit --consent-map each invocation')
-                if not args.answer and not args.answer_file and not args.controls_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue:
+                if not args.answer and not args.answer_file and not args.controls_file and not args.approximate_anchors_file and not args.osm_file and not args.fetch_map and args.color is None and args.crop is None and args.component_ids is None and not local_only and not review_continue:
                     raise ValueError('Provide answer, answer-file, controls-file or osm-file')
                 answer = args.answer or ('用户本次明确授权上传当前任务截图、派生预览、诊断和对话，继续复核当前已保存证据；保留用户候选选择，不重新提取。' if review_continue else 'User supplied local evidence file.')
                 if args.color is not None or args.crop is not None:
@@ -784,6 +827,8 @@ def main():
                     if args.color is not None or args.crop is not None:
                         raise ValueError('颜色/裁剪改变后须先查看新候选，不能同时提交旧编号')
                     apply_component_selection(state,args.task_dir,args.component_ids)
+                if state.get('goal') == 'approximate' and (args.osm_file or args.fetch_map) and not args.controls_file:
+                    raise ValueError('Approximate mode requires explicit strict controls before roads')
                 if args.fetch_map:
                     if (Path(args.task_dir)/'map.osm').exists():
                         raise ValueError('Task already has map data; use a fresh task to change download bounds')
@@ -798,6 +843,22 @@ def main():
                     state['map_download_requested'] = False
                     state.pop('map_download', None)
                     state['match_attempted'] = False
+                if args.approximate_anchors_file and (args.controls_file or args.osm_file or args.fetch_map):
+                    raise ValueError('Approximation cannot combine strict controls, OSM or map download')
+                if args.approximate_anchors_file:
+                    if not local_only:
+                        raise ValueError('Approximate anchors require --local-only; no model upload')
+                    anchor_path = Path(args.approximate_anchors_file)
+                    if anchor_path.stat().st_size > 1000000:
+                        raise ValueError('Anchors file exceeds 1 MB')
+                    anchors = json.loads(anchor_path.read_text(encoding='utf-8-sig'))
+                    fit_approximation(anchors)
+                    crop = state.get('extraction_config', {}).get('crop')
+                    if not crop or not state.get('extracted'):
+                        raise ValueError('Extract current pixels before supplying anchors')
+                    (Path(args.task_dir)/'anchors.json').write_text(json.dumps(anchors, allow_nan=False), encoding='utf-8')
+                    state.update(goal='approximate', anchors_crop=list(crop), anchors_invalidated=False,
+                                 approximate_complete=False, registered=False, registration_gate_passed=False, match_attempted=False, map_download_requested=False)
                 if args.controls_file:
                     controls_path = Path(args.controls_file)
                     if controls_path.stat().st_size > 1000000:
@@ -810,6 +871,7 @@ def main():
                     (Path(args.task_dir)/'controls.json').write_text(json.dumps(controls,allow_nan=False),encoding='utf-8')
                     state['controls_crop'] = list(crop)
                     state['registered'] = False
+                    state['approximate_complete'] = False
                     state['registration_gate_passed'] = False
                     state['controls_invalidated'] = False
                     state['match_attempted'] = False

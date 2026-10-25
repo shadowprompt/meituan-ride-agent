@@ -1,8 +1,8 @@
 """Loopback-only Chinese UI. Run: python src/ride_web.py --port 8765.
 
-POST /api/tasks (202, background): {image_base64, mode: demo|api, goal: pixels|registration|roads,
+POST /api/tasks (202, background): {image_base64, mode: demo|api, goal: pixels|registration|roads|approximate,
 consent_upload: bool}. POST /api/tasks/<uuid>/resume: {answer?, color?, crop?,
-controls_json?, osm_xml?, fetch_map?, consent_map?, consent_upload?}.
+controls_json?, approximate_anchors_json?, osm_xml?, fetch_map?, consent_map?, consent_upload?}.
 Every POST requires X-CSRF-Token from GET /api/config (or the root UI).
 GET /api/tasks/<uuid> returns a filtered status; GET /artifacts/<uuid>/<name>
 serves only deterministic allowlisted outputs. Nothing exposes credentials/state/input.
@@ -41,6 +41,7 @@ ARTIFACTS = frozenset((
     'extraction/structure-diagnostics.png',
     'centerline/skeleton.png', 'centerline/graph-overlay.png', 'centerline/pixel-graph.json',
     'registration/registration.json', 'registration/registered-segments.geojson',
+    'approximation/approximation.json', 'approximation/approximate-segments.geojson',
     'roads/road-match.json', 'roads/road-candidates.geojson', 'roads/road-overlay.png',
 ))
 UUID_RE = re.compile(r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\Z')
@@ -76,6 +77,8 @@ def artifact_current(state, name):
     valid = valid and bool(state.get('centerlined'))
     if prefix == 'centerline':
         return valid
+    if prefix == 'approximation':
+        return valid and state.get('goal') == 'approximate' and bool(state.get('approximate_complete'))
     valid = valid and bool(state.get('registered'))
     if prefix == 'registration':
         return valid
@@ -354,7 +357,7 @@ class RideServer(ThreadingHTTPServer):
         except (ValueError, OSError, TypeError, KeyError):
             raise WebError('任务状态尚未生成或无法读取', 409) from None
         fields = ('candidate_decision', 'question_evidence', 'route_review', 'component_selection', 'mode', 'goal', 'status', 'question', 'summary', 'warnings',
-                  'registration_notice', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
+                  'registration_notice', 'approximate_complete', 'road_notice', 'verified', 'original_gps', 'hole_correction', 'hole_proposal')
         result = {key: state[key] for key in fields if key in state}
         if state.get('error') or state.get('status') == 'error':
             category = processing_category(state)
@@ -440,7 +443,7 @@ class RideServer(ThreadingHTTPServer):
             raise WebError('未知创建参数（不接受文件路径）')
         mode = data.get('mode', 'demo')
         goal = data.get('goal', 'pixels')
-        if mode not in ('demo', 'api') or goal not in ('pixels', 'registration', 'roads'):
+        if mode not in ('demo', 'api') or goal not in ('pixels', 'registration', 'roads', 'approximate'):
             raise WebError('模式或目标无效')
         consent = flag(data, 'consent_upload')
         if mode == 'api' and not consent:
@@ -485,7 +488,7 @@ class RideServer(ThreadingHTTPServer):
 
     def resume(self, task_id, data, *, asynchronous=False):
         self.idle(task_id)
-        allowed = {'component_ids', 'answer', 'color', 'crop', 'controls_json', 'osm_xml',
+        allowed = {'component_ids', 'answer', 'color', 'crop', 'controls_json', 'approximate_anchors_json', 'osm_xml',
                    'fetch_map', 'consent_map', 'consent_upload', 'local_only', 'review_continue'}
         if data.keys() - allowed:
             raise WebError('未知继续参数（不接受文件路径）')
@@ -542,6 +545,19 @@ class RideServer(ThreadingHTTPServer):
             if 'color' in data or 'crop' in data:
                 raise WebError('请先修改颜色/裁剪并查看新候选，再选择编号')
             args += ['--component-ids', *map(str, ids)]
+        if 'approximate_anchors_json' in data:
+            if any(k in data for k in ('controls_json','osm_xml')) or fetch_map:
+                raise WebError('近似模式不可同时上传严格控制点或请求道路匹配')
+            if not local_only:
+                raise WebError('近似模式请明确勾选仅本地继续；不上传截图到模型')
+            anchors = text(data['approximate_anchors_json'], '近似锚点 JSON', 1_000_000)
+            try:
+                from approximate_location import fit_approximation
+                fit_approximation(json.loads(anchors))
+            except (ValueError, TypeError, KeyError, RecursionError):
+                raise WebError('近似锚点须为WGS84/local_mask、至少3个不共线点，并含来源与正数不确定度和说明') from None
+            pending['approximate-anchors-upload.json'] = anchors.encode('utf-8')
+            args += ['--approximate-anchors-file', str(folder/'inputs'/'approximate-anchors-upload.json')]
         if 'controls_json' in data:
             controls = text(data['controls_json'], '控制点 JSON', 1_000_000)
             try:
@@ -559,7 +575,7 @@ class RideServer(ThreadingHTTPServer):
                 raise WebError('OSM XML 为空或含禁止的 DTD/实体')
             pending['osm-upload.xml'] = osm.encode('utf-8')
             args += ['--osm-file', str(folder/'inputs'/'osm-upload.xml')]
-        if not any(k in data for k in ('component_ids', 'answer', 'color', 'crop', 'controls_json', 'osm_xml')) and not fetch_map and not local_only and not review_continue:
+        if not any(k in data for k in ('component_ids', 'answer', 'color', 'crop', 'controls_json', 'approximate_anchors_json', 'osm_xml')) and not fetch_map and not local_only and not review_continue:
             raise WebError('请提供回答、修正或证据文件')
         if upload:
             args.append('--consent-upload')
@@ -605,7 +621,7 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <h1>骑行截图分析 · 本地网页</h1><p>结果只是未验证候选，不是真实 GPS，不可用于导航。Demo 为固定离线演示，并非模型识别。截图不会通过本网页向外发送；只有明确同意的 API / 地图步骤会访问外部服务。</p>
 <fieldset><legend>1. 创建任务</legend><label>截图（PNG/JPEG/WebP，≤20 MB、≤400万像素） <input id="image" type="file" accept="image/png,image/jpeg,image/webp"></label>
 <label>模式 <select id="mode"><option value="demo">离线 Demo</option><option value="api">真实视觉 API</option></select></label>
-<label>目标 <select id="goal"><option value="pixels">提取轨迹像素</option><option value="registration">手工控制点配准</option><option value="roads">道路候选匹配</option></select></label>
+<label>目标 <select id="goal"><option value="pixels">提取轨迹像素</option><option value="registration">严格手工控制点配准</option><option value="approximate">近似定位候选（不可导航）</option><option value="roads">道路候选匹配</option></select></label>
 <label class="consent"><input id="uploadConsent" type="checkbox">仅本次同意向已配置模型 API 上传截图、派生预览、诊断及对话（创建/继续后自动取消；每次继续前须回到此处重新勾选）</label>
 <button id="create">创建并开始</button></fieldset>
 <fieldset><legend>2. 任务状态</legend><label>任务编号 <input id="task" type="text" placeholder="服务器生成的 UUID，可粘贴恢复"></label><button id="refresh">刷新状态</button><p id="executionNotice" role="status" style="font-weight:bold;border:2px solid #b66;padding:12px"></p><pre id="status">尚未创建任务</pre><h3>当前问题</h3><pre id="question"></pre><div id="questionEvidence"></div><h3>模型候选决定（未验证，非用户确认）</h3><pre id="candidateDecision"></pre></fieldset>
@@ -630,7 +646,8 @@ PAGE = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <label>修正颜色 <input id="color" type="text" placeholder="#00BFA5，空白不修改"></label>
 <label>修正裁剪 <input id="crop" type="text" placeholder="[左,上,右,下]，空白不修改"></label>
 <p>裁剪变更会使旧控制点失效。控制点必须使用当前裁剪坐标，网页不会自动地理定位。</p>
-<label>控制点 JSON <input id="controls" type="file" accept=".json,application/json"></label><label>本地 OSM XML <input id="osm" type="file" accept=".osm,.xml"></label>
+<p>近似模式不做严格验证，不恢复原始GPS，不可导航/道路匹配；请提供真实来源及不确定度，不能用图名猜坐标。</p><label>定位模式 <select id="locationMode"><option value="strict">严格控制点</option><option value="approximate">近似证据锚点（仅本地）</option></select></label>
+<label>对应点 JSON（按上方模式） <input id="controls" type="file" accept=".json,application/json"></label><label>本地 OSM XML <input id="osm" type="file" accept=".osm,.xml"></label>
 <p id="roadsNotice">注意：勾选下载地图或上传本地 OSM 后，点击“继续处理”会将任务目标自动切换为 roads（道路候选匹配），即使原目标为像素提取或配准。下载须先完成配准并通过独立检查；下载授权与 API 上传授权相互独立，未勾选不会下载。</p>
 <label><input id="fetch" type="checkbox">下载当前配准范围的地图（不可同时上传 OSM）</label><label><input id="mapConsent" type="checkbox">仅本次同意向 Overpass 发送地理范围（不发送截图）</label>
 <label><input id="localOnly" type="checkbox">仅本地继续（已有颜色/裁剪或有效掩码；不上传、不调用模型，可恢复中心线；地图下载仍单独授权）</label>
@@ -748,7 +765,7 @@ $('create').onclick=()=>action(async()=>{const f=$('image').files[0];if(!f||f.si
 // 专用继续入口只提交本次授权；不读取localOnly、回答、颜色/裁剪等可能陈旧的表单。
 $('continueReview').onclick=()=>action(async()=>{if(!$('reviewConsent').checked)throw Error('请先勾选本次模型复核上传授权；尚未上传');render(await request(taskPath()+'/resume',{review_continue:true,consent_upload:true}));});
 $('refresh').onclick=()=>action(async()=>render(await request(taskPath())));
-$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined)d.controls_json=controls;if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
+$('resume').onclick=()=>action(async()=>{const d={local_only:$('localOnly').checked,consent_upload:$('uploadConsent').checked,fetch_map:$('fetch').checked,consent_map:$('mapConsent').checked};if($('answer').value)d.answer=$('answer').value;if($('color').value.trim())d.color=$('color').value.trim();if($('crop').value.trim())d.crop=JSON.parse($('crop').value);const controls=await fileText('controls',1000000),osm=await fileText('osm',30000000);if(controls!==undefined){if($('locationMode').value==='approximate'){if(!d.local_only)throw Error('近似模式须勾选仅本地继续');d.approximate_anchors_json=controls;}else d.controls_json=controls;}if(osm!==undefined)d.osm_xml=osm;render(await request(taskPath()+'/resume',d));$('answer').value='';$('color').value='';$('crop').value='';$('controls').value='';$('osm').value='';$('fetch').checked=false;});
 </script></html>'''
 
 

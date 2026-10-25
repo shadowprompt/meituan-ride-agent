@@ -47,6 +47,8 @@ def project(geo, origin):
 
 
 def fit_registration(spec, max_error_m=35):
+    if spec.get('mode') == 'approximate' or spec.get('approximate') is True:
+        raise ValueError('Approximate anchors cannot enter strict registration')
     if not math.isfinite(max_error_m) or max_error_m <= 0:
         raise ValueError('max_error_m must be finite and positive')
     if spec.get('coordinate_system') != 'WGS84' or spec.get('pixel_frame') != 'local_mask':

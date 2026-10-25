@@ -192,3 +192,47 @@ Agent 已接入 `register` 白名单工具，可用 `start --goal registration` 
 - **重启语义**：仅将 `web-execution.json` 中遗留的 queued/running 置为 failed / interrupted；不保存可重放的命令或授权，不自动重新上传截图或下载地图。没有 `task.json` 的启动中断任务只能查看安全错误并新建；已有任务继续必须按原规则重新明确授权（或选择仅本地继续）。服务应单实例使用一个 Web 根目录，运维重启必须停止整个旧服务进程组（含其 CLI 子进程）后再启动新实例，不能让新旧实例并行操作同一根目录。单纯关浏览器或丢失 HTTP 连接不会取消已明确授权的后台轮次；本轮最多12个 Agent 步骤并受总预算限制。授权仅对本次明确提交有效，不继承上次勾选。
 
 异步专项回归：`PYTHONPATH=src python3 -m unittest discover -s test -p test_web_async.py -v`，使用本地 mock 与真实 loopback HTTP；旧 Web fixture 在202后等待终态以兼容已有业务断言，专项绕开此兼容层，直接验证生产202、非阻塞GET、409、防泄密、容量、重启及前端轮询。
+
+## 近似地理定位与经纬度导出（独立模式）
+
+当已有可信来源的**近似对应点**、但没有独立检查点时，可明确选择近似模式，先交付带不确定度的候选，而不是假装严格配准通过。不会根据图名或语言模型发明坐标，不下载地图、不调用外部模型。**本功能提供有证据锚点到经纬度导出的闭环，不声称仅靠截图自动识别城市。** 缺锚点会停下来索取证据。
+
+1. 在网页上传图片，用离线模式/仅本地继续完成颜色、裁剪及中心线检查；有多个分量时先选择候选。
+2. 在继续区域的“定位模式”选择“近似证据锚点（仅本地）”，勾选“仅本地继续”，上传以下格式的 JSON。可把截图中可辨识的地标与用户确认/公开证据中的 WGS84 坐标对应；至少三个不共线点，每点必须有来源和正数 `uncertainty_m`。来源只是保留的证据记录，不自动核验或访问网址。
+3. 点击继续，下载 `approximation/approximation.json` 和 `approximation/approximate-segments.geojson`。GeoJSON 自包含全部来源、不确定度说明、拟合残差、凸包外推统计，坐标顺序为 `[经度,纬度]`。
+
+以下数值**全部为合成格式示例，绝非真实截图地标**，不能替代真实输入：
+
+```json
+{
+  "mode": "approximate",
+  "coordinate_system": "WGS84",
+  "pixel_frame": "local_mask",
+  "synthetic": true,
+  "uncertainty_note": "合成示例，仅演示格式；真实使用须写明地标对应歧义、坐标来源和误差假设。",
+  "anchors": [
+    {"pixel_xy": [0,0], "wgs84": [120,30], "source": "synthetic example, not evidence", "uncertainty_m": 100},
+    {"pixel_xy": [700,0], "wgs84": [120.007,30], "source": "synthetic example, not evidence", "uncertainty_m": 100},
+    {"pixel_xy": [0,500], "wgs84": [120,29.995], "source": "synthetic example, not evidence", "uncertainty_m": 150}
+  ]
+}
+```
+
+`pixel_xy` 必须相对**当前裁剪左上角的 local_mask**，不是缩略预览坐标或未减去裁剪偏移的原图坐标。原图点 `[x,y]` 对裁剪 `[left,top,right,bottom]` 应填写 `[x-left,y-top]`；不能直接填 GCJ-02/BD-09，系统不猜测也不自动转换。来源请填写能追溯的用户声明/公开资料 URL 与地标名称，误差声明需覆盖像素选点、坐标来源和地标歧义；无真实依据时不要输出虚构锚点。
+
+已有像素任务的 CLI 用法：
+
+```sh
+python3 src/ride_agent.py resume --task-dir outputs/my-task --local-only \
+  --approximate-anchors-file /path/to/evidence-anchors.json
+```
+
+可用 `start --goal approximate --demo` 新建离线任务，再按现有流程提供颜色/裁剪；`resume` 上传近似锚点也会显式切换到近似目标。近似文件、严格控制文件、OSM/下载请求禁止同次组合。修改裁剪会使锚点失效，须重新提供对应点。回到严格模式需明确重新上传 `--controls-file`，仍执行原有独立误差门槛。
+
+### 近似输出的边界
+
+- 顶层报告、GeoJSON 集合和每个分段都标记 `approximate=true`、`verified=false`、`original_gps=false`、`navigable=false`；未排序分段，不推断行进顺序，不输出导航 GPX。
+- **近似结果永不置位严格 `registered` 或 `registration_gate_passed`**，独立门槛始终为 false。严格模式仍要求至少3个不共线控制点、2个独立检查点且拟合/独立误差均不大于35米，近似输入不能进入严格配准。
+- `uncertainty_m` 是证据提供方声明，不是经验证的轨迹误差上界。三点仿射残差接近0不证明定位正确；地标对应错误、投影/地图形变、凸包外推均可能使实际偏差远超声明。报告提供 `vertices_outside_anchor_hull`、`extrapolation_present` 与残差，**不伪造统计置信区间**。
+- 近似候选不能进入道路匹配或地图下载；道路读取器也拒绝带近似标记的 GeoJSON。原有上传同意、地图同意、候选选择、当前裁剪有效性、语义复核要求不被放宽。
+- 自动化测试使用明确标注的合成锚点；即使对真实图片测试提线，也不代表真实地理位置或真实轨迹精度已经验收。

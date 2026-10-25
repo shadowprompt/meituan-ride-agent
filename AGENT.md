@@ -176,3 +176,7 @@ API 可在当前中心线生成后调用 `observe_holes`，读取稳定孔编号
 批准沿用人工逐孔审计目录、安全锁、CSRF 和路径白名单。修正撤销旧语义复核，下次 API 继续必须重新观察和复核当前版本。人工离线逐孔流程仍保留；仅允许面积不超过256、最长边不超过32的封闭背景孔，不能删除前景、连接开放断点或填写任意坐标。
 
 这些约束不证明模型能分清箭头与真实回转孔。当前只完成本地 HTTP mock 编排与浏览器交互验收；未调用真实视觉服务，不代表真实折返识别已解决。所有产物仍为 `verified=false`、`original_gps=false`，不恢复通行顺序或 GPS，不可导航。
+
+### 近似定位（与严格配准隔离）
+
+`start --goal approximate` 或 `resume --local-only --approximate-anchors-file anchors.json` 选择带来源和不确定度的近似定位。锚点格式、真实输入要求和网页步骤见 README；至少3个不共线的 WGS84/local_mask 对应点。模型不能传入或创建锚点，来源 URL 仅记录不访问。产物为 `approximation/{approximation.json,approximate-segments.geojson}`；所有层级明确 approximate=true、verified=false、original_gps=false、navigable=false，保留误差、声明不确定度及凸包外推统计。绝不置位严格配准/道路匹配准入；严格3+2/35米门槛及原同意步骤不变。无真实证据只能请求锚点，禁止拿合成测试数冒充真实定位。

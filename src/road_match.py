@@ -39,6 +39,8 @@ def _load_segments(path):
     data = json.loads(path.read_text(encoding='utf-8'))
     if not isinstance(data, dict) or data.get('type') != 'FeatureCollection' or data.get('crs') is not None:
         raise ValueError('Expected FeatureCollection without legacy CRS')
+    if data.get('approximate') is True:
+        raise ValueError('Approximate candidates cannot enter road matching')
     features = data.get('features')
     if not isinstance(features, list) or not 1 <= len(features) <= 128:
         raise ValueError('Require 1..128 segments')
@@ -47,6 +49,8 @@ def _load_segments(path):
         if not isinstance(f, dict) or f.get('type') != 'Feature' or f.get('crs') is not None:
             raise ValueError('Expected Feature')
         props, geom = f.get('properties'), f.get('geometry')
+        if isinstance(props, dict) and props.get('approximate') is True:
+            raise ValueError('Approximate candidates cannot enter road matching')
         if not isinstance(props, dict) or props.get('coordinate_system') != 'WGS84':
             raise ValueError('Each segment requires explicit properties.coordinate_system=WGS84')
         if not isinstance(geom, dict) or geom.get('type') != 'LineString':

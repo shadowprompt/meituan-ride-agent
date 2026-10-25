@@ -133,7 +133,7 @@ def select(state, folder, action):
     report.update(component_selection=selection, selected_pixels=int(mask.sum()),
                   components=[c for c in candidates if c['selected']], candidate_decision=audit)
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n')
-    state.update(centerlined=False, registered=False, match_attempted=False)
+    state.update(centerlined=False, registered=False, match_attempted=False, approximate_complete=False)
     for key in ('route_review', 'review_region', 'review_presented_version', 'review_presented_regions'):
         state.pop(key, None)
     return {'tool':'select_candidates', 'status':'selected_unverified', 'selected_ids':kept,

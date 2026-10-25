@@ -112,3 +112,13 @@ python src/ride_agent.py resume --task-dir outputs/实际任务目录 --local-on
 中国地图截图可能使用 GCJ-02/BD-09；**不能把这类坐标仅改标签当作 WGS84**。系统不自动检测/转换底图坐标系，也无法核实人工地标真值。仿射拟合不能补救错误对应、非线性地图形变或远离控制区的外推；三点拟合误差接近零不等于真实定位准确。
 
 回归测试使用合成图和显式合成地标，经真实 CLI/网页上传流程验证本地交付和零模型调用，不构成真实用户轨迹定位成功。未获得目标任务的本地产物和真实控制点前，不能声称已得到该任务的经纬度。
+
+## 独立近似定位交付
+
+新增 `--approximate-anchors-file` 与网页“近似证据锚点（仅本地）”选择，按 README 的 JSON 格式提供至少三个非共线 WGS84/local_mask 对应点、逐点来源及正数不确定度、整体不确定度说明。无需独立检查点即可输出**明确不可导航的近似候选**，不是放宽严格配准。来源来自用户或公开证据，不由模型编造，服务器不会自动访问来源 URL。
+
+产物独立放在 `approximation/`：`approximation.json`、`approximate-segments.geojson`。经纬度按未排序分段保留，自包含锚点、来源、残差、声明不确定度、凸包外推统计。`approximate=true / verified=false / original_gps=false / navigable=false`，严格准入始终 false；不接受近似候选道路匹配或地图下载。严格模式的3控制点+2独立检查点/35米不变。恢复严格流程需重新上传严格控制点，近似历史产物不再标为当前。
+
+真实交付还需要：原始图片和当前裁剪、颜色/分量确认、可溯源地标与WGS84经纬度、对应 local_mask 像素、每点不确定度和歧义说明。没有这些输入不会凭图名造坐标。近似报告的误差声明不是实际轨迹精度保证，尤其凸包外推可能出现无已知上界偏差。示例与测试中的坐标均为合成，不代表真实任务已定位。
+
+验收命令：`PYTHONPATH=src:test python3 -m unittest test_approximate_location -v`，包含真实 loopback HTTP→CLI 子进程上传、近似模式切换、产物下载与元数据校验，无外部模型/地图调用。全量回归：`PYTHONPATH=src python3 -m unittest discover -s test -v`。
