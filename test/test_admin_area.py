@@ -16,9 +16,13 @@ def relation(ident, name, level, child=None):
             'members': [] if child is None else [{'type': 'relation', 'ref': child, 'role': 'subarea'}]}
 
 
+def witness(parent, child):
+    return {'type': 'evidence', 'id': 1, 'tags': {'parent_id': str(parent), 'child_id': str(child)}}
+
+
 def hierarchy(parent='上海市', parent_id=1, child_id=2):
     child = relation(child_id, '普陀区', 6)
-    return {'elements': [relation(parent_id, parent, 4, child_id), child,
+    return {'elements': [relation(parent_id, parent, 4, child_id), child, witness(parent_id, child_id),
                          {'type': 'area', 'id': 3600000000+child_id, 'tags': child['tags']}]}
 
 
@@ -42,6 +46,9 @@ class AdminAreaTests(unittest.TestCase):
                 self.assertEqual(len(calls), 2)
                 q = calls[0].args[0]
                 self.assertIn('if(p0.count(relations) == 1)', q)
+                self.assertNotIn('out body', q)
+                self.assertIn('rel(r.p0:"subarea")["name"=', q)
+                self.assertIn('make evidence parent_id=p0.min(id()),child_id=p1.min(id())', q)
                 self.assertIn('rel(r.p0:"subarea")', q)
                 self.assertIn('rel.members1(area.a0)', q)
                 self.assertIn('["name"="'+parent+'"]', q)
@@ -57,7 +64,7 @@ class AdminAreaTests(unittest.TestCase):
         self.assertEqual(a['area_id'], 3600000002)
         self.assertEqual(admin_area.levels_for('某自治区某市市中区', ['某自治区', '某市', '市中区'], map_fetch.MapFetchError), ['某自治区', '某市', '市中区'])
         child = relation(3, '某县', 6)
-        response = {'elements': [relation(1, '某省', 4, 2), relation(2, '某市', 5, 3), child,
+        response = {'elements': [relation(1, '某省', 4, 2), relation(2, '某市', 5, 3), child, witness(1, 2), witness(2, 3),
                                  {'type': 'area', 'id': 3600000003, 'tags': child['tags']}]}
         result, calls = self.fetch('某省某市某县', response)
         self.assertIn('if(p1.count(relations) == 1)', calls[0].args[0])
@@ -81,10 +88,13 @@ class AdminAreaTests(unittest.TestCase):
     def test_foreign_child_missing_membership_or_derived_area_rejected(self):
         base = hierarchy()
         cases = []
-        bad = copy.deepcopy(base); bad['elements'][0]['members'] = []; cases.append(bad)
+        bad = copy.deepcopy(base); bad['elements'].pop(2); cases.append(bad)
         bad = copy.deepcopy(base); bad['elements'][1]['tags']['admin_level'] = '4'; cases.append(bad)
-        bad = copy.deepcopy(base); bad['elements'][2]['id'] = 3600000004; cases.append(bad)
+        bad = copy.deepcopy(base); bad['elements'][3]['id'] = 3600000004; cases.append(bad)
         bad = copy.deepcopy(base); bad['elements'].insert(1, relation(4, '普陀区', 6)); cases.append(bad)
+        bad = copy.deepcopy(base); bad['elements'][2]['tags']['parent_id'] = '999'; cases.append(bad)
+        bad = copy.deepcopy(base); bad['elements'].insert(2, witness(1, 2)); cases.append(bad)
+        bad = copy.deepcopy(base); bad['elements'][2]['tags']['child_id'] = 'SECRET'; cases.append(bad)
         for response in cases:
             with self.subTest(response=response), self.assertRaises(map_fetch.MapFetchError):
                 self.fetch('上海市普陀区', response)
@@ -102,7 +112,7 @@ class AdminAreaTests(unittest.TestCase):
             transport.assert_not_called()
 
     def test_failure_keeps_safe_candidates_without_remote_body(self):
-        response = hierarchy(); response['elements'][0]['members'] = []
+        response = hierarchy(); response['elements'].pop(2)
         response['secret'] = 'REMOTE_BODY'
         with self.assertRaises(map_fetch.MapFetchError) as caught:
             self.fetch('上海市普陀区', response)

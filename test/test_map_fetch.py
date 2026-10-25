@@ -145,7 +145,7 @@ class MapFetchTests(unittest.TestCase):
             self.assertEqual(map_fetch._download('test'), b'x' * 10)
 
     def test_wall_clock_deadline(self):
-        with patch('map_fetch.time.monotonic', side_effect=[0, 31]):
+        with patch('map_fetch.time.monotonic', side_effect=[0, 0, 31, 31]):
             with self.assertRaisesRegex(map_fetch.MapFetchError, 'deadline'):
                 self.fetch()
 

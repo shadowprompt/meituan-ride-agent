@@ -36,8 +36,9 @@ MAX_REFERENCES = 400_000
 class MapFetchError(ValueError):
     """安全结构化错误；诊断不使用远端正文或异常字符串。"""
 
-    def __init__(self, message, *, code='response_invalid', http_status=None, area_resolution=None):
+    def __init__(self, message, *, code='response_invalid', http_status=None, area_resolution=None, transport=None):
         super().__init__(message)
+        self.transport = transport
         self.area_resolution = area_resolution
         self.code = code if code in REASONS else 'response_invalid'
         self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
@@ -46,6 +47,8 @@ class MapFetchError(ValueError):
         message, retry = REASONS.get(self.code, REASONS['response_invalid'])
         result = {'reason_code': self.code, 'message': message,
                   'retry_advice': retry, 'automatic_retry': False}
+        if self.transport is not None:
+            result['transport'] = self.transport
         if self.http_status is not None:
             result['http_status'] = self.http_status
         if self.area_resolution is not None:
@@ -64,6 +67,7 @@ REASONS = {
     'http_429': ('地图服务限流（HTTP 429）。', '请稍后自行决定是否重新授权；不会自动重试。'),
     'http_error': ('地图服务返回非成功 HTTP 状态。', '请稍后检查服务状态，再决定是否重新授权。'),
     'timeout': ('地图查询超过本次时间预算。', '请稍后手动重新授权，或核对是否可以缩小精确查询；不会自动重试。'),
+    'server_timeout': ('地图服务器报告查询执行超时，结果不能作为证据。', '请稍后手动查询；不会扩大范围或自动重试。'),
     'network_error': ('无法完成地图网络连接。', '请检查服务器网络后再决定是否重新授权。'),
     'response_limit': ('地图响应超过安全大小或对象预算。', '请缩小精确道路查询；不会提高预算或自动重试。'),
     'response_incomplete': ('地图服务报告结果不完整，不能作为道路证据。', '请稍后手动查询或缩小精确请求；不会接受截断结果。'),
@@ -102,20 +106,39 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _download(query, *, deadline=None, max_bytes=None):
+    start = time.monotonic()
+    state = {'phase': 'connect', 'response_received': False, 'bytes_received': 0,
+             'connection_established': False}
+    def evidence():
+        return dict(state, elapsed_seconds=round(max(0, time.monotonic()-start), 3))
     max_bytes = MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
     remaining = min(TIMEOUT_SECONDS, deadline - time.monotonic()) if deadline else TIMEOUT_SECONDS
     if remaining <= 0:
-        raise MapFetchError("Map query deadline exceeded; no automatic retry", code='timeout')
+        raise MapFetchError("Map query deadline exceeded; no automatic retry", code='timeout', transport=dict(evidence(), phase='total_budget'))
     request = urllib.request.Request(
         ENDPOINT, data=urllib.parse.urlencode({'data': query}).encode('ascii'),
         headers={'Content-Type': 'application/x-www-form-urlencoded',
                  'Accept': 'application/json', 'Accept-Encoding': 'identity',
                  'User-Agent': 'meituan-ride-agent-map-fetch/1.0'}, method='POST')
     # Do not forward bounding boxes to environment-configured HTTP proxies.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
-    start = time.monotonic()
+    # 区分DNS/TCP/TLS连接与等待响应头；不保存主机异常或远端正文。
+    class Connection(http.client.HTTPSConnection):
+        def connect(self):
+            super().connect()
+            state.update(connection_established=True, phase='response_headers')
+            left = remaining - (time.monotonic()-start)
+            if left <= 0:
+                raise MapFetchError('Map total deadline exceeded', code='timeout',
+                                    transport=dict(evidence(), phase='total_budget'))
+            if self.sock is not None:
+                self.sock.settimeout(left)
+    class HTTPS(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(Connection, req, context=self._context)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect(), HTTPS())
     try:
         with opener.open(request, timeout=remaining) as response:
+            state.update(phase='read_response', response_received=True, connection_established=True)
             if response.status != 200:
                 raise MapFetchError(f'Overpass HTTP {response.status}; no automatic retry', code='http_429' if response.status == 429 else 'http_error', http_status=response.status)
             if response.headers.get('Content-Encoding', 'identity').lower() != 'identity':
@@ -131,27 +154,54 @@ def _download(query, *, deadline=None, max_bytes=None):
             chunks, size = [], 0
             while True:
                 if time.monotonic() - start > remaining:
-                    raise MapFetchError('Overpass download deadline exceeded; no automatic retry', code='timeout')
-                chunk = response.read(min(65536, max_bytes + 1 - size))
+                    raise MapFetchError('Overpass download deadline exceeded; no automatic retry', code='timeout', transport=dict(evidence(), phase='total_budget'))
+                # 每次读取前收紧socket剩余时间；read1避免单次内部循环越过总预算。
+                if isinstance(response, http.client.HTTPResponse):
+                    if response.fp is not None and response.fp.raw is not None:
+                        response.fp.raw._sock.settimeout(max(.001, remaining-(time.monotonic()-start)))
+                    read = response.read1
+                else:
+                    read = response.read
+                chunk = read(min(65536, max_bytes + 1 - size))
                 if not chunk:
                     break
                 size += len(chunk)
+                state['bytes_received'] = size
                 if size > max_bytes:
                     raise MapFetchError('Overpass response exceeds byte limit', code='response_limit')
                 chunks.append(chunk)
             if time.monotonic() - start > remaining:
-                raise MapFetchError('Overpass download deadline exceeded; no automatic retry', code='timeout')
-            return b''.join(chunks)
+                raise MapFetchError('Overpass download deadline exceeded; no automatic retry', code='timeout', transport=dict(evidence(), phase='total_budget'))
+            raw = b''.join(chunks)
+            # remark仅分类；不回显正文，未完整接收不得报告无候选。
+            try:
+                parsed = json.loads(raw)
+                remark = parsed.get('remark') if isinstance(parsed, dict) else None
+            except (ValueError, UnicodeError, RecursionError):
+                remark = None
+            if remark:
+                state['phase'] = 'server_execution'
+                raise MapFetchError('Overpass incomplete response',
+                                    code='server_timeout' if isinstance(remark, str) and 'timed out' in remark.lower() else 'response_incomplete',
+                                    transport=evidence())
+            return raw
+    except MapFetchError as exc:
+        if exc.transport is None:
+            exc.transport = evidence()
+        raise
     except urllib.error.HTTPError as exc:
+        state.update(response_received=True, connection_established=True, phase='response_headers')
         # Deliberately exclude URLs, server body and query from error messages.
         exc.close()
-        raise MapFetchError(f'Overpass HTTP {exc.code}; no automatic retry', code='http_429' if exc.code == 429 else 'http_error', http_status=exc.code) from exc
+        raise MapFetchError(f'Overpass HTTP {exc.code}; no automatic retry', code='http_429' if exc.code == 429 else 'http_error', http_status=exc.code, transport=evidence()) from exc
     except (TimeoutError, socket.timeout) as exc:
-        raise MapFetchError('Overpass timeout; no automatic retry', code='timeout') from exc
+        state['budget_exhausted'] = time.monotonic()-start >= remaining
+        raise MapFetchError('Overpass timeout; no automatic retry', code='timeout', transport=evidence()) from exc
     except (urllib.error.URLError, OSError,
             http.client.HTTPException) as exc:
+        state['budget_exhausted'] = time.monotonic()-start >= remaining
         raise MapFetchError('Overpass network failure; no automatic retry',
-                            code='timeout' if isinstance(getattr(exc, 'reason', None), TimeoutError) else 'network_error') from exc
+                            code='timeout' if isinstance(getattr(exc, 'reason', None), TimeoutError) else 'network_error', transport=evidence()) from exc
 
 
 def _identifier(value):
@@ -338,6 +388,7 @@ def _fetch_named_roads(area_name, names, output_path, *, consent_download=False,
             raise MapFetchError('Invalid administrative area response') from exc
         area_id = areas[0]['id']
         resolution['candidates'] = [{'name': levels[0], 'area_ids': [a['id'] for a in areas]}]
+        resolution['status'] = 'resolved'
     clauses = ''.join(f'way(area.scope)["highway"]["name"={quote(n)}];' for n in names)
     query = (f'[out:json][timeout:15][maxsize:2097152];area({area_id})->.scope;'
              f'({clauses})->.roads;.roads out body 33;node(w.roads);out skel;')
@@ -386,10 +437,14 @@ def _fetch_named_roads(area_name, names, output_path, *, consent_download=False,
 def fetch_named_roads(area_name, names, output_path, *, consent_download=False, area_hierarchy=None):
     """本次授权最多两次固定端点请求；所有阶段保留安全层级诊断。"""
     resolution = {}
+    start = time.monotonic()
     try:
         return _fetch_named_roads(area_name, names, output_path, consent_download=consent_download,
                                   area_hierarchy=area_hierarchy, resolution=resolution)
     except MapFetchError as exc:
+        if exc.transport is not None:
+            exc.transport['query_stage'] = 'roads' if resolution.get('status') == 'resolved' else 'admin_area'
+            exc.transport['total_elapsed_seconds'] = round(max(0, time.monotonic()-start), 3)
         if exc.area_resolution is None and resolution:
             exc.area_resolution = resolution
         raise

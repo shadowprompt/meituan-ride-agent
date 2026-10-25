@@ -729,7 +729,9 @@ def run(state, folder, planner, budget=12, consent_map=False):
                         f"地图查询失败 [{diagnostic['reason_code']}]：{diagnostic['message']} "
                         f"查询行政区：{request['area_name']}；道路：{'、'.join(n or '（非法名称）' for n in request['names'])}。"
                         + (' 实际查询层级：' + ' → '.join(diagnostic['area_resolution']['query_levels'])
-                           + '；候选：' + json.dumps(diagnostic['area_resolution']['candidates'], ensure_ascii=False) + '。'
+                           + ('；候选尚未取得，不能判断无候选或层级成功。'
+                              if diagnostic['area_resolution'].get('status') == 'unavailable'
+                              else '；候选：' + json.dumps(diagnostic['area_resolution']['candidates'], ensure_ascii=False) + '。')
                            if diagnostic.get('area_resolution') else '')
                         + diagnostic['retry_advice']))
                     save(state, folder)

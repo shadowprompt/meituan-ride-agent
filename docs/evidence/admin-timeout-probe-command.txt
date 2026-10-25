@@ -1,0 +1,12 @@
+# 仓库根目录运行；2026-10-25。本次仅运行一次该层级请求，未请求道路。
+# 以下为等价可复现命令，勿自动重试；仅固定端点、30秒、2MB。
+PYTHONPATH=src python3 - <<'PY'
+import json,time
+import map_fetch,admin_area
+try:
+    area,raw,res=admin_area.resolve(['上海市','普陀区'],map_fetch._download,
+        time.monotonic()+30,map_fetch.MapFetchError,map_fetch._identifier,map_fetch._reject_constant)
+    print(json.dumps({'area_id':area,'bytes':len(raw),'resolution':res},ensure_ascii=False))
+except map_fetch.MapFetchError as exc:
+    print(json.dumps(exc.diagnostic(),ensure_ascii=False))
+PY
