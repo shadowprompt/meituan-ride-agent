@@ -54,6 +54,7 @@ REASONS = {
     'area_ambiguous': ('行政区名称匹配多个对象，无法安全选择。', '请补充原图可见的城市/区县上下文；不会自动扩大地域。'),
     'area_not_found': ('未找到该精确行政区。', '请核对行政区全称及 OSM 收录情况；重复授权不会修正名称。'),
     'roads_not_found': ('该行政区内未找到请求的精确道路。', '请核对道路文字和所属行政区；不会模糊搜索或扩大范围。'),
+    'roads_partial': ('该行政区仅找到部分请求道路，不能当作完整查询成功。', '请逐项核对道路文字及所属行政区；不会丢弃未找到的道路或扩大范围。'),
     'http_429': ('地图服务限流（HTTP 429）。', '请稍后自行决定是否重新授权；不会自动重试。'),
     'http_error': ('地图服务返回非成功 HTTP 状态。', '请稍后检查服务状态，再决定是否重新授权。'),
     'timeout': ('地图查询超过本次时间预算。', '请稍后手动重新授权，或核对是否可以缩小精确查询；不会自动重试。'),
@@ -307,12 +308,16 @@ def fetch_named_roads(area_name, names, output_path, *, consent_download=False):
             raise MapFetchError('Incomplete area response', code='response_incomplete')
         if not areas:
             raise MapFetchError('No administrative area', code='area_not_found')
+        # 校验全部返回对象后再判断唯一性；非法/重复对象不是地域歧义证据。
+        if any(not isinstance(a, dict) or a.get('type') != 'area'
+               or not _identifier(a.get('id')) or not isinstance(a.get('tags'), dict)
+               or a['tags'].get('name') != area_name
+               or a['tags'].get('boundary') != 'administrative' for a in areas):
+            raise ValueError()
+        if len({a['id'] for a in areas}) != len(areas):
+            raise ValueError()
         if len(areas) > 1:
             raise MapFetchError('Ambiguous administrative area', code='area_ambiguous')
-        if (areas[0].get('type') != 'area' or not _identifier(areas[0].get('id'))
-                or areas[0].get('tags', {}).get('name') != area_name
-                or areas[0].get('tags', {}).get('boundary') != 'administrative'):
-            raise ValueError()
     except MapFetchError:
         raise
     except (ValueError, KeyError, TypeError, AttributeError, UnicodeError, RecursionError) as exc:
@@ -333,6 +338,10 @@ def fetch_named_roads(area_name, names, output_path, *, consent_download=False):
         raise MapFetchError('Unexpected road outside requested exact names')
     if not ways:
         raise MapFetchError('No exact highway objects found; clarify visible road name', code='roads_not_found')
+    returned_names = {tag.get('v') for way in root.findall('way')
+                      for tag in way.findall('tag') if tag.get('k') == 'name'}
+    if not set(names).issubset(returned_names):
+        raise MapFetchError('Only some requested exact roads found', code='roads_partial')
     # 有界查询得到完整way节点，原子发布；失败时旧地图不受影响。
     temporary = None
     try:

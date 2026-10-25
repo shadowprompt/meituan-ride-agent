@@ -20,7 +20,9 @@ class DiagnosticsTests(unittest.TestCase):
     def test_reason_codes_no_body_or_retry_and_old_map_preserved(self):
         cases = [
             ([{'elements':[]}], 'area_not_found'),
-            ([{'elements':AREA['elements']*2}], 'area_ambiguous'),
+            ([{'elements':[AREA['elements'][0], dict(AREA['elements'][0],id=3600000002)]}], 'area_ambiguous'),
+            ([{'elements':AREA['elements']*2}], 'response_invalid'),
+            ([{'elements':[None,None]}], 'response_invalid'),
             ([{'remark':'SECRET_REMOTE_BODY','elements':[]}], 'response_incomplete'),
             ([[]], 'response_invalid'),
             ([AREA, {'elements':[]}], 'roads_not_found'),
@@ -36,6 +38,16 @@ class DiagnosticsTests(unittest.TestCase):
                     self.assertNotIn('SECRET_REMOTE_BODY',json.dumps(caught.exception.diagnostic()))
                     self.assertEqual(transport.call_count,len(replies))
                     self.assertEqual(path.read_text(),'old')
+
+    def test_partial_road_match_is_not_success_or_old_map_replacement(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'map.osm';path.write_text('old evidence')
+            with patch('map_fetch._download',side_effect=[json.dumps(AREA).encode(),json.dumps(FIXTURE).encode()]) as transport:
+                with self.assertRaises(map_fetch.MapFetchError) as caught:
+                    map_fetch.fetch_named_roads('合成区',['A & B','合成缺失路'],path,consent_download=True)
+            self.assertEqual(caught.exception.code,'roads_partial')
+            self.assertEqual(transport.call_count,2)
+            self.assertEqual(path.read_text(),'old evidence')
 
     def test_transport_http_timeout_limits_classified_safely(self):
         errors = [(urllib.error.HTTPError('https://secret.invalid/KEY',429,'SECRET_REMOTE_BODY',{},None),'http_429'),
