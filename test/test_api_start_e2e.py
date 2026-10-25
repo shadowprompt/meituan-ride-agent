@@ -84,7 +84,7 @@ class APIStartE2ETests(unittest.TestCase):
         self.assertEqual(code,201,data)
         self.assertEqual(data['status'],'error')
         self.assertEqual(data['error_category'],'api_response_invalid')
-        self.assertEqual(data['artifacts'],[])
+        self.assertEqual([a['name'] for a in data['artifacts']],['input.png'])  # read-only source, not generated output
         self.assertEqual(len(calls),1)
 
     @unittest.skipUnless(os.environ.get('RIDE_REAL_SCREENSHOT'),'需本地原图')

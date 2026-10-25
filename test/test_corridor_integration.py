@@ -39,14 +39,15 @@ class CorridorIntegrationTests(unittest.TestCase):
 
     def test_real_cli_local_only_never_calls_model_or_registration(self):
         folder = self.root/'cli'
-        self.cli('start','--demo','--image',str(self.image),'--task-dir',str(folder),'--goal','corridor')
-        queried = self.cli('resume','--task-dir',str(folder),'--local-only','--osm-file',str(self.osm),
+        with patch.dict(os.environ, {'AMAP_API_KEY':'synthetic-map-key-only'}):
+            self.cli('start','--demo','--image',str(self.image),'--task-dir',str(folder),'--goal','corridor','--map-provider','amap')
+        queried = self.cli('resume','--task-dir',str(folder),'--local-only','--map-provider','osm','--osm-file',str(self.osm),
                           '--road-names','合成道路A','合成道路B')
         self.assertEqual(queried['status'], 'waiting_for_user')
         self.assertTrue((folder/'corridor-inspection.json').is_file())
         hypothesis = self.root/'plan.json'
         hypothesis.write_text(json.dumps(self.hypothesis))
-        done = self.cli('resume','--task-dir',str(folder),'--local-only','--road-hypothesis-file',str(hypothesis))
+        done = self.cli('resume','--task-dir',str(folder),'--local-only','--map-provider','osm','--road-hypothesis-file',str(hypothesis))
         self.assertEqual(done['status'], 'needs_confirmation')
         state = agent.load(folder)
         self.assertFalse(state.get('registered',False))
@@ -54,37 +55,30 @@ class CorridorIntegrationTests(unittest.TestCase):
         self.assertEqual(len(done['artifacts']),4)
         old = state['corridor_artifacts'][0]
         self.assertTrue(artifact_current(state,old))
-        changed = self.cli('resume','--task-dir',str(folder),'--local-only','--osm-file',str(self.osm))
+        changed = self.cli('resume','--task-dir',str(folder),'--local-only','--map-provider','osm','--osm-file',str(self.osm))
         self.assertEqual(changed['status'],'waiting_for_user')
         self.assertFalse(artifact_current(agent.load(folder),old))
         # 换图后紧接非法假设也必须先失效，而非留下旧产物为当前。
         hypothesis.write_text(json.dumps(self.hypothesis))
-        self.cli('resume','--task-dir',str(folder),'--local-only','--road-names','合成道路A','合成道路B')
-        self.cli('resume','--task-dir',str(folder),'--local-only','--road-hypothesis-file',str(hypothesis))
+        self.cli('resume','--task-dir',str(folder),'--local-only','--map-provider','osm','--road-names','合成道路A','合成道路B')
+        self.cli('resume','--task-dir',str(folder),'--local-only','--map-provider','osm','--road-hypothesis-file',str(hypothesis))
         hypothesis.write_text('{}')
         failed = subprocess.run([sys.executable,'src/ride_agent.py','resume','--task-dir',str(folder),
-                                 '--local-only','--osm-file',str(self.osm),'--road-hypothesis-file',str(hypothesis)],capture_output=True)
+                                 '--local-only','--map-provider','osm','--osm-file',str(self.osm),'--road-hypothesis-file',str(hypothesis)],capture_output=True)
         self.assertEqual(failed.returncode,2)
         self.assertFalse(agent.load(folder)['corridor_complete'])
 
-    def test_mock_model_inspect_build_delivery_no_pixel_gate(self):
+    def test_legacy_model_corridor_refused_without_mutating_local_map(self):
         state, folder = self.task()
+        state['map_provider'] = 'osm'
         class Model:
             semantic_review = True
-            def decide(inner, *args):
-                if not state.get('corridor_inspection'):
-                    return {'action':'inspect_roads','names':['合成道路A','合成道路B']}
-                return {'action':'build_corridor','hypothesis':self.hypothesis}
-        with patch('urllib.request.urlopen',side_effect=AssertionError('no network')):
-            done = agent.run(state,folder,Model())
-        self.assertEqual(done['status'],'needs_confirmation')
-        report = json.loads((folder/next(n for n in done['artifacts'] if n.endswith('/road-corridor.json'))).read_text())
-        self.assertEqual(report['path_node_ids'],[1,2,4])
-        self.assertFalse(report['verified'])
-        self.assertFalse(done.get('registered',False))
-        agent.invalidate_extraction(done)
-        self.assertFalse(done['corridor_complete'])
-        self.assertNotIn('corridor_inspection',done)
+            def decide(self, *args): raise AssertionError('旧OSM任务不得启动模型')
+        with patch('amap_fetch._request') as amap, patch('map_fetch._download') as osm:
+            with self.assertRaisesRegex(ValueError, '本次'):
+                agent.run(state, folder, Model(), consent_map=True)
+            amap.assert_not_called(); osm.assert_not_called()
+        self.assertEqual((folder/'map.osm').read_text(), XML)
 
     def test_model_missing_inspection_user_impersonation_and_paths_rejected(self):
         for kind, extra in [('model',{}),('user',{}),('model',{'osm_path':'/etc/passwd'})]:
@@ -101,49 +95,33 @@ class CorridorIntegrationTests(unittest.TestCase):
                 self.assertEqual(state['status'],'error')
                 self.assertFalse(state.get('corridor_complete',False))
 
-    def test_web_real_cli_upload_inspect_continue_and_stale_artifacts(self):
+    def test_web_osm_upload_refused_before_cli_and_task_mutation(self):
         server = RideServer(0, output_root=self.root/'web', cli_timeout=20)
         self.addCleanup(server.server_close)
-        image = base64.b64encode(self.image.read_bytes()).decode()
-        created = server.create({'mode':'demo','goal':'corridor','image_base64':image})
-        task = created['task_id']
-        inspected = server.resume(task, {'local_only':True,'osm_xml':XML,'road_names':['合成道路A','合成道路B']})
-        self.assertTrue(any(a['name']=='corridor-inspection.json' and a['current'] for a in inspected['artifacts']))
-        done = server.resume(task, {'local_only':True,'road_hypothesis_json':json.dumps(self.hypothesis)})
-        self.assertEqual(done['status'],'needs_confirmation')
-        corridors = [a for a in done['artifacts'] if a['name'].startswith('corridors/')]
-        self.assertEqual(len(corridors),3)
-        self.assertTrue(all(a['current'] and allowed_artifact(a['name']) for a in corridors))
-        stale = server.resume(task, {'local_only':True,'osm_xml':XML})
-        self.assertTrue(all(not a['current'] for a in stale['artifacts'] if a['name'].startswith('corridors/')))
+        with patch.dict(os.environ, {'AMAP_API_KEY':'synthetic-only'}):
+            created = server.create({'mode':'demo','goal':'corridor','map_provider':'amap','image_base64':base64.b64encode(self.image.read_bytes()).decode()})
+        folder = server.root/created['task_id']/'task'
+        before = (folder/'task.json').read_bytes()
+        from ride_web import WebError
+        with patch.object(server, 'run_cli') as cli:
+            with self.assertRaises(WebError):
+                server.resume(created['task_id'], {'local_only':True,'osm_xml':XML})
+            cli.assert_not_called()
+        self.assertEqual((folder/'task.json').read_bytes(), before)
+        self.assertFalse((folder/'map.osm').exists())
         self.assertFalse(allowed_artifact('corridors/../../passwd'))
 
-    def test_actual_api_payload_mock_inspection_then_build(self):
+    def test_legacy_api_corridor_never_uploads_or_queries(self):
         state, folder = self.task()
-        state['mode'] = 'api'
-        actions = iter([{'action':'inspect_roads','names':['合成道路A','合成道路B']},
-                        {'action':'build_corridor','hypothesis':self.hypothesis}])
-        payloads = []
-        class Response:
-            def __enter__(inner):return inner
-            def __exit__(inner,*args):pass
-            def read(inner, *args):
-                return json.dumps({'choices':[{'message':{'content':json.dumps(next(actions))}}]}).encode()
-        def open_request(request, **kwargs):
-            payloads.append(json.loads(request.data))
-            return Response()
-        with patch.dict(os.environ, {'RIDE_API_BASE':'https://mock.invalid/v1','RIDE_API_KEY':'mock','RIDE_MODEL':'mock'}):
-            with patch('urllib.request.build_opener') as opener:
-                opener.return_value.open.side_effect = open_request
-                done = agent.run(state,folder,agent.ConsentedPlanner())
-        self.assertEqual(done['status'],'needs_confirmation')
-        self.assertEqual(len(payloads),2)
-        current = payloads[1]['messages'][-1]['content'][0]['text']
-        self.assertIn('corridor_inspection',current)
-        self.assertIn('node_id',current)
-        self.assertIn('WGS84',current)
-        self.assertFalse(done.get('registered',False))
-        self.assertFalse(done['verified'])
+        state['map_provider'] = 'osm'
+        class Model:
+            semantic_review = True
+            def decide(self, *args): raise AssertionError('旧OSM任务不得启动模型')
+        with patch('amap_fetch._request') as amap, patch('map_fetch._download') as osm:
+            with self.assertRaisesRegex(ValueError, '本次'):
+                agent.run(state, folder, Model(), consent_map=True)
+            amap.assert_not_called(); osm.assert_not_called()
+        self.assertEqual((folder/'map.osm').read_text(), XML)
 
     def test_missing_osm_or_missing_names_never_generates_coordinates(self):
         folder = self.root/'missing'
@@ -152,6 +130,7 @@ class CorridorIntegrationTests(unittest.TestCase):
         self.assertEqual(done['status'],'waiting_for_user')
         self.assertNotIn('corridor_artifacts',done)
         (folder/'map.osm').write_text(XML)
+        done['map_provider'] = 'osm'
         done['corridor_names'] = ['不存在的合成道路']
         done = agent.run(done,folder,agent.LocalPlanner())
         self.assertEqual(done['status'],'waiting_for_user')

@@ -22,8 +22,8 @@ class OnlyAMapTests(unittest.TestCase):
         self.folder = self.root/'task'
         self.state = agent.start(image,self.folder,True,'corridor')
 
-    def test_new_task_defaults_to_amap(self):
-        self.assertEqual(self.state['map_provider'],'amap')
+    def test_new_task_defaults_to_relay(self):
+        self.assertEqual(self.state['map_provider'],'osm_relay')
 
     def test_all_retired_network_helpers_refuse_even_with_consent_and_mock_transport(self):
         target=self.folder/'map.osm'; target.write_text('<osm/>')
@@ -64,6 +64,7 @@ class OnlyAMapTests(unittest.TestCase):
             with self.assertRaises(ValueError):agent.validate_map_invocation(provider,local_only=True,fetch_map=True)
 
     def test_amap_failure_never_falls_back(self):
+        self.state['map_provider']='amap'
         with patch('ride_agent.fetch_location_clues',side_effect=map_fetch.MapFetchError('fixed',code='network_error')),patch('ride_agent.fetch_named_roads') as osm,patch('ride_agent.fetch_roads') as bbox:
             result=agent.run(self.state,self.folder,Planner(),consent_map=True)
             self.assertEqual(result['map_query_diagnostic']['reason_code'],'network_error')
@@ -103,9 +104,9 @@ class MigrationHTTPTests(unittest.TestCase):
             self.assertEqual(code,409);cli.assert_not_called();preflight.assert_not_called()
             code,_,body=self.request('/api/tasks',{'mode':'demo','image_base64':'AA=='})
             self.assertEqual(code,201,body)
-            preflight.assert_called_with('amap')
+            preflight.assert_called_with('osm_relay')
             argv=cli.call_args.args[0]
-            self.assertEqual(argv[argv.index('--map-provider')+1],'amap')
+            self.assertEqual(argv[argv.index('--map-provider')+1],'osm_relay')
 
 class MigrationCLITests(OnlyAMapTests):
     def test_cli_legacy_rejection_before_preflight_planner_or_task_mutation(self):

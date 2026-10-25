@@ -125,7 +125,7 @@ class AgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)/'task'
             state=start(self.fixture(tmp),folder,True,goal='roads')
-            state.update(registered=True,registration_gate_passed=False)
+            state.update(map_provider='osm',registered=True,registration_gate_passed=False)
             state=run(state,folder,Attempt())
             self.assertEqual(state['status'],'waiting_for_user')
             self.assertFalse(state.get('match_attempted',False))
@@ -154,18 +154,16 @@ class MapAgentTests(unittest.TestCase):
         (folder/'registration/registered-segments.geojson').write_text(json.dumps(geo))
         return state, folder
 
-    def test_complete_mock_download_to_candidates(self):
-        import xml.etree.ElementTree as ET
-        root = ET.parse(Path(__file__).resolve().parent.parent/'examples/synthetic-roads.osm').getroot()
-        elements = []
-        for n in root.findall('node'):
-            elements.append(dict(type='node', id=int(n.get('id')),
-                                 lon=float(n.get('lon')), lat=float(n.get('lat'))))
-        for w in root.findall('way'):
-            elements.append(dict(type='way', id=int(w.get('id')),
-                                 nodes=[int(n.get('ref')) for n in w.findall('nd')],
-                                 tags={t.get('k'):t.get('v') for t in w.findall('tag')}))
+    def test_explicit_local_fixture_to_candidates_without_network(self):
+        import contextlib
+        import io
         with tempfile.TemporaryDirectory() as tmp:
+            # 在测试临时目录生成合成OSM，不依赖gitignored产物，也不改examples。
+            generator = Path(__file__).resolve().parent.parent/'examples/make_synthetic_roads.py'
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(generator.read_text(), str(generator), 'exec'),
+                     {'__file__': str(Path(tmp)/'fixture.py')})
+            fixture = (Path(tmp)/'synthetic-roads.osm').read_text()
             # Generate the fixture locally without requiring a gitignored PNG.
             source = Path(tmp)/'image.png'
             image = Image.new('RGB',(640,480),'white')
@@ -175,16 +173,17 @@ class MapAgentTests(unittest.TestCase):
             image.save(source)
             folder = Path(tmp)/'task'
             state = start(source,folder,True,'roads')
+            state['map_provider'] = 'osm'
             state['messages'].append({'role':'user','content':json.dumps({'crop':[0,0,640,480],'color':'#00BFA5'})})
             state = run(state,folder,DemoPlanner())
             (folder/'controls.json').write_text((Path(__file__).resolve().parent.parent/'examples/synthetic-controls.json').read_text())
             state['controls_crop'] = state['extraction_config']['crop']
             state = run(state,folder,DemoPlanner())
             self.assertTrue(state['registration_gate_passed'])
-            state['map_download_requested'] = True
-            with patch('map_fetch._download',return_value=json.dumps({'elements':elements}).encode()) as network:
+            (folder/'map.osm').write_text(fixture)
+            with patch('map_fetch._download',side_effect=AssertionError('本地匹配不得联网')) as network:
                 state = run(state,folder,DemoPlanner(),consent_map=True)
-                network.assert_called_once()
+                network.assert_not_called()
             self.assertEqual(state['status'],'needs_confirmation')
             report=json.loads((folder/'roads/road-match.json').read_text())
             self.assertEqual(report['matched_segment_count'],report['input_segment_count'])
@@ -204,21 +203,16 @@ class MapAgentTests(unittest.TestCase):
                 fetch.assert_not_called()
                 self.assertTrue(result['map_download_requested'])
 
-    def test_download_uses_only_local_bounds(self):
+    def test_old_download_request_never_queries_even_with_consent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            state,folder = self.prepare(tmp)
-            def fetched(bounds, path, *, consent_download=False):
-                self.assertTrue(consent_download)
-                self.assertAlmostEqual(bounds[0],115.998)
-                self.assertAlmostEqual(bounds[3],39.003)
-                path.write_text((Path(__file__).resolve().parent.parent/'examples/synthetic-roads.osm').read_text())
-                return {'bounds':bounds,'node_count':10}
-            with patch('ride_agent.fetch_roads',side_effect=fetched) as fetch:
-                result=run(state,folder,DemoPlanner(),budget=1,consent_map=True)
-                fetch.assert_called_once()
-                self.assertFalse(result['map_download_requested'])
-                self.assertEqual(result['status'],'paused')
-                self.assertIn('map_download',load(folder))
+            state, folder = self.prepare(tmp)
+            with patch('ride_agent.fetch_roads') as fetch:
+                result = run(state,folder,DemoPlanner(),budget=1,consent_map=True)
+                fetch.assert_not_called()
+            self.assertEqual(result['status'], 'waiting_for_user')
+            self.assertIn('osm_relay/amap', result['question'])
+            self.assertTrue(result['map_download_requested'])
+            self.assertFalse((folder/'map.osm').exists())
 
     def test_download_rejects_model_coordinates(self):
         class Bad:
@@ -233,19 +227,21 @@ class MapAgentTests(unittest.TestCase):
     def test_download_rejects_bad_registration(self):
         with tempfile.TemporaryDirectory() as tmp:
             state,folder = self.prepare(tmp)
-            state['registration_gate_passed']=False
+            state['registration_gate_passed'] = False
             with patch('ride_agent.fetch_roads') as fetch:
                 result=run(state,folder,DemoPlanner(),consent_map=True)
-                fetch.assert_not_called()
-                self.assertEqual(result['status'],'error')
+            fetch.assert_not_called()
+            self.assertEqual(result['status'],'waiting_for_user')
+            self.assertFalse(result.get('match_attempted',False))
 
-    def test_failed_download_keeps_retry_state(self):
+    def test_old_download_request_pauses_without_replaying(self):
         with tempfile.TemporaryDirectory() as tmp:
             state,folder = self.prepare(tmp)
-            with patch('ride_agent.fetch_roads',side_effect=ValueError('HTTP 429; retry later')):
+            with patch('ride_agent.fetch_roads',side_effect=AssertionError('退休入口不得调用')) as fetch:
                 result=run(state,folder,DemoPlanner(),consent_map=True)
-                self.assertEqual(result['status'],'error')
-                self.assertTrue(result['map_download_requested'])
-                self.assertFalse(result.get('match_attempted',False))
+            fetch.assert_not_called()
+            self.assertEqual(result['status'],'waiting_for_user')
+            self.assertTrue(result['map_download_requested'])
+            self.assertFalse(result.get('match_attempted',False))
 
 if __name__=='__main__': unittest.main()

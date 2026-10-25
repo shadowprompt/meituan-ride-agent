@@ -55,8 +55,8 @@ class SimplePageTests(unittest.TestCase):
         for identity in ('uploadConsent', 'reviewConsent', 'mapConsent'):
             self.assertNotIn('checked', page.attrs[identity])
         self.assertEqual(page.parents['queryMapConsent'], ())
-        self.assertEqual(page.options['mapProvider'], ['amap'])
-        self.assertIn('OSM/Overpass联网已停用', PAGE)
+        self.assertEqual(page.options['mapProvider'], ['osm_relay','amap'])
+        self.assertIn('本地OSM/Overpass直连禁止', PAGE)
         self.assertIn('具体对象', PAGE)
 
     @unittest.skipUnless(shutil.which('node'), '需要本地 Node')
@@ -98,7 +98,7 @@ class MapAvailabilityTests(unittest.TestCase):
     state = fixtures.WebTests.state
 
     def test_current_local_map_fact_is_read_only(self):
-        task = self.state(goal='corridor')
+        task = self.state(goal='corridor', map_provider='osm')
         self.assertFalse(json.loads(self.request('/api/tasks/'+task)[2])['map_available'])
         # 合成空文件只用于测试“本地存在”事实，不是假装真实道路数据。
         (self.root/task/'task'/'map.osm').write_text('<osm/>')

@@ -23,7 +23,7 @@ class SourceLayoutTests(unittest.TestCase):
 
     def test_default_task_location_and_bounded_background_timeout(self):
         # 不在真实任务目录写数据；检查默认路径并拦截子进程。
-        with patch('ride_web.safe_path'), patch.object(Path, 'mkdir'):
+        with patch('ride_web.safe_path'), patch.object(Path, 'mkdir'), patch.object(Path, 'iterdir', return_value=iter(())):
             server = ride_web.RideServer(0)
         try:
             self.assertEqual(server.root, ROOT/'outputs'/'web')

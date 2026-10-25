@@ -1,4 +1,4 @@
-"""Fully offline download tests: every transport is mocked."""
+"""退休联网入口强拒绝；OSM JSON/XML 本地解析、预算与访问限制仍独立覆盖。"""
 import copy
 import http.client
 import io
@@ -45,43 +45,30 @@ class MapFetchTests(unittest.TestCase):
     def fetch(self, bounds=BOUNDS, **kwargs):
         return map_fetch.fetch_roads(bounds, self.path, consent_download=True, **kwargs)
 
-    def test_valid_fixture_and_query(self):
-        report = self.fetch()
-        self.assertEqual(report['bounds'], BOUNDS)
-        self.assertEqual((report['node_count'], report['way_count'], report['reference_count']), (2, 1, 2))
-        self.assertEqual(report['status'], 'needs_confirmation')
-        self.assertFalse(report['verified'])
-        self.assertFalse(report['original_gps'])
-        self.assertEqual(report['format'], 'osm_xml')
+    def test_local_fixture_conversion_preserves_tags(self):
+        xml, nodes, ways, refs = map_fetch._convert(json.dumps(FIXTURE).encode())
+        self.assertEqual((nodes, ways, refs), (2,1,2))
+        self.path.write_bytes(xml)
         root = ET.parse(self.path).getroot()
-        self.assertEqual(root.tag, 'osm')
         self.assertEqual(root.find('way/tag[@k="name"]').get('v'), 'A & B')
         self.assertEqual(root.find('way/tag[@k="access"]').get('v'), 'private')
-        request = self.opener.open.call_args.args[0]
-        self.assertEqual(request.full_url, map_fetch.ENDPOINT)
-        self.assertEqual(request.method, 'POST')
-        query = urllib.parse.parse_qs(request.data.decode())['data'][0]
-        self.assertIn('way["highway"](39.900000000000,116.390000000000,39.910000000000,116.400000000000)', query)
-        self.assertIn('(._;>;);out body;', query)
-        self.assertNotIn('relation', query)
-        self.assertEqual(self.opener.open.call_args.kwargs['timeout'], 30)
-        self.assertEqual(self.opener.open.call_count, 1)
-        self.assertEqual(list(self.path.parent.glob('.map-fetch-*')), [])
+        self.build.assert_not_called()
 
     def test_output_accepted_by_current_road_match(self):
-        # Matcher accepts OSM XML, not Overpass JSON. Restricted tags survive
-        # conversion so its existing bicycle/access filtering still applies.
         import road_match
-        self.fetch()
+        self.path.write_bytes(map_fetch._convert(json.dumps(FIXTURE).encode())[0])
         nodes, edges = road_match._load_osm(self.path)
         self.assertEqual(len(nodes), 2)
         self.assertEqual(edges, [])
-
-    def test_consent_required_per_call(self):
-        for consent in (False, None, 1, 'yes'):
-            with self.subTest(consent=consent), self.assertRaisesRegex(map_fetch.MapFetchError, 'consent'):
-                map_fetch.fetch_roads(BOUNDS, self.path, consent_download=consent)
         self.build.assert_not_called()
+
+    def test_retired_osm_refuses_every_consent_value(self):
+        for consent in (False,None,1,'yes',True):
+            with self.subTest(consent=consent),self.assertRaises(map_fetch.MapFetchError) as caught:
+                map_fetch.fetch_roads(BOUNDS,self.path,consent_download=consent)
+            self.assertEqual(caught.exception.code,'osm_network_disabled')
+        self.build.assert_not_called();self.opener.open.assert_not_called()
+        self.assertFalse(self.path.exists())
 
     def test_invalid_bounds_no_network(self):
         for bounds in (None, '1,2,3,4', [], [0, 0, 1], [True, 0, .01, .01],
@@ -91,73 +78,74 @@ class MapFetchTests(unittest.TestCase):
                        [0, 0, 0, .01], [0, 1, .01, 0], [0, 0, .2, .01],
                        [0, 0, .1, .1]):
             with self.subTest(bounds=bounds), self.assertRaises(map_fetch.MapFetchError):
-                self.fetch(bounds)
+                map_fetch._bounds(bounds)
         self.build.assert_not_called()
 
-    def test_invalid_output_before_network(self):
-        for target in (self.path.parent, self.path.parent / 'absent' / 'roads.osm', None):
-            with self.subTest(target=target), self.assertRaises(map_fetch.MapFetchError):
-                map_fetch.fetch_roads(BOUNDS, target, consent_download=True)
+    def test_retired_osm_refuses_invalid_output_without_io(self):
+        for target in (self.path.parent,self.path.parent/'absent'/'roads.osm',None):
+            with self.subTest(target=target),self.assertRaises(map_fetch.MapFetchError) as caught:
+                map_fetch.fetch_roads(BOUNDS,target,consent_download=True)
+            self.assertEqual(caught.exception.code,'osm_network_disabled')
         self.build.assert_not_called()
-
-    def test_network_errors_no_retry(self):
-        for error in (urllib.error.URLError('offline'), TimeoutError(), OSError(),
-                      urllib.error.HTTPError(map_fetch.ENDPOINT, 429, 'slow down', {}, None)):
-            with self.subTest(error=error):
-                self.opener.open.reset_mock()
-                self.opener.open.side_effect = error
-                with self.assertRaises(map_fetch.MapFetchError):
-                    self.fetch()
-                self.assertEqual(self.opener.open.call_count, 1)
-                self.assertFalse(self.path.exists())
-
-    def test_interrupted_body_no_retry_or_output(self):
-        self.response.read.side_effect = http.client.IncompleteRead(b'partial')
-        with self.assertRaisesRegex(map_fetch.MapFetchError, 'network failure'):
-            self.fetch()
-        self.assertEqual(self.opener.open.call_count, 1)
         self.assertFalse(self.path.exists())
 
-    def test_unexpected_status_and_encoding(self):
-        self.response.status = 503
-        with self.assertRaisesRegex(map_fetch.MapFetchError, '503'):
+    def test_retired_osm_never_reaches_failing_transport(self):
+        for error in (urllib.error.URLError('offline'),TimeoutError(),OSError(),urllib.error.HTTPError(map_fetch.ENDPOINT,429,'slow',{},None)):
+            self.opener.open.side_effect=error
+            with self.subTest(error=type(error).__name__),self.assertRaises(map_fetch.MapFetchError) as caught:
+                self.fetch()
+            self.assertEqual(caught.exception.code,'osm_network_disabled')
+            self.opener.open.assert_not_called()
+        self.build.assert_not_called();self.assertFalse(self.path.exists())
+
+    def test_retired_osm_never_reads_partial_body(self):
+        self.response.read.side_effect=http.client.IncompleteRead(b'partial')
+        with self.assertRaises(map_fetch.MapFetchError) as caught:
             self.fetch()
-        self.response.status = 200
-        self.response.headers = {'Content-Encoding': 'gzip'}
-        with self.assertRaisesRegex(map_fetch.MapFetchError, 'compressed'):
-            self.fetch()
+        self.assertEqual(caught.exception.code,'osm_network_disabled')
+        self.response.read.assert_not_called();self.opener.open.assert_not_called()
+        self.build.assert_not_called();self.assertFalse(self.path.exists())
+
+    def test_retired_osm_ignores_transport_status_and_encoding(self):
+        for status,headers in ((503,{}),(200,{'Content-Encoding':'gzip'})):
+            self.response.status=status;self.response.headers=headers
+            with self.subTest(status=status),self.assertRaises(map_fetch.MapFetchError) as caught:
+                self.fetch()
+            self.assertEqual(caught.exception.code,'osm_network_disabled')
+        self.build.assert_not_called();self.response.read.assert_not_called()
 
     def test_redirect_refused(self):
         with self.assertRaisesRegex(map_fetch.MapFetchError, 'redirect'):
             map_fetch._NoRedirect().redirect_request(None, None, 302, '', {}, 'https://elsewhere.invalid/')
 
-    def test_response_byte_limit_and_headers(self):
-        for length in ('10000001', '-1', 'not-an-int'):
-            self.response.headers = {'Content-Length': length}
-            with self.subTest(length=length), self.assertRaises(map_fetch.MapFetchError):
+    def test_retired_osm_never_reads_headers_or_body(self):
+        for length in ('10000001','-1','not-an-int'):
+            self.response.headers={'Content-Length':length}
+            with self.subTest(length=length),self.assertRaises(map_fetch.MapFetchError) as caught:
                 self.fetch()
-        self.response.headers = {}
-        with patch('map_fetch.MAX_RESPONSE_BYTES', 10):
-            self.set_body(b'x' * 11)
-            with self.assertRaisesRegex(map_fetch.MapFetchError, 'byte limit'):
-                self.fetch()
-            self.set_body(b'x' * 10)
-            self.assertEqual(map_fetch._download('test'), b'x' * 10)
+            self.assertEqual(caught.exception.code,'osm_network_disabled')
+        with patch('map_fetch.MAX_RESPONSE_BYTES',10):
+            self.set_body(b'x'*11)
+            with self.assertRaises(map_fetch.MapFetchError) as caught:
+                map_fetch._download('test',max_bytes=10)
+        self.assertEqual(caught.exception.code,'osm_network_disabled')
+        self.build.assert_not_called();self.response.read.assert_not_called()
 
-    def test_wall_clock_deadline(self):
-        with patch('map_fetch.time.monotonic', side_effect=[0, 0, 31, 31]):
-            with self.assertRaisesRegex(map_fetch.MapFetchError, 'deadline'):
-                self.fetch()
+    def test_retired_download_never_starts_a_time_budget(self):
+        with patch('map_fetch.time.monotonic',side_effect=AssertionError('退休入口不应启动预算')) as clock:
+            with self.assertRaises(map_fetch.MapFetchError) as caught:
+                map_fetch._download('test',deadline=-1)
+            clock.assert_not_called()
+        self.assertEqual(caught.exception.code,'osm_network_disabled')
+        self.build.assert_not_called()
 
     def test_malformed_and_error_json_preserve_existing(self):
         self.path.write_text('existing')
-        for body in (b'not JSON', b'\xff', b'[]', b'{}', b'{"elements": null}',
-                     b'{"elements": [], "remark": "runtime error"}',
-                     b'{"elements": [NaN]}'):
-            self.set_body(body)
-            with self.subTest(body=body), self.assertRaises(map_fetch.MapFetchError):
-                self.fetch()
-            self.assertEqual(self.path.read_text(), 'existing')
+        for body in (b'not JSON',b'\xff',b'[]',b'{}',b'{"elements": null}',b'{"elements": [], "remark": "runtime error"}',b'{"elements": [NaN]}'):
+            with self.subTest(body=body),self.assertRaises(map_fetch.MapFetchError):
+                map_fetch._convert(body)
+            self.assertEqual(self.path.read_text(),'existing')
+        self.build.assert_not_called()
 
     def test_invalid_elements(self):
         bad = [None, {}, {'type': 'relation', 'id': 1},
@@ -175,7 +163,7 @@ class MapFetchTests(unittest.TestCase):
         for element in bad:
             self.set_body(json.dumps({'elements': FIXTURE['elements'][:2] + [element]}).encode())
             with self.subTest(element=element), self.assertRaises(map_fetch.MapFetchError):
-                self.fetch()
+                map_fetch._convert(self.response.read())
         self.assertFalse(self.path.exists())
 
     def test_duplicate_elements_and_budgets(self):
@@ -184,27 +172,29 @@ class MapFetchTests(unittest.TestCase):
             data['elements'].append(data['elements'][index])
             self.set_body(json.dumps(data).encode())
             with self.assertRaisesRegex(map_fetch.MapFetchError, 'Duplicate'):
-                self.fetch()
+                map_fetch._convert(self.response.read())
         for setting in ('MAX_NODES', 'MAX_WAYS', 'MAX_REFERENCES', 'MAX_OUTPUT_BYTES'):
             self.set_body(json.dumps(FIXTURE).encode())
             with self.subTest(setting=setting), patch.object(map_fetch, setting, 0):
                 with self.assertRaises(map_fetch.MapFetchError):
-                    self.fetch()
+                    map_fetch._convert(self.response.read())
 
-    def test_atomic_replace_failure_cleans_temp_preserves_old(self):
+    def test_retired_fetch_never_replaces_existing_map(self):
         self.path.write_text('existing')
-        with patch('map_fetch.os.replace', side_effect=OSError('disk error')):
-            with self.assertRaisesRegex(map_fetch.MapFetchError, 'atomically'):
+        with patch('map_fetch.os.replace',side_effect=OSError('disk error')) as replace:
+            with self.assertRaises(map_fetch.MapFetchError) as caught:
                 self.fetch()
-        self.assertEqual(self.path.read_text(), 'existing')
-        self.assertEqual(list(self.path.parent.glob('.map-fetch-*')), [])
+            replace.assert_not_called()
+        self.assertEqual(caught.exception.code,'osm_network_disabled')
+        self.build.assert_not_called()
+        self.assertEqual(self.path.read_text(),'existing')
+        self.assertEqual(list(self.path.parent.glob('.map-fetch-*')),[])
 
-    def test_empty_success(self):
-        self.set_body(b'{"elements": []}')
-        report = self.fetch()
-        self.assertEqual(report['status'], 'no_roads')
-        self.assertEqual(report['way_count'], 0)
-        self.assertEqual(ET.parse(self.path).getroot().tag, 'osm')
+    def test_local_empty_fixture_conversion(self):
+        xml, nodes, ways, refs = map_fetch._convert(b'{"elements": []}')
+        self.assertEqual((nodes,ways,refs),(0,0,0))
+        self.assertEqual(ET.fromstring(xml).tag,'osm')
+        self.build.assert_not_called()
 
 
 if __name__ == '__main__':

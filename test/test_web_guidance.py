@@ -53,11 +53,13 @@ class GuidanceTests(unittest.TestCase):
         self.assertEqual(page.count("consent_upload:$('uploadConsent').checked"), 2)
         self.assertIn("$('uploadConsent').checked=false", page)
 
-    def test_roads_switch_disclosed_before_download_and_continue(self):
+    def test_relay_corridor_and_amap_limits_disclosed_before_continue(self):
         notice = PAGE[PAGE.index('id="roadsNotice"'):PAGE.index('<label><input id="fetch"')]
-        self.assertIn('自动切换为 roads', notice)
-        self.assertIn('上传本地 OSM', notice)
-        self.assertIn('独立检查', notice)
+        self.assertIn('OSM中转只查获授权的具体道路/way', notice)
+        self.assertIn('支持未验证走廊', notice)
+        self.assertIn('高德GCJ-02定位线索', notice)
+        self.assertIn('不下载路网', notice)
+        self.assertIn('不构建道路走廊', notice)
         self.assertLess(PAGE.index('id="roadsNotice"'), PAGE.index('id="resume"'))
         self.assertIn('d.recovery_hint', PAGE)
         self.assertIn('d.error_category', PAGE)
@@ -94,9 +96,10 @@ class GuidanceTests(unittest.TestCase):
                 with patch('ride_web.subprocess.run', return_value=result):
                     code, _, body = self.request('/api/tasks/'+task+'/resume', payload)
                 data = json.loads(body)
-                self.assertEqual(code, 422)
-                self.assertEqual(data['error_category'], category)
-                self.assertEqual(data['recovery_hint'], GUIDANCE[category])
+                expected = 'request_rejected' if payload.get('fetch_map') else category
+                self.assertEqual(code, 409 if payload.get('fetch_map') else 422)
+                self.assertEqual(data['error_category'], expected)
+                self.assertEqual(data['recovery_hint'], GUIDANCE[expected])
                 for secret in (b'SECRET', b'/private/path', b'KEY', b'remote response'):
                     self.assertNotIn(secret, body)
 

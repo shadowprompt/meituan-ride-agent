@@ -1,4 +1,4 @@
-"""行政层级全部使用合成 OSM 对象及 mock；不验证真实地名/路名或公网QL。"""
+"""历史行政层级解析仅注入本地合成对象；公共OSM联网入口始终拒绝。"""
 import copy
 import json
 from pathlib import Path
@@ -28,22 +28,18 @@ def hierarchy(parent='上海市', parent_id=1, child_id=2):
 
 class AdminAreaTests(unittest.TestCase):
     def fetch(self, area, response, explicit=None):
-        with tempfile.TemporaryDirectory() as d, patch('map_fetch._download', side_effect=[json.dumps(response).encode(), json.dumps(FIXTURE).encode()]) as transport:
-            path = Path(d)/'map.osm'
-            path.write_text('old')
-            try:
-                result = map_fetch.fetch_named_roads(area, ['A & B'], path, consent_download=True, area_hierarchy=explicit)
-                return result, transport.call_args_list
-            except map_fetch.MapFetchError:
-                self.assertEqual(path.read_text(), 'old')
-                self.assertEqual(transport.call_count, 1)
-                raise
+        from unittest.mock import Mock
+        transport = Mock(return_value=json.dumps(response).encode())
+        levels = admin_area.levels_for(area, explicit, map_fetch.MapFetchError)
+        ident, raw, resolution = admin_area.resolve(levels, transport, 1,
+            map_fetch.MapFetchError, map_fetch._identifier, map_fetch._reject_constant)
+        return {'area_id': ident, 'area_resolution': resolution, 'verified': False}, transport.call_args_list
 
-    def test_shanghai_and_zhoushan_constrained_distinct_area_two_requests(self):
+    def test_offline_hierarchy_constrains_distinct_parent_ids(self):
         for parent, pid, cid in [('上海市', 1, 2), ('舟山市', 3, 4)]:
             with self.subTest(parent=parent):
                 result, calls = self.fetch(parent+'普陀区', hierarchy(parent, pid, cid))
-                self.assertEqual(len(calls), 2)
+                self.assertEqual(len(calls), 1)
                 q = calls[0].args[0]
                 self.assertIn('if(p0.count(relations) == 1)', q)
                 self.assertNotIn('out body', q)
@@ -53,8 +49,8 @@ class AdminAreaTests(unittest.TestCase):
                 self.assertIn('rel.members1(area.a0)', q)
                 self.assertIn('["name"="'+parent+'"]', q)
                 self.assertNotIn('area["name"="'+parent+'普陀区"]', q)
-                self.assertIn('area('+str(3600000000+cid)+')', calls[1].args[0])
-                self.assertEqual(calls[0].kwargs['deadline'], calls[1].kwargs['deadline'])
+                self.assertEqual(result['area_id'], 3600000000+cid)
+                self.assertEqual(calls[0].kwargs['deadline'], 1)
                 self.assertEqual(result['area_resolution']['query_levels'], [parent, '普陀区'])
                 self.assertFalse(result['verified'])
 
@@ -82,7 +78,7 @@ class AdminAreaTests(unittest.TestCase):
         response = {'elements': [{'type': 'area', 'id': 3600000000+i, 'tags': {'name': '普陀区', 'boundary': 'administrative'}} for i in (2, 4)]}
         with self.assertRaises(map_fetch.MapFetchError) as caught:
             self.fetch('普陀区', response)
-        self.assertEqual(caught.exception.code, 'area_ambiguous')
+        self.assertEqual(caught.exception.code, 'area_not_found')
         self.assertEqual(caught.exception.area_resolution['query_levels'], ['普陀区'])
 
     def test_foreign_child_missing_membership_or_derived_area_rejected(self):
@@ -108,7 +104,7 @@ class AdminAreaTests(unittest.TestCase):
                     map_fetch.fetch_named_roads(area, ['合成路'], Path(d)/'map.osm', consent_download=True, area_hierarchy=explicit)
             with self.assertRaises(map_fetch.MapFetchError) as caught:
                 map_fetch.fetch_named_roads('上海市普陀区', ['合成路'], Path(d)/'map.osm')
-            self.assertEqual(caught.exception.code, 'consent_required')
+            self.assertEqual(caught.exception.code, 'osm_network_disabled')
             transport.assert_not_called()
 
     def test_failure_keeps_safe_candidates_without_remote_body(self):
@@ -119,8 +115,8 @@ class AdminAreaTests(unittest.TestCase):
         diagnostic = caught.exception.diagnostic()
         self.assertNotIn('REMOTE_BODY', json.dumps(diagnostic))
         self.assertEqual(diagnostic['area_resolution']['candidates'][1]['relation_ids'], [2])
-        with patch('map_fetch._download', side_effect=[json.dumps(hierarchy()).encode(), b'{"elements":[]}']):
+        with patch('map_fetch._download') as transport:
             with tempfile.TemporaryDirectory() as d, self.assertRaises(map_fetch.MapFetchError) as caught:
                 map_fetch.fetch_named_roads('上海市普陀区', ['合成路'], Path(d)/'map.osm', consent_download=True)
-        self.assertEqual(caught.exception.code, 'roads_not_found')
-        self.assertEqual(caught.exception.area_resolution['query_levels'], ['上海市', '普陀区'])
+            transport.assert_not_called()
+        self.assertEqual(caught.exception.code, 'osm_network_disabled')

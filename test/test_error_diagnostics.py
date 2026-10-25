@@ -47,6 +47,9 @@ class DiagnosticTests(unittest.TestCase):
         for i, env in enumerate(({}, {'RIDE_API_KEY':'mock-only'}, {'RIDE_MODEL':'mock-vision'})):
             child_env = {k:v for k,v in os.environ.items() if k not in ('RIDE_API_KEY','RIDE_MODEL','RIDE_API_BASE')}
             child_env.update(env)
+            child_env['AMAP_API_KEY'] = 'synthetic-map-key-only'
+            child_env['OSM_SERVICE_URL']='http://127.0.0.1:9'
+            child_env['OSM_SERVICE_TOKEN']='synthetic-relay-token-no-network-12345'
             folder = self.root/('cli-'+str(i))
             result = subprocess.run([sys.executable,str(Path(__file__).resolve().parent.parent/'src'/'ride_agent.py'),'start','--image',str(self.source),
                 '--task-dir',str(folder),'--consent-upload'],capture_output=True,env=child_env,timeout=20)
@@ -201,7 +204,7 @@ class WebDiagnosticTests(unittest.TestCase):
         for env in ({}, {'RIDE_API_KEY':'mock-only'}, {'RIDE_MODEL':'mock-vision'},
                     {'RIDE_API_KEY':'','RIDE_MODEL':'mock-vision'},
                     {'RIDE_API_KEY':'mock-only','RIDE_MODEL':''}):
-            with self.subTest(fields=list(env)), patch.dict(os.environ,env,clear=True), \
+            with self.subTest(fields=list(env)), patch.dict(os.environ,dict(env, AMAP_API_KEY='synthetic-map-key-only', OSM_SERVICE_URL='http://127.0.0.1:9', OSM_SERVICE_TOKEN='synthetic-relay-token-no-network-12345'),clear=True), \
                  patch('ride_web.subprocess.run') as cli:
                 before = list(self.root.iterdir())
                 code, _, body = self.request('/api/tasks', {'mode':'api','consent_upload':True,

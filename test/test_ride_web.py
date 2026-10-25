@@ -17,7 +17,7 @@ from ride_web import ARTIFACTS, MAX_BODY, MAX_IMAGE, RideServer, WebError
 
 class WebTests(unittest.TestCase):
     def setUp(self):
-        environment = patch.dict('os.environ', {'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-vision','AMAP_API_KEY':'synthetic-map-key-only'})
+        environment = patch.dict('os.environ', {'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-vision','AMAP_API_KEY':'synthetic-map-key-only','OSM_SERVICE_URL':'http://127.0.0.1:9','OSM_SERVICE_TOKEN':'synthetic-relay-token-no-network-12345'})
         environment.start()
         self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
@@ -212,7 +212,7 @@ class WebTests(unittest.TestCase):
     def test_resume_writes_fixed_files_and_flags(self):
         task_id = self.state(mode='api')
         data = {'answer': '--evil; $(touch /tmp/pwn)', 'color': '#00BFA5', 'crop': [0, 1, 50, 60],
-                'controls_json': '{"landmarks": []}', 'osm_xml': '<osm version="0.6"/>',
+                'controls_json': '{"landmarks": []}',
                 'consent_upload': True}
         with patch('ride_web.subprocess.run', side_effect=self.mock_cli) as run:
             code, _, body = self.request('/api/tasks/'+task_id+'/resume', data)
@@ -224,12 +224,13 @@ class WebTests(unittest.TestCase):
         inputs = self.root/task_id/'inputs'
         self.assertEqual((inputs/'answer.txt').read_text(), data['answer'])
         self.assertEqual((inputs/'controls-upload.json').read_text(), data['controls_json'])
-        self.assertEqual((inputs/'osm-upload.xml').read_text(), data['osm_xml'])
+        self.assertFalse((inputs/'osm-upload.xml').exists())
         with patch('ride_web.subprocess.run', side_effect=self.mock_cli) as run:
             self.assertEqual(self.request('/api/tasks/'+task_id+'/resume', {
-                'fetch_map': True, 'consent_map': True, 'consent_upload': True})[0], 200)
+                'consent_map': True, 'consent_upload': True})[0], 200)
             self.assertIn('--consent-map', run.call_args.args[0])
-            self.assertIn('--fetch-map', run.call_args.args[0])
+            self.assertNotIn('--fetch-map', run.call_args.args[0])
+            self.assertEqual(self.request('/api/tasks/'+task_id+'/resume', {'fetch_map':True,'consent_map':True,'consent_upload':True})[0],409)
             # Consent is never persisted or inherited from last invocation.
             self.assertEqual(self.request('/api/tasks/'+task_id+'/resume', {'answer': 'yes'})[0], 403)
 
@@ -249,7 +250,7 @@ class WebTests(unittest.TestCase):
         with patch('ride_web.subprocess.run') as run:
             for data in invalid:
                 code, _, body = self.request('/api/tasks/'+task_id+'/resume', data)
-                self.assertIn(code, (400, 403), (data, code, body))
+                self.assertEqual(code, 409 if data.get('fetch_map') is True else 400, (data,code,body))
             run.assert_not_called()
         self.assertEqual(list((self.root/task_id/'inputs').iterdir()), [])
 
@@ -303,31 +304,28 @@ class WebTests(unittest.TestCase):
         with self.assertRaises(WebError):
             RideServer(0, output_root=outside)
 
-    def test_actual_http_roads_and_crop_correction(self):
-        base=Path(__file__).resolve().parent.parent/'examples'
-        code,_,body=self.request('/api/tasks',{
-            'image_base64':base64.b64encode((base/'synthetic-ride.png').read_bytes()).decode(),
-            'mode':'demo','goal':'roads'})
+    def test_actual_http_amap_pixels_crop_and_osm_upload_rejection(self):
+        from PIL import Image, ImageDraw
+        image = Image.new('RGB',(80,60),'white')
+        ImageDraw.Draw(image).line([(10,40),(50,40),(50,10)],fill='#00BFA5',width=5)
+        stream=io.BytesIO();image.save(stream,format='PNG')
+        code,_,body=self.request('/api/tasks',{'image_base64':base64.b64encode(stream.getvalue()).decode(),'mode':'demo','goal':'pixels','map_provider':'amap'})
         self.assertEqual(code,201,body)
-        task_id=json.loads(body)['task_id']
-        endpoint='/api/tasks/'+task_id+'/resume'
-        code,_,body=self.request(endpoint,{'answer':(base/'demo-answer.json').read_text()})
-        self.assertEqual(code,200,body)
-        code,_,body=self.request(endpoint,{
-            'controls_json':(base/'synthetic-controls.json').read_text(),
-            'osm_xml':(base/'synthetic-roads.osm').read_text()})
+        task_id=json.loads(body)['task_id']; endpoint='/api/tasks/'+task_id+'/resume'
+        code,_,body=self.request(endpoint,{'crop':[0,0,80,60],'color':'#00BFA5'})
         self.assertEqual(code,200,body)
         result=json.loads(body)
+        self.assertEqual(result['map_provider'],'amap')
         self.assertEqual(result['status'],'needs_confirmation')
-        road=[a for a in result['artifacts'] if a['name']=='roads/road-overlay.png']
-        self.assertTrue(road[0]['current'])
-        self.assertEqual(self.request(road[0]['url'])[0],200)
-        code,_,body=self.request(endpoint,{'crop':[10,10,630,470]})
+        with patch('ride_web.subprocess.run') as cli:
+            code,_,body=self.request(endpoint,{'osm_xml':'<osm/>'})
+            self.assertEqual(code,400,body); cli.assert_not_called()
+        code,_,body=self.request(endpoint,{'crop':[1,1,79,59]})
         self.assertEqual(code,200,body)
         result=json.loads(body)
-        road=[a for a in result['artifacts'] if a['name']=='roads/road-overlay.png']
-        self.assertFalse(road[0]['current'])
-        self.assertEqual(result['status'],'waiting_for_user')
+        self.assertFalse(result.get('registered',False))
+        self.assertFalse(result.get('match_attempted',False))
+        self.assertFalse((self.root/task_id/'task'/'map.osm').exists())
 
     def test_actual_demo_cli_roundtrip(self):
         from PIL import Image, ImageDraw
@@ -352,7 +350,7 @@ class WebTests(unittest.TestCase):
         for artifact in status['artifacts']:
             self.assertIn(artifact['name'], ARTIFACTS)
             self.assertEqual(self.request(artifact['url'])[0], 200)
-        self.assertEqual(self.request('/artifacts/'+status['task_id']+'/input.png')[0], 404)
+        self.assertEqual(self.request('/artifacts/'+status['task_id']+'/input.png')[0], 200)
 
 
 def RideToken():

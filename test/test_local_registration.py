@@ -125,7 +125,7 @@ class LocalRegistrationTests(unittest.TestCase):
         self.attach()
         for requested in (False, True):
             state = copy.deepcopy(self.state)
-            state.update(goal='roads', controls_crop=[0,0,80,60], map_download_requested=requested)
+            state.update(map_provider='osm', goal='roads', controls_crop=[0,0,80,60], map_download_requested=requested)
             with patch('ride_agent.fetch_roads', side_effect=AssertionError('no consent')), patch('ride_agent.match', side_effect=AssertionError('no map')):
                 result = run(state, self.folder, LocalPlanner(), consent_map=False)
             self.assertTrue(result['registration_gate_passed'])
@@ -135,7 +135,7 @@ class LocalRegistrationTests(unittest.TestCase):
     def test_local_roads_attempts_supplied_map_without_download(self):
         self.attach()
         (self.folder/'map.osm').write_text('<osm version="0.6"/>')
-        self.state.update(goal='roads')
+        self.state.update(map_provider='osm', goal='roads')
         with patch('ride_agent.fetch_roads', side_effect=AssertionError('no automatic download')):
             state = run(self.state, self.folder, LocalPlanner())
         self.assertTrue(state['registration_gate_passed'])

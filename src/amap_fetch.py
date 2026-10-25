@@ -17,7 +17,9 @@ MAX_RESPONSE_BYTES = 512_000
 MAX_CANDIDATES = 10
 
 
-def _request(params, key, deadline):
+def _request(params, key, deadline, *, endpoint_path="/v3/geocode/geo"):
+    if endpoint_path not in ("/v3/geocode/geo", "/v5/place/text"):
+        raise MapFetchError("Endpoint refused", code="invalid_input")
     """Fixed HTTPS host/path. Never expose a credential-bearing URL or exception."""
     connection = None
     try:
@@ -32,7 +34,7 @@ def _request(params, key, deadline):
                 raise MapFetchError('Map deadline exceeded', code='timeout')
             connection.sock.settimeout(remaining)
         tighten()
-        path = '/v3/geocode/geo?' + urllib.parse.urlencode(dict(params, key=key, output='JSON'))
+        path = endpoint_path + '?' + urllib.parse.urlencode(dict(params, key=key, output='JSON'))
         connection.request('GET', path, headers={'Accept': 'application/json', 'Accept-Encoding': 'identity'})
         tighten()
         response = connection.getresponse()
@@ -170,3 +172,82 @@ def fetch_location_clues(area_name, names, *, consent_download=False, area_hiera
             'coordinate_system': 'GCJ02', 'supports_corridor': False,
             'verified': False, 'original_gps': False, 'status': 'location_clues_only',
             'warning': '高德地理编码仅返回 GCJ-02 位置线索，可能歧义或无结果；未验证行政区归属。不是道路几何、连通节点、WGS84轨迹或历史路线，不支持构建道路走廊，不可导航。'}
+
+
+POI_ENDPOINT = 'https://restapi.amap.com/v5/place/text'
+
+
+def _poi_text(value, limit=160):
+    """Supplier data is untrusted: no URLs, controls, credentials, or nested values."""
+    if not isinstance(value, str):
+        return ''
+    value = ''.join(c for c in value if c.isprintable())[:limit]
+    key = os.environ.get('AMAP_API_KEY', '').strip()
+    if '://' in value or 'www.' in value.lower() or 'key=' in value.lower() or (key and key in value):
+        return '[redacted]'
+    return value
+
+
+def fetch_places(keywords, region, *, consent_download=False, verified_adcodes=()):
+    """One keyword/request per invocation, first page only; 30s/512KB, no retry.
+
+    verified_adcodes is trusted local configuration, never model input. City
+    text remains an unverified hint; returned mismatches are retained, not anchors.
+    """
+    import re
+    import uuid
+    if consent_download is not True:
+        raise MapFetchError('Fresh map consent required', code='consent_required')
+    keywords = _exact_text(keywords)
+    region = _exact_text(region)
+    if any(c in keywords for c in '|;') or '://' in keywords or 'key=' in keywords.lower():
+        raise MapFetchError('Single keyword required', code='invalid_input')
+    numeric = re.fullmatch(r'[0-9]{6}', region) is not None
+    if (numeric and region not in verified_adcodes) or (not numeric and not re.fullmatch(r'[\u4e00-\u9fff]{2,30}市', region)):
+        raise MapFetchError('City or locally verified adcode required', code='invalid_input')
+    require_configuration()
+    raw = _request({'keywords': keywords, 'region': region, 'city_limit': 'true',
+                    'page_size': '10', 'page_num': '1', 'show_fields': 'navi'},
+                   os.environ['AMAP_API_KEY'].strip(), time.monotonic()+TIMEOUT_SECONDS,
+                   endpoint_path='/v5/place/text')
+    # Reuse legacy fixed service error classification, never adopt info/body.
+    if not isinstance(raw, bytes) or len(raw) > MAX_RESPONSE_BYTES:
+        raise MapFetchError('Response limit', code='response_limit')
+    try:
+        data = json.loads(raw.decode('utf-8'))
+        if not isinstance(data, dict) or data.get('status') not in ('0', '1'):
+            raise ValueError()
+        if data['status'] == '0':
+            _candidates(raw)
+        pois = data.get('pois')
+        if not isinstance(pois, list) or len(pois) > 10:
+            raise ValueError()
+        candidates, ids = [], set()
+        for poi in pois:
+            if not isinstance(poi, dict):
+                raise ValueError()
+            item = {field: _poi_text(poi.get(field), 80 if field in ('id','adcode') else 160)
+                    for field in ('id','name','pname','cityname','adname','adcode','address','type')}
+            if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', item['id']) or item['id'] in ids:
+                raise ValueError()
+            ids.add(item['id'])
+            point = _candidates(json.dumps({'status':'1','geocodes':[{'location':poi.get('location')}] }).encode())[0]['location']
+            mismatch = (item['adcode'] != region if numeric else item['cityname'] != region)
+            positions = [{'kind':'poi_center', 'location':point}]
+            navi = poi.get('navi', {})
+            if isinstance(navi, dict) and navi.get('entr_location'):
+                entrance = _candidates(json.dumps({'status':'1','geocodes':[{'location':navi['entr_location']}] }).encode())[0]['location']
+                positions.append({'kind':'entrance', 'location':entrance})
+            item.update(positions=positions, coordinate_system='GCJ02', verified=False,
+                        region_anomaly=mismatch, anchor_eligible=False,
+                        match_source={'service':'amap_v5_place_text','keywords':keywords,'region':region})
+            candidates.append(item)
+    except MapFetchError:
+        raise
+    except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+        raise MapFetchError('Invalid POI response', code='response_invalid') from None
+    return {'provider':'amap','version':uuid.uuid4().hex,'candidates':candidates,
+            'status':'places_found' if candidates else 'ambiguous', 'verified':False,
+            'request_budget':{'used':1,'limit':1,'seconds':30,'response_bytes':512000,'automatic_retry':False},
+            'supplier_permission':'unconfirmed_local_display_only',
+            'notice':'仅本地展示。地图联网授权不等于第三方模型处理或衍生下载许可；运营方需核实高德协议及具体书面许可。未开放供应商内容模型上传或导出。'}

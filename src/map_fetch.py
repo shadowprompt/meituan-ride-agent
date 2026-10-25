@@ -56,7 +56,7 @@ class MapFetchError(ValueError):
 
 # 固定文案独立于异常/响应正文，避免密钥、URL或服务端内容回显。
 REASONS = {
-    'osm_network_disabled': ('OSM/Overpass 联网已停用；唯一联网地图服务为高德。', '请显式选择 map_provider=amap，并重新给予本次地图查询及模型上传授权；旧任务不会自动迁移或重放。'),
+    'osm_network_disabled': ('OSM/Overpass 联网已停用；本地直连禁止；可显式迁移至受控OSM中转或高德兼容。', '请显式选择 map_provider=osm_relay（或高德兼容 amap），并重新给予本次地图查询及模型上传授权；旧任务不会自动迁移或重放。'),
     'amap_key_missing': ('服务器未配置 AMAP_API_KEY，未发送高德请求。', '请管理员在服务器私密环境配置新的高德 Web服务 Key；不要在网页或群聊粘贴密钥。已公开的 Key 应立即撤销并轮换。'),
     'amap_credentials_rejected': ('高德凭证或服务权限校验未通过。', '请管理员私下检查 Web服务 Key 与服务权限；不要公开密钥，不会自动扩大权限。'),
     'amap_quota': ('高德服务调用配额或频率受限。', '请管理员检查配额，稍后由用户决定是否重新授权；不会自动重试。'),

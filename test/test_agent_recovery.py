@@ -40,7 +40,9 @@ class AgentRecoveryTests(unittest.TestCase):
         image.save(self.source)
 
     def state(self, goal='pixels'):
-        return start(self.source,self.folder,True,goal)
+        state = start(self.source,self.folder,True,goal)
+        if goal == 'roads': state['map_provider'] = 'osm'
+        return state
 
     def rejections(self, state):
         return [json.loads(m['content'].removeprefix('LOCAL_TOOL_RESULT '))
@@ -143,9 +145,9 @@ class AgentRecoveryTests(unittest.TestCase):
         rejection = delivery_requirements(state,self.folder)
         self.assertIn('independent error gate failed',rejection['next_step'])
         state['registration_gate_passed'] = True
-        self.assertIn('--osm-file',delivery_requirements(state,self.folder)['next_step'])
+        self.assertIn('local-only',delivery_requirements(state,self.folder)['next_step'])
         state['map_download_requested'] = True
-        self.assertIn('fresh consent',delivery_requirements(state,self.folder)['next_step'])
+        self.assertIn('fresh separate consents',delivery_requirements(state,self.folder)['next_step'])
 
     def test_pixels_delivery_does_not_require_other_goals_or_controls(self):
         state = self.state()

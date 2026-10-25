@@ -23,7 +23,9 @@ from register_pixels import register, fit_registration
 from approximate_location import approximate, fit_approximation
 from road_match import match, _load_segments
 from map_fetch import fetch_roads, fetch_named_roads, MapFetchError
-from amap_fetch import fetch_location_clues
+from amap_fetch import fetch_location_clues, fetch_places
+import place_review
+import osm_relay
 from inspect_colors import inspect_colors
 from ride_errors import TaskFailure, failure_category, api_diagnostic
 import route_review
@@ -41,7 +43,7 @@ Return ONE JSON object only, one of:
 {"action":"match"}
 {"action":"deliver","summary":"Chinese factual summary of observed tool outputs and remaining limitations"}
 中文提取约束：采样实心线内部的代表色，不要采样抗锯齿边缘、阴影或白色描边；灰色/蓝灰路线也应覆盖实心线内部，而非只留下边缘。裁剪应尽量包含目标线的全部可见范围及起终点标记；很窄的局部裁剪可能丢失路线。crop_diagnostics 的面积/宽高占比仅是确定性几何警告，不是路线完整性检测，也不代表识别了真实起终点。不得把骨架端点当作骑行起终点。用户明确指定的裁剪应保留，可报告局部候选及遗漏风险，不要自动拒绝或擅自扩大。局部裁剪不能直接声称完整路线；交付时说明裁剪范围、警告以及完整性/起终点未验证。即使全图提取也不能据此证明完整路线。
-Use image dimensions and visible evidence. Before choosing extraction color you may call inspect_colors with an optional screenshot crop (omit crop for full image). It returns heuristic color candidates (which may omit gray or low-saturation routes), NOT semantic route detection or confidence. Gray and low-saturation lines are valid extraction targets: use their observed #RRGGBB color with extract, not an unrelated saturated candidate. A no_signal inspection does not prove there is no route; inspect the screenshot and ask for the intended line if ambiguous. Compare the candidate preview against the screenshot; UI icons, parks and text can dominate. Ask when ambiguous; never automatically treat the highest rank as the route. Crop coordinates refer to supplied EXIF-oriented image. If uncertain ask rather than guess. You may extract with full crop if suitable. Deliver only after successful extract and centerline. No shell, URLs, file paths, invented coordinates, GPS, or claims of automatic geolocation. If trusted user-supplied controls are available you may register after centerline. Tool register accepts no model-generated control points. If goal=roads, explain that AMap only supports GCJ-02 location clues, not WGS84 road matching; OSM is local-only CLI debug, never a network fallback. fetch_map is retired and must not be called. Only query_map with AMap and fresh separate map consent may use map networking. Delivery requires match attempt, not necessarily success. If goal=registration, ask for a controls JSON file through resume --controls-file, and deliver only after registration. Only for goal=registration or goal=roads, if controls are absent, ask; never invent them. For goal=pixels, extract and centerline are sufficient: do not require controls, registration, OSM, or road matching. A rejected premature deliver returns LOCAL_TOOL_RESULT with missing stages; follow its next_step or ask for required user input, then retry delivery only after the missing evidence exists. Never claim a rejected delivery succeeded. Preserve user corrections. Inspect current tool preview images alongside numeric results; old reports in history may be invalidated by corrections. Preview images are resized and crop-local, not original screenshot coordinates. If no_match or partial coverage, explicitly explain missing_segment_indices and ask for the necessary correction rather than claim completion. When component selection is ambiguous, API mode can observe_candidates then select_candidates as an unverified MODEL choice; offline mode pauses for a user choice. Never impersonate a user choice. Color masks and centerline are not verified routes. Never infer actual traversal order at overlap. Tools execute at fixed local paths. Your goal is a pixel-analysis candidate with artifacts and honest uncertainty, not final GPS reconstruction.'''
+Use image dimensions and visible evidence. Before choosing extraction color you may call inspect_colors with an optional screenshot crop (omit crop for full image). It returns heuristic color candidates (which may omit gray or low-saturation routes), NOT semantic route detection or confidence. Gray and low-saturation lines are valid extraction targets: use their observed #RRGGBB color with extract, not an unrelated saturated candidate. A no_signal inspection does not prove there is no route; inspect the screenshot and ask for the intended line if ambiguous. Compare the candidate preview against the screenshot; UI icons, parks and text can dominate. Ask when ambiguous; never automatically treat the highest rank as the route. Crop coordinates refer to supplied EXIF-oriented image. If uncertain ask rather than guess. You may extract with full crop if suitable. Deliver only after successful extract and centerline. No shell, URLs, file paths, invented coordinates, GPS, or claims of automatic geolocation. If trusted user-supplied controls are available you may register after centerline. Tool register accepts no model-generated control points. If goal=roads, use only current authorized WGS84 OSM evidence for road matching; AMap supports GCJ-02 clues only. fetch_map is retired. Only query_map through the user-selected relay or explicit AMap compatibility and fresh separate map consent may use map networking. Delivery requires match attempt, not necessarily success. If goal=registration, ask for a controls JSON file through resume --controls-file, and deliver only after registration. Only for goal=registration or goal=roads, if controls are absent, ask; never invent them. For goal=pixels, extract and centerline are sufficient: do not require controls, registration, OSM, or road matching. A rejected premature deliver returns LOCAL_TOOL_RESULT with missing stages; follow its next_step or ask for required user input, then retry delivery only after the missing evidence exists. Never claim a rejected delivery succeeded. Preserve user corrections. Inspect current tool preview images alongside numeric results; old reports in history may be invalidated by corrections. Preview images are resized and crop-local, not original screenshot coordinates. If no_match or partial coverage, explicitly explain missing_segment_indices and ask for the necessary correction rather than claim completion. When component selection is ambiguous, API mode can observe_candidates then select_candidates as an unverified MODEL choice; offline mode pauses for a user choice. Never impersonate a user choice. Color masks and centerline are not verified routes. Never infer actual traversal order at overlap. Tools execute at fixed local paths. Your goal is a pixel-analysis candidate with artifacts and honest uncertainty, not final GPS reconstruction.'''
 
 
 PROMPT += """
@@ -59,47 +61,46 @@ API候选歧义不再强制先问用户。必须先observe_candidates并在后�
 
 # 道路走廊独立于配准；地图查询只接受本次明确授权。
 PROMPT += """
-goal=corridor 保留为旧任务目标名称；当前联网只支持高德定位线索，不构建道路走廊。
-此目标不要求extract/centerline/register/review_route，不是严格像素配准；旧像素目标门禁不变。
-先阅读原图可见地名，只提出有依据的行政区与道路/地点文字，不猜测城市、坐标或行进顺序：
-{"action":"query_map","area_name":"图中或对话有依据的行政区名","names":["原图可读道路名"],"evidence":"具体可见文字及地域依据、不确定性"}
-query_map仅在CURRENT_STAGE_STATE.map_query_authorized=true时可联网，否则ask本次独立地图查询授权。
-可选area_hierarchy只接受原图有据的行政区文本。每轮最多一次query_map，最多3次高德地理编码，
-共享30秒，各响应512KB；不接受URL、坐标、QL或路径。失败ask，不重试，不回退OSM。
-返回仅GCJ-02位置线索，不是WGS84道路几何，不调用inspect_roads/build_corridor/fetch_map/match。
-文字不清就询问具体位置/更清晰原图，普通用户无需道路JSON/OSM。不能称恢复真实GPS、截图已配准或路线已验证。
-OSM文件仅供CLI --local-only只读本地调试，不向模型上传OSM证据，不联网。
+goal=corridor: independent WGS84 OSM road evidence workflow; no pixel registration required.
+The user-selected provider defaults to osm_relay; the model cannot change it or configure transport.
+For osm_relay propose ONLY exact visible road names and an explicit unverified administrative hierarchy:
+{"action":"query_map","admin_hierarchy":[{"name":"<country exact OSM name>","admin_level":2},{"name":"<city/district exact OSM name>","admin_level":6}],"names":["<visible road name>"],"evidence":"visible text, country/city evidence and uncertainty; hierarchy is unverified"}
+Do not copy placeholders. Levels must strictly increase from country level 2 to city/district level >=6;
+2–6 entries, at most 5 exact road names. Never infer the country from a city alone or hardcode a city.
+If country, city/district or readable names are missing, ask a concrete question. No URL/QL/bbox/credentials.
+Only when CURRENT_STAGE_STATE.map_query_authorized=true may query_map run; one action per invocation,
+no retry, no direct OSM/Overpass connection or provider fallback. Optional exact object action:
+{"action":"query_map","way_id":123,"evidence":"specific public OSM way ID provenance, unverified"}
+After a successful relay query use {"action":"inspect_roads","names":["exact returned road name"]}.
+Then {"action":"build_corridor","hypothesis":{"schema_version":1,"coordinate_system":"WGS84","source":{"kind":"model","evidence":"visible road sequence hypothesis, unverified"},"legs":[{"road":{"name":"exact name"},"via":[{"node_id":1},{"node_id":2}]}]}}.
+Node IDs must come from CURRENT inspection, not this example. All geometry comes from returned OSM nodes.
+Preserve repeated legs for turnbacks. No arbitrary coordinates, snapping, invented GPS, traversal certainty or navigation claims.
+When provider=amap (explicit optional compatibility only), query_map accepts area_name/names/evidence and optional area_hierarchy;
+returns GCJ02 location clues only, NEVER inspect/build/match. search_places accepts one visible keywords/region/evidence;
+supplier permission remains unconfirmed: local display/review only, no model upload of POI content.
+No automatic Amap migration or fallback. Offline provider=osm is CLI local-only debug.
 """
 
 
-PROMPT += """
-唯一联网地图 provider 为 amap，模型不得更改；OSM/Overpass联网及fetch_map已停用，无失败回退。CURRENT_STAGE_STATE.map_provider=amap 时，
-query_map 改为高德结构化地址定位线索查询：最多3次固定HTTPS地理编码请求，共享30秒预算，单响应512KB。
-返回仅 GCJ02 点，不是WGS84、OSM way/node或道路几何；不能inspect_roads/build_corridor/fetch_map/match，
-不能使用旧OSM证据、不能自动调用骑行规划或OSM补齐，不能把规划路线当历史轨迹。
-定位结果可能歧义、无结果或行政区不符；保留不确定性。普通用户不需要准备道路JSON。
-"""
-
-
-MAP_MIGRATION_NOTICE = ('OSM/Overpass 联网已停用。请显式选择 --map-provider amap / map_provider=amap，'
-                        '并重新给予本次地图查询 consent_map 和模型上传 consent_upload 授权；'
-                        '不会静默迁移、重放或上传。OSM 文件仅可 --local-only 只读本地调试。')
+MAP_MIGRATION_NOTICE = ('地图服务切换须显式选择 --map-provider osm_relay/amap，'
+                        '并重新给予本次地图查询 consent_map 和模型上传 consent_upload 双授权；'
+                        '不会静默迁移、重放或上传。旧osm只可 --local-only 离线调试。')
 
 
 def validate_map_invocation(provider, *, local_only=False, previous=None,
                             consent_map=False, consent_upload=False, fetch_map=False):
-    if provider not in ('amap', 'osm'):
+    if provider not in ('amap', 'osm', 'osm_relay'):
         raise ValueError('Invalid map provider')
     if fetch_map:
-        raise ValueError(MAP_MIGRATION_NOTICE + ' 旧 fetch_map 范围下载已停用，高德仅提供GCJ-02定位线索。')
+        raise ValueError(MAP_MIGRATION_NOTICE + ' 旧 fetch_map 范围下载已停用。')
     if provider == 'osm' and not local_only:
         raise ValueError(MAP_MIGRATION_NOTICE)
-    if previous == 'osm' and provider == 'amap' and not (consent_map and consent_upload):
+    if previous is not None and previous != provider and not local_only and not (consent_map and consent_upload):
         raise ValueError(MAP_MIGRATION_NOTICE)
 
 
 def select_map_provider(state, folder, provider):
-    if provider not in ('osm', 'amap'):
+    if provider not in ('osm', 'amap', 'osm_relay'):
         raise ValueError('Invalid map provider')
     if provider != state.get('map_provider', 'osm'):
         # Preserve old evidence as audit files, never let a provider switch adopt it.
@@ -108,7 +109,8 @@ def select_map_provider(state, folder, provider):
             osm.rename(Path(folder)/('map-audit-' + str(uuid.uuid4()) + '.osm'))
         invalidate_corridor(state)
         for key in ('map_query', 'map_query_diagnostic', 'location_clues', 'artifacts', 'summary',
-                    'road_notice', 'map_download', 'corridor_names', 'road_match_status'):
+                    'road_notice', 'map_download', 'corridor_names', 'road_match_status',
+                    'places', 'place_review', 'place_stage', 'place_diagnostic'):
             state.pop(key, None)
         state.update(match_attempted=False, map_download_requested=False)
         # Keep prior conversation for local audit, never as current map evidence.
@@ -167,7 +169,7 @@ def redact_credentials(value):
     # Also remove URL query credential values, including model-echoed URLs.
     import re
     if isinstance(value, str):
-        for name in ('RIDE_API_KEY', 'AMAP_API_KEY'):
+        for name in ('RIDE_API_KEY', 'AMAP_API_KEY', 'OSM_SERVICE_TOKEN', 'OSM_SERVICE_URL'):
             key = os.environ.get(name)
             if key:
                 value = value.replace(key, '[已隐藏]')
@@ -199,9 +201,13 @@ def map_query_diagnostic(state, folder, action, outcome, **summary):
         return ''.join(c for c in value if ord(c) >= 32 and not 0xD800 <= ord(c) <= 0xDFFF)[:limit]
     names = action.get('names')
     request = {'area_name': text(action.get('area_name'), 80),
-               'names': [text(n, 80) for n in names[:3]] if isinstance(names, list) else [],
+               'names': [text(n, 100) for n in names[:5]] if isinstance(names, list) else [],
                'evidence': text(action.get('evidence'), 2000),
                'evidence_source': 'model_visible_text_unverified'}
+    if isinstance(action.get('admin_hierarchy'), list):
+        request['admin_hierarchy'] = [{'name': text(x.get('name'),100), 'admin_level': x.get('admin_level')} for x in action['admin_hierarchy'][:6] if isinstance(x,dict)]
+    if type(action.get('way_id')) is int:
+        request['way_id'] = action['way_id']
     if isinstance(action.get('area_hierarchy'), list):
         request['area_hierarchy'] = [text(n, 80) for n in action['area_hierarchy'][:3]]
     previous = state.get('map_query_diagnostic', {})
@@ -300,6 +306,8 @@ class APIPlanner:
 
     def decide(self, state, folder):
         validate_map_invocation(state.get('map_provider', 'osm'))
+        if state.get('places'):
+            raise ValueError('POI supplier permission unconfirmed: local display/review only; no model upload')
         # 限流窗口内不发送原图；到期后仍须由网页/CLI重新取得本次授权。
         deadline = state.get('api_retry_not_before')
         if type(deadline) in (int, float) and time.time() < deadline <= time.time() + 86400:
@@ -315,7 +323,7 @@ class APIPlanner:
         messages = [{'role':'system','content':PROMPT}, {'role':'user','content':[
             {'type':'text','text':f'Analyze screenshot. Oriented size: {state["image_size"]}. All results must stay unverified.'},
             {'type':'image_url','image_url':{'url':'data:image/png;base64,'+image}}]}]
-        messages.append({'role':'user','content':json.dumps({'corridor_complete':state.get('corridor_complete',False), 'goal':state.get('goal','pixels'), 'controls_available':controls_current(state,folder), 'registered':state.get('registered',False), 'osm_available':state.get('map_provider', 'osm') == 'osm' and (Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
+        messages.append({'role':'user','content':json.dumps({'corridor_complete':state.get('corridor_complete',False), 'goal':state.get('goal','pixels'), 'controls_available':controls_current(state,folder), 'registered':state.get('registered',False), 'osm_available':state.get('map_provider', 'osm') in ('osm', 'osm_relay') and (Path(folder)/'map.osm').exists(), 'match_attempted':state.get('match_attempted',False), 'map_download_requested':state.get('map_download_requested',False)})})
         messages.extend(state['messages'])
         # Append current evidence AFTER history: old reports are historical, not current state.
         feedback = visual_feedback(state, folder)
@@ -328,8 +336,10 @@ class APIPlanner:
         current = {k:state.get(k,False) for k in ('extracted','centerlined','registered','registration_gate_passed','match_attempted')}
         if state.get('goal') == 'corridor':
             current['map_provider'] = state.get('map_provider', 'osm')
-            current['supports_corridor'] = False
+            current['supports_corridor'] = state.get('map_provider') == 'osm_relay'
             current['location_clues'] = state.get('location_clues')
+            # POI supplier content deliberately excluded: no third-party license confirmed.
+            current['place_permission'] = 'unconfirmed_local_display_only'
             current['map_query_authorized'] = bool(getattr(self, 'map_query_authorized', False))
             current['corridor_complete'] = bool(state.get('corridor_complete'))
             current['corridor_inspection'] = state.get('corridor_inspection')
@@ -405,7 +415,7 @@ class LocalPlanner:
                     if (Path(folder)/'map.osm').exists():
                         return {'action':'match'}
                     if state.get('map_download_requested'):
-                        return {'action':'fetch_map'}
+                        return {'action':'ask', 'question': MAP_MIGRATION_NOTICE}
                     return {'action':'ask', 'question':'OSM联网与fetch_map已停用；离线调试可用 --local-only --map-provider osm --osm-file。高德仅支持GCJ-02位置线索。'}
                 return {'action':'deliver', 'summary':'已尝试本地道路候选匹配；请查看匹配报告，不代表真实路线已确认，不可导航。'}
         return {'action':'ask', 'question':'本地执行需要已知颜色和裁剪，或当前有效掩码；请提供修正。需要视觉判断时另行明确同意 API 上传。'}
@@ -445,7 +455,7 @@ class DemoPlanner:
         if state.get('goal') == 'roads' and not state.get('match_attempted'):
             if not (Path(folder)/'map.osm').exists():
                 if state.get('map_download_requested'):
-                    return {'action':'fetch_map'}
+                    return {'action':'ask', 'question': MAP_MIGRATION_NOTICE}
                 return {'action':'ask','question':'OSM联网与fetch_map已停用；本地文件仅限CLI --local-only --map-provider osm 调试。'}
             return {'action':'match'}
         summary = '离线编排演示已生成颜色掩码与中心线，请人工检查。未进行自动定位或原始 GPS 恢复。'
@@ -598,6 +608,11 @@ def run(state, folder, planner, budget=12, consent_map=False):
     osm = Path(folder)/'map.osm'
     if inspection and (not osm.is_file() or inspection.get('osm_sha256') != hashlib.sha256(osm.read_bytes()).hexdigest()):
         invalidate_corridor(state)
+        state.pop('artifacts', None)
+        state.pop('summary', None)
+    if state.get('map_provider') == 'osm_relay' and (state.get('map_query') or state.get('corridor_complete') or state.get('corridor_inspection')) and not osm_relay.evidence_current(folder, state.get('map_query', {})):
+        invalidate_corridor(state)
+        state.pop('map_query', None)
         state.pop('artifacts', None)
         state.pop('summary', None)
     if state.get('map_query') and (not osm.is_file() or state['map_query'].get('osm_sha256') != hashlib.sha256(osm.read_bytes()).hexdigest()):
@@ -767,6 +782,81 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 tool_result = {'tool':'centerline', **{k:result[k] for k in ('status','component_count','cycle_rank','skeleton_pixels','warnings')},
                                'endpoint_count':len(result['endpoints_xy']), 'junction_pixel_count':len(result['junction_pixels_xy']),
                                'has_geometric_order':result['ordered_path_xy'] is not None}
+            elif name == 'search_places':
+                stage = name
+                if state.get('map_provider') != 'amap' or state.get('goal') != 'corridor':
+                    raise ValueError('AMap corridor clues only')
+                if set(action) != {'action','keywords','region','evidence'} or not isinstance(action['evidence'],str) or not 1 <= len(action['evidence'].strip()) <= 1000:
+                    raise ValueError('Visible keyword and city evidence required')
+                if not consent_map or map_query_used:
+                    state.update(status='waiting_for_user',question='本轮地图查询未授权或一次查询动作预算已用；不会自动重试。')
+                    save(state,folder)
+                    return state
+                map_query_used = True
+                planner.map_query_authorized = False
+                try:
+                    places = fetch_places(action['keywords'],action['region'],consent_download=True)
+                except MapFetchError as exc:
+                    state['place_diagnostic'] = exc.diagnostic()
+                    state.update(status='waiting_for_user',question='POI查询失败 ['+exc.code+']；无自动重试，无OSM回退。')
+                    save(state,folder)
+                    return state
+                places['image_version'] = place_review.image_version(folder)
+                places['query_evidence'] = action['evidence']
+                state['places'] = places
+                state.pop('place_review',None)
+                state['place_stage'] = 'place_review_pending' if places['candidates'] else 'ambiguous'
+                # Independent supplier permission gate is intentionally closed.
+                # Never append POI data to model history, export artifacts or overlays.
+                state.update(status='waiting_for_user',question=places['notice']+' 已保留 '+str(len(places['candidates']))+' 个未验证候选，请本地查看地标卡片；模型排歧暂未开放。')
+                save(state,folder)
+                return state
+            elif name == 'review_places':
+                stage = name
+                if state.get('semantic_review_required'):
+                    raise ValueError('Supplier permission unconfirmed; only local review allowed')
+                review = place_review.review_places(state['places'],action,folder,state['image_size'])
+                state['place_review'] = review
+                state['place_stage'] = review['status']
+                state.update(status='waiting_for_user',question=review['notice'])
+                save(state,folder)
+                return state
+            elif name == 'query_map' and state.get('map_provider') == 'osm_relay':
+                stage = name
+                if state.get('goal') != 'corridor':
+                    raise ValueError('query_map requires corridor goal')
+                if set(action) not in ({'action', 'admin_hierarchy', 'names', 'evidence'}, {'action', 'way_id', 'evidence'}):
+                    raise ValueError('Relay accepts structured hierarchy/names or exact way_id only')
+                if not isinstance(action['evidence'], str) or not 1 <= len(action['evidence'].strip()) <= 2000:
+                    raise ValueError('Visible locality/ID evidence and uncertainty required')
+                if not consent_map or map_query_used:
+                    state.update(status='waiting_for_user', question='本轮OSM中转查询未授权或一次动作预算已用；需本次独立地图授权，不自动重试。')
+                    save(state, folder)
+                    return state
+                map_query_used = True
+                planner.map_query_authorized = False
+                map_query_diagnostic(state, folder, action, 'started')
+                try:
+                    options = ({'way_id': action['way_id']} if 'way_id' in action else
+                               {'admin_hierarchy': action['admin_hierarchy'], 'road_names': action['names']})
+                    xml, evidence = osm_relay.query(**options, consent_download=True)
+                except MapFetchError as exc:
+                    map_query_diagnostic(state, folder, action, 'failed', **exc.diagnostic())
+                    state.update(status='waiting_for_user', question='OSM中转查询失败 ['+exc.code+']；请核对配置、层级与服务状态，人工决定是否重新授权；无重试或高德回退。')
+                    save(state, folder)
+                    return state
+                invalidate_corridor(state)
+                for key in ('artifacts', 'summary', 'map_query'):
+                    state.pop(key, None)
+                old = Path(folder)/'map.osm'
+                if old.is_file():
+                    old.rename(Path(folder)/('map-audit-'+str(uuid.uuid4())+'.osm'))
+                save(state, folder)  # old evidence invalid before any new file write
+                osm_relay.save_evidence(folder, xml, evidence)
+                state['map_query'] = evidence
+                map_query_diagnostic(state, folder, action, 'succeeded', result_summary={
+                    'status': evidence['status'], 'coordinate_system':'WGS84', 'supports_corridor':True})
+                tool_result = {'tool': name, **evidence}
             elif name == 'query_map':
                 if state.get('map_provider', 'osm') != 'amap':
                     raise ValueError(MAP_MIGRATION_NOTICE)
@@ -826,9 +916,12 @@ def run(state, folder, planner, budget=12, consent_map=False):
                 if state.get('goal') != 'corridor':
                     raise ValueError('Explicit corridor goal required')
                 stage = name
-                if state.get('map_provider', 'osm') != 'osm':
+                if state.get('map_provider', 'osm') not in ('osm', 'osm_relay'):
                     raise ValueError('AMap location clues cannot construct or inspect OSM roads')
                 osm = Path(folder)/'map.osm'
+                if state.get('map_provider') == 'osm_relay' and not osm_relay.evidence_current(folder, state.get('map_query', {})):
+                    invalidate_corridor(state)
+                    raise ValueError('Current hash-bound relay evidence required; query again with fresh consent')
                 if name == 'inspect_roads':
                     if set(action) != {'action','names'}:
                         raise ValueError('Only road names accepted')
@@ -891,8 +984,10 @@ def run(state, folder, planner, budget=12, consent_map=False):
             elif name == 'fetch_map':
                 raise ValueError(MAP_MIGRATION_NOTICE + ' fetch_map 已停用。')
             elif name == 'match':
-                if state.get('map_provider', 'osm') != 'osm':
+                if state.get('map_provider', 'osm') not in ('osm', 'osm_relay'):
                     raise ValueError('AMap clues cannot be used as WGS84 road matching evidence')
+                if state.get('map_provider') == 'osm_relay' and not osm_relay.evidence_current(folder, state.get('map_query', {})):
+                    raise ValueError('Current hash-bound relay evidence required')
                 if state.get('goal') == 'corridor':
                     raise ValueError('Corridor is not registered pixel matching')
                 if state.get('goal') == 'approximate' or state.get('approximate_complete'):
@@ -1017,7 +1112,7 @@ def start(image_path, folder, demo=False, goal="pixels"):
     folder.mkdir(parents=True,exist_ok=True)
     image.save(folder/'input.png')
     state = {'version':1,'mode':'demo' if demo else 'api','status':'received',
-             'verified':False,'original_gps':False,'map_provider':'amap','image_size':list(image.size),
+             'verified':False,'original_gps':False,'map_provider':'osm_relay','image_size':list(image.size),
              'source_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
              'messages':[], 'extracted':False,'centerlined':False,'registered':False,'goal':goal,
              'warnings':['MVP manual-registration agent; no automatic geolocation; road matches are unverified candidates.',
@@ -1055,7 +1150,7 @@ def main():
     sub.add_parser('status')
     for command in sub.choices.values():
         if command in (begin, resume):
-            command.add_argument('--map-provider', choices=['osm', 'amap'], default=None, help='默认且唯一联网服务amap；osm仅限--local-only离线文件调试，旧任务须显式迁移与本次双授权')
+            command.add_argument('--map-provider', choices=['osm_relay', 'osm', 'amap'], default=None, help='默认osm_relay；仅环境配置中转，无本地OSM直连。amap显式兼容；旧任务切换需本次双授权')
         command.add_argument('--task-dir',required=True)
         command.add_argument('--consent-upload',action='store_true')
     args = parser.parse_args()
@@ -1067,7 +1162,7 @@ def main():
             # 地图下载同意不等于截图上传同意；每次真实调用均重新检查。
             local_only = getattr(args,'local_only',False)
             previous = None if args.command == 'start' else load(args.task_dir).get('map_provider', 'osm')
-            provider = args.map_provider or ('amap' if args.command == 'start' else previous)
+            provider = args.map_provider or ('osm_relay' if args.command == 'start' else previous)
             validate_map_invocation(provider, local_only=local_only, previous=previous,
                                     consent_map=args.consent_map, consent_upload=args.consent_upload,
                                     fetch_map=getattr(args, 'fetch_map', False))
@@ -1078,8 +1173,11 @@ def main():
                 raise ValueError('模型复核继续仅限API任务且须本次上传授权，不能同时仅本地')
             if review_continue and any((args.answer, args.answer_file, args.color, args.crop, args.component_ids, args.controls_file, args.approximate_anchors_file, args.osm_file, args.fetch_map, args.reset_extraction, args.road_corridor, args.road_names, args.road_hypothesis_file)):
                 raise ValueError('复核继续不接受修改或文件，使用当前已保存证据')
-            if provider == 'amap' and not local_only:
-                from amap_fetch import require_configuration
+            if provider in ('amap', 'osm_relay') and not local_only:
+                if provider == 'osm_relay':
+                    from osm_relay import require_configuration
+                else:
+                    from amap_fetch import require_configuration
                 try:
                     require_configuration()  # Before planner creation, upload, or task mutation.
                 except MapFetchError as exc:

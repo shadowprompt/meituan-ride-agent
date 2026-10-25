@@ -34,80 +34,47 @@ class NamedMapTests(unittest.TestCase):
         self.image = self.root/'synthetic.png'
         Image.new('RGB',(30,20),'white').save(self.image)
 
-    def test_model_image_query_inspect_build_full_chain(self):
-        state = agent.start(self.image,self.root/'task',False,'corridor')
-        folder = self.root/'task'
-        p = plan(leg('A & B',1,2))
-        p['source']['kind'] = 'model'
-        actions = [{'action':'query_map','area_name':'合成区','names':['A & B'],'evidence':'合成图文识别测试，不是真实图结果'},
-                   {'action':'inspect_roads','names':['A & B']},
-                   {'action':'build_corridor','hypothesis':p}]
-        requests = []
-        def model_http(req, **kwargs):
-            body = json.loads(req.data)
-            requests.append(body)
-            index = len(requests)-1
-            self.assertTrue(any(isinstance(m.get('content'),list) and any(c.get('type')=='image_url' for c in m['content']) for m in body['messages']))
-            if index == 1:
-                self.assertIn('map_query_authorized',str(body))
-                self.assertIn('query_map',str(body))
-            if index == 2:
-                self.assertIn('osm_sha256',str(body))
-            return response({'choices':[{'message':{'content':json.dumps(actions[index])}}]})
-        opener = Mock()
-        opener.open.side_effect = [response(AREA),response(FIXTURE)]
-        model_opener = Mock();model_opener.open.side_effect = model_http
-        def build(*handlers):
-            return opener if any(isinstance(h, map_fetch._NoRedirect) for h in handlers) else model_opener
-        with patch.dict('os.environ',{'RIDE_API_BASE':'https://model.invalid/v1','RIDE_API_KEY':'synthetic','RIDE_MODEL':'mock'}), patch('urllib.request.build_opener',side_effect=build):
-            done = agent.run(state,folder,agent.ConsentedPlanner(),consent_map=True)
-        self.assertEqual(done['status'],'needs_confirmation',done)
-        self.assertEqual(len(requests),3)
-        self.assertEqual(opener.open.call_count,2)
-        self.assertFalse(done['registered'])
-        self.assertEqual(done['map_query']['osm_sha256'],done['corridor_inspection']['osm_sha256'])
-        self.assertIn('https://www.openstreetmap.org/way/3',done['map_query']['source_urls'])
-        self.assertTrue((folder/'map-query.json').exists())
-        # 文件改变后旧inspection/产物必须失效，不能交付旧坐标。
-        (folder/'map.osm').write_text('<osm/>')
-        class Ask:
-            semantic_review=True
-            def decide(self,*a):return {'action':'ask','question':'新地图缺少道路'}
-        changed = agent.run(done,folder,Ask())
-        self.assertFalse(changed['corridor_complete'])
-        self.assertNotIn('corridor_inspection',changed)
+    def test_model_image_query_returns_amap_gcj02_clues_not_corridor(self):
+        from test_amap_provider import raw, KEY
+        state=agent.start(self.image,self.root/'task',False,'corridor'); folder=self.root/'task'
+        state['map_provider']='amap'
+        action={'action':'query_map','area_name':'合成区','names':['A & B'],'evidence':'合成图文'}
+        requests=[]
+        def model_http(req,**kwargs):
+            payload=json.loads(req.data); requests.append(payload)
+            self.assertTrue(any(isinstance(m.get('content'),list) and any(c.get('type')=='image_url' for c in m['content']) for m in payload['messages']))
+            return response({'choices':[{'message':{'content':json.dumps(action)}}]})
+        with patch.dict('os.environ',{'RIDE_API_BASE':'https://model.invalid/v1','RIDE_API_KEY':'synthetic','RIDE_MODEL':'mock','AMAP_API_KEY':KEY}), patch('urllib.request.build_opener') as opener, patch('amap_fetch._request',return_value=raw()) as amap, patch('map_fetch._download') as osm:
+            opener.return_value.open.side_effect=model_http
+            done=agent.run(state,folder,agent.ConsentedPlanner(),consent_map=True)
+            osm.assert_not_called();amap.assert_called_once()
+        self.assertEqual(len(requests),1)
+        self.assertEqual(done['status'],'waiting_for_user')
+        self.assertEqual(done['location_clues']['coordinate_system'],'GCJ02')
+        self.assertFalse(done['corridor_complete'])
+        self.assertFalse((folder/'map.osm').exists())
+        self.assertNotIn('corridor_inspection',done)
 
     def test_no_consent_replay_and_one_query_budget(self):
-        class Model:
-            semantic_review=True
-            def decide(self,*a):return {'action':'query_map','area_name':'合成区','names':['A & B'],'evidence':'可见地名'}
+        from test_amap_provider import raw, KEY, Planner
         for consent in (False,True):
-            folder=self.root/str(consent)
-            state=agent.start(self.image,folder,True,'corridor')
-            opener=Mock();opener.open.side_effect=[response(AREA),response(FIXTURE)]
-            with patch('map_fetch.urllib.request.build_opener',return_value=opener):
-                done=agent.run(state,folder,Model(),consent_map=consent)
-                self.assertEqual(opener.open.call_count,2 if consent else 0)
+            folder=self.root/str(consent); state=agent.start(self.image,folder,True,'corridor')
+            state['map_provider']='amap'
+            with patch.dict('os.environ',{'AMAP_API_KEY':KEY}),patch('amap_fetch._request',return_value=raw()) as net,patch('map_fetch._download') as osm:
+                done=agent.run(state,folder,Planner(),consent_map=consent)
+                self.assertEqual(net.call_count,1 if consent else 0)
                 self.assertEqual(done['status'],'waiting_for_user')
-                agent.run(done,folder,Model())
-                self.assertEqual(opener.open.call_count,2 if consent else 0)
+                agent.run(done,folder,Planner())
+                self.assertEqual(net.call_count,1 if consent else 0)
+                osm.assert_not_called()
 
-    def test_exact_escaping_ambiguity_and_limits(self):
+    def test_retired_named_osm_query_refused_without_io(self):
         path=self.root/'map.osm';path.write_text('old')
-        for area in ({'elements':[]},{'elements':AREA['elements']*2},{'remark':'secret remote error','elements':AREA['elements']}):
-            with patch('map_fetch._download',return_value=json.dumps(area).encode()) as download:
-                with self.assertRaises(map_fetch.MapFetchError):
-                    map_fetch.fetch_named_roads('合成区',['A & B'],path,consent_download=True)
-                self.assertEqual(download.call_count,1)
-                self.assertEqual(path.read_text(),'old')
-        with patch('map_fetch._download') as download:
-            for names in ([],['a']*4,[False],['x\nQL']):
-                with self.assertRaises(map_fetch.MapFetchError):map_fetch.fetch_named_roads('合成区',names,path,consent_download=True)
-            download.assert_not_called()
-        # 33个返回对象触发预算，而非默默接受截断结果。
-        fixture=json.loads(json.dumps(FIXTURE));fixture['elements'] += [dict(FIXTURE['elements'][2],id=i) for i in range(4,36)]
-        with patch('map_fetch._download',side_effect=[json.dumps(AREA).encode(),json.dumps(fixture).encode()]):
-            with self.assertRaisesRegex(map_fetch.MapFetchError,'budget'):map_fetch.fetch_named_roads('合成区',['A & B'],path,consent_download=True)
+        with patch('map_fetch._download') as transport, patch('urllib.request.build_opener') as network:
+            with self.assertRaises(map_fetch.MapFetchError) as caught:
+                map_fetch.fetch_named_roads('合成区',['A & B'],path,consent_download=True)
+            self.assertEqual(caught.exception.code,'osm_network_disabled')
+            transport.assert_not_called();network.assert_not_called()
         self.assertEqual(path.read_text(),'old')
 
 
@@ -126,8 +93,8 @@ class NamedMapWebTests(unittest.TestCase):
             calls.append(args)
             folder=Path(args[args.index('--task-dir')+1])
             if args[0]=='start':
-                agent.start(args[args.index('--image')+1],folder,False,'corridor')
-        payload={'image_base64':base64.b64encode(image.getvalue()).decode(),'mode':'api','goal':'corridor','consent_upload':True,'consent_map':True}
+                state=agent.start(args[args.index('--image')+1],folder,False,'corridor'); state['map_provider']='amap'; agent.save(state,folder)
+        payload={'image_base64':base64.b64encode(image.getvalue()).decode(),'mode':'api','goal':'corridor','map_provider':'amap','consent_upload':True,'consent_map':True}
         with patch.object(self.server,'run_cli',side_effect=cli):
             created=self.server.create(payload)
             self.assertIn('--consent-map',calls[0])
@@ -142,17 +109,15 @@ class NamedMapWebTests(unittest.TestCase):
 
 
 class QueryEscapingTests(unittest.TestCase):
-    def test_quoted_name_is_literal_not_overpass_program(self):
-        with tempfile.TemporaryDirectory() as d:
-            name='x"];way(1);["'
-            area=json.loads(json.dumps(AREA));area['elements'][0]['tags']['name']='合成区'
-            fixture=json.loads(json.dumps(FIXTURE));fixture['elements'][2]['tags']['name']=name
-            with patch('map_fetch._download',side_effect=[json.dumps(area).encode(),json.dumps(fixture).encode()]) as transport:
-                map_fetch.fetch_named_roads('合成区',[name],Path(d)/'map.osm',consent_download=True)
-            expected='["name"='+json.dumps(name,ensure_ascii=False)+']'
-            self.assertNotIn(name,transport.call_args_list[0].args[0])
-            self.assertIn(expected,transport.call_args_list[1].args[0])
-            self.assertEqual(transport.call_args_list[1].kwargs['max_bytes'],2000000)
+    def test_amap_quoted_name_is_address_data_not_a_program(self):
+        from test_amap_provider import raw, KEY
+        import amap_fetch
+        name='x"];way(1);["'
+        with patch.dict('os.environ',{'AMAP_API_KEY':KEY}),patch('amap_fetch._request',return_value=raw()) as transport,patch('map_fetch._download') as osm:
+            result=amap_fetch.fetch_location_clues('合成区',[name],consent_download=True)
+        self.assertEqual(transport.call_args.args[0], {'address':'合成区'+name})
+        self.assertEqual(result['names'],[name])
+        osm.assert_not_called()
 
 
 class QueryActionBoundaryTests(unittest.TestCase):
@@ -161,6 +126,7 @@ class QueryActionBoundaryTests(unittest.TestCase):
             image=Path(d)/'synthetic.png';Image.new('RGB',(12,12),'white').save(image)
             for index,extra in enumerate(({'url':'https://evil.invalid'},{'output_path':'/tmp/map'},{'bounds':[1,2,3,4]})):
                 state=agent.start(image,Path(d)/str(index),True,'corridor')
+                state['map_provider']='amap'
                 action={'action':'query_map','area_name':'合成区','names':['A & B'],'evidence':'合成图中文字',**extra}
                 class Bad:
                     semantic_review=True
