@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import time
+import socket
+import threading
 from contextlib import contextmanager
 from urllib.parse import urlencode
 
@@ -22,9 +24,16 @@ def fail(code):
     raise MapFetchError('Public research request failed; remote content withheld', code=code)
 
 
+def _remaining(deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        fail('timeout')
+    return remaining
+
+
 @contextmanager
-def _rate_lock():
-    # 跨平台进程锁；锁文件在本应用输出目录，不接受模型路径。
+def _rate_lock(deadline):
+    # 非阻塞锁重探不是网络重试；排队和限频等待均计入同一请求deadline。
     RATE_FILE.parent.mkdir(exist_ok=True)
     fd = os.open(RATE_FILE, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     with os.fdopen(fd, 'r+') as rate:
@@ -33,11 +42,19 @@ def _rate_lock():
             if not rate.read():
                 rate.write('0')
                 rate.flush()
-            rate.seek(0)
-            msvcrt.locking(rate.fileno(), msvcrt.LK_LOCK, 1)
         else:
             import fcntl
-            fcntl.flock(rate, fcntl.LOCK_EX)
+        while True:
+            _remaining(deadline)
+            try:
+                if os.name == 'nt':
+                    rate.seek(0)
+                    msvcrt.locking(rate.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(rate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                time.sleep(min(0.05, _remaining(deadline)))
         try:
             rate.seek(0)
             yield rate
@@ -51,18 +68,35 @@ def _get(host, path):
     # 跨网页 CLI 子进程串行限频；固定可信 HTTPS，不读代理、不跟重定向、不重试。
     if host not in ('nominatim.openstreetmap.org', 'api.openstreetmap.org'):
         fail('invalid_input')
-    with _rate_lock() as rate:
+    deadline = time.monotonic() + TIMEOUT
+    with _rate_lock(deadline) as rate:
         try:
             previous = float(rate.read() or '0')
         except ValueError:
             fail('invalid_input')
-        time.sleep(max(0, 1.1 - (time.time() - previous)))
+        delay = max(0, 1.1 - (time.time() - previous))
+        if delay >= _remaining(deadline):
+            fail('timeout')
+        time.sleep(delay)
         rate.seek(0)
         rate.truncate()
         rate.write(str(time.time()))
         rate.flush()
-        connection = http.client.HTTPSConnection(host, timeout=TIMEOUT)
-        deadline = time.monotonic() + TIMEOUT
+        connection = http.client.HTTPSConnection(host, timeout=_remaining(deadline))
+        response = None
+        def expire():
+            # socket timeout仅限制单次读；主动shutdown还限制慢速响应头/正文总时长。
+            sock = connection.sock
+            if response is not None and response.fp is not None and response.fp.raw is not None:
+                sock = response.fp.raw._sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+        timer = threading.Timer(_remaining(deadline), expire)
+        timer.daemon = True
+        timer.start()
         try:
             connection.request('GET', path, headers={'User-Agent':'MeituanRideResearch/1.0 (interactive route evidence; https://github.com/shadowprompt/meituan-ride-agent)', 'Accept':'application/json', 'Accept-Encoding':'identity'})
             remaining = deadline - time.monotonic()
@@ -71,6 +105,7 @@ def _get(host, path):
             if connection.sock:
                 connection.sock.settimeout(remaining)
             response = connection.getresponse()
+            _remaining(deadline)
             if response.status != 200:
                 fail('http_429' if response.status == 429 else 'redirect_refused' if 300 <= response.status < 400 else 'http_error')
             if response.getheader('Content-Encoding', 'identity') != 'identity' or response.getheader('Content-Type','').split(';')[0].strip() != 'application/json':
@@ -100,8 +135,10 @@ def _get(host, path):
         except TimeoutError:
             fail('timeout')
         except (OSError, http.client.HTTPException):
+            _remaining(deadline)
             fail('network_error')
         finally:
+            timer.cancel()
             connection.close()
 
 
@@ -119,6 +156,8 @@ def archive(folder):
 def refresh(state, folder):
     data = archive(folder)
     map_research.export_osm(data, Path(folder)/'map.osm')
+    for key in ('review_region','research_presented_version','review_presented_version','review_presented_regions'):
+        state.pop(key, None)
     state['research_object_count'] = len(data['objects'])
     state['research_version'] = data['version']
     state['research_osm_sha256'] = hashlib.sha256((Path(folder)/'map.osm').read_bytes()).hexdigest()
@@ -142,10 +181,15 @@ def execute(state, folder, action, budget, consent):
         if not isinstance(query,str) or not 1 <= len(query.strip()) <= 100 or any(ord(c)<32 for c in query):
             fail('invalid_input')
         query = query.strip()
+        # 兼容旧任务：旧版可能把失败尝试写进此列表，按成功审计重建。
+        if 'research_requests' in state:
+            state['research_search_queries'] = list(dict.fromkeys(
+                name.casefold() for item in state['research_requests']
+                if item.get('tool') == 'search_map_evidence' and item.get('outcome') == 'succeeded'
+                for name in item.get('request',{}).get('names',[]) if isinstance(name,str)))
         if budget['searches'] >= MAX_SEARCHES or query.casefold() in state.get('research_search_queries',[]):
             fail('invalid_input')
         budget['searches'] += 1
-        state.setdefault('research_search_queries',[]).append(query.casefold())
         host = 'nominatim.openstreetmap.org'
         path = '/search?' + urlencode({'q':query,'format':'jsonv2','limit':5,'addressdetails':0})
     elif name == 'inspect_map_object':
@@ -180,6 +224,7 @@ def execute(state, folder, action, budget, consent):
             # 原始搜索响应仅本地留证；不把地点中心当作道路节点坐标。
             target = Path(folder)/'research'/('search-'+source['sha256']+'.json')
             target.write_bytes(raw)
+            state.setdefault('research_search_queries',[]).append(query.casefold())
         else:
             manifest = json.loads((Path(folder)/'research-manifest.json').read_text())
             saved = 'research/object-'+source['sha256']+'.json'

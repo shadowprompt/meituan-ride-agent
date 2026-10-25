@@ -488,7 +488,7 @@ class APIPlanner:
                     regions = state.setdefault('review_presented_regions', {}).setdefault(review_version, [])
                     if observation['region_original_xyxy'] not in regions:
                         regions.append(observation['region_original_xyxy'])
-            if state.get('research_online') and state.get('review_region') and any(x.get('type') == 'image_url' for x in route_review.local_feedback(state, folder)):
+            if state.get('research_online') and state.get('review_region',{}).get('research_version') == state.get('research_version') and any(x.get('type') == 'image_url' for x in route_review.local_feedback(state, folder)):
                 state['research_presented_version'] = state.get('research_version')
             if hole_feedback:
                 state['hole_presented'] = dict(state['hole_observation'])
@@ -831,6 +831,8 @@ def run(state, folder, planner, budget=12, consent_map=False):
                         state.update(status='waiting_for_user', question='局部观察已达上限，请提供歧义区域说明；未完成语义确认。')
                         save(state,folder)
                         return state
+                    if state.get('research_online'):
+                        state['review_region']['research_version'] = state['research_version']
                     tool_result = {'tool':name, **result}
                 else:
                     tool_result = route_review.record(state, folder, action)

@@ -76,7 +76,8 @@ class OnlineTests(unittest.TestCase):
             response=Response()
             conn.return_value.getresponse.return_value=response
             self.assertEqual(live._get('nominatim.openstreetmap.org','/search?q=fixture'),b'[]')
-            conn.assert_called_once_with('nominatim.openstreetmap.org',timeout=25)
+            self.assertEqual(conn.call_args.args,('nominatim.openstreetmap.org',))
+            self.assertLessEqual(conn.call_args.kwargs['timeout'],25)
             self.assertIn('User-Agent',conn.return_value.request.call_args.kwargs['headers'])
             response.status=302
             with self.assertRaises(MapFetchError) as caught:
@@ -136,11 +137,70 @@ class OnlineTests(unittest.TestCase):
         self.assertIn('Fixture Road',state['question'])
         self.assertNotIn('secret remote body',(self.folder/'task.json').read_text())
 
+    def test_failed_search_is_audited_but_new_authorization_can_retry(self):
+        with patch.object(live,'_get',side_effect=MapFetchError('withheld',code='http_429')):
+            with self.assertRaises(MapFetchError):
+                live.execute(self.state,self.folder,self.search,self.budget,True)
+        self.assertNotIn('research_search_queries',self.state)
+        self.assertEqual(self.state['research_requests'][0]['outcome'],'failed')
+        self.state['research_search_queries']=[self.search['names'][0].casefold()]  # 旧版失败污染
+        self.budget={'requests':0,'searches':0}  # 下一次显式授权，而非自动重试。
+        self.call(self.search,[])
+        self.assertEqual(len(self.state['research_search_queries']),1)
+
+    @unittest.skipIf(__import__('os').name == 'nt','POSIX flock contention test')
+    def test_lock_wait_is_bounded_and_does_not_send_http(self):
+        import fcntl
+        import time
+        with patch.object(live,'RATE_FILE',self.root/'rate'), patch.object(live,'TIMEOUT',0.06), patch.object(live.http.client,'HTTPSConnection') as conn:
+            with (self.root/'rate').open('w+') as locked:
+                fcntl.flock(locked,fcntl.LOCK_EX)
+                begin=time.monotonic()
+                with self.assertRaises(MapFetchError) as caught:
+                    live._get('nominatim.openstreetmap.org','/search?q=fixture')
+                self.assertLess(time.monotonic()-begin,0.5)
+                self.assertEqual(caught.exception.code,'timeout')
+                conn.assert_not_called()
+
+    def test_same_deadline_interrupts_slow_headers_and_body(self):
+        import threading
+        import time
+        import http.client
+        for stage in ('headers','body'):
+            wake=threading.Event()
+            sock=unittest.mock.Mock()
+            sock.shutdown.side_effect=lambda *args: wake.set()
+            response=unittest.mock.Mock(status=200,fp=None)
+            response.getheader.side_effect=lambda key,default=None: 'application/json' if key=='Content-Type' else default
+            def stall(*args):
+                wake.wait(1)
+                raise http.client.RemoteDisconnected()
+            with patch.object(live,'RATE_FILE',self.root/('rate-'+stage)), patch.object(live,'TIMEOUT',0.06), patch.object(live.http.client,'HTTPSConnection') as conn:
+                conn.return_value.sock=sock
+                if stage=='headers':
+                    conn.return_value.getresponse.side_effect=stall
+                else:
+                    conn.return_value.getresponse.return_value=response
+                    response.read1.side_effect=stall
+                begin=time.monotonic()
+                with self.assertRaises(MapFetchError) as caught:
+                    live._get('nominatim.openstreetmap.org','/search?q=fixture')
+                self.assertEqual(caught.exception.code,'timeout')
+                self.assertLess(time.monotonic()-begin,0.5)
+                conn.return_value.request.assert_called_once()
+
+    def test_refresh_revokes_old_local_observation(self):
+        self.state.update(review_region={'region_original_xyxy':[0,0,10,10]},research_presented_version='old',review_presented_version='old',review_presented_regions={'old':[]})
+        live.refresh(self.state,self.folder)
+        for key in ('review_region','research_presented_version','review_presented_version','review_presented_regions'):
+            self.assertNotIn(key,self.state)
+
     def test_actual_api_branch_marks_crop_presented_only_after_success(self):
         import urllib.request
         self.discover()
         self.call({'action':'inspect_map_object','object_type':'way','object_id':5,'evidence':'Search'}, {'elements':[self.way]+self.nodes})
         ride_agent.route_review.observe(self.state,self.folder,{'action':'observe_region','region':[0,0,60,60],'hypothesis':'uncertain','reason':'Unit local image'})
+        self.state['review_region']['research_version']=self.state['research_version']
         response = unittest.mock.MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps({'choices':[{'message':{'content':json.dumps({'action':'ask','question':'Mock only'})}}]}).encode()
         with patch.dict('os.environ',{'RIDE_API_KEY':'mock-only','RIDE_MODEL':'mock-only'}), patch.object(urllib.request,'build_opener') as opener:
